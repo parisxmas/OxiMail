@@ -9,9 +9,9 @@ layered spam pipeline — backed entirely by **OxiDB**.
 > queue, TLS (STARTTLS + implicit TLS), and the webmail API + frontend
 > are built — mail can be received, read, sent, and relayed over
 > encrypted connections — each with tests. The spam pipeline's
-> connection-time stage (rate limiting, DNS blocklists, greylisting) and
-> content stage (Rspamd) are built; its envelope (SPF/DKIM/DMARC) stage
-> is not. The webmail API does login, read, send, flag changes, move, and
+> three stages — connection-time (rate limiting, DNS blocklists,
+> greylisting), envelope (SPF/DKIM/DMARC), and content (Rspamd) — are
+> built. The webmail API does login, read, send, flag changes, move, and
 > delete — no search or attachment download yet. The IMAP server still
 > stubs SEARCH / COPY / mailbox DELETE / RENAME. See "Roadmap" below.
 
@@ -67,7 +67,10 @@ first non-Accept verdict:
 1. *connection-time* — rate limiting, DNS blocklists, greylisting.
    **Built.** State is in memory (disposable: losing it just
    re-greylists); a background sweeper bounds it.
-2. *envelope* — SPF / DKIM / DMARC. *Planned.*
+2. *envelope* — SPF / DKIM / DMARC. **Built.** Rejects only on a DMARC
+   `p=reject` failure (neither SPF nor DKIM passes, aligned with the
+   From domain); a `p=quarantine`, `p=none`, missing record, or DNS
+   error all accept. Fails open.
 3. *content* — Rspamd over HTTP. **Built**, and active when
    `OXIMAIL_RSPAMD_URL` is set: the message is POSTed to Rspamd's
    `/checkv2`, and its action maps to accept / greylist / reject. It
@@ -167,10 +170,9 @@ skipped.
    *Done.* Still to do: bounce messages for permanent failures.
 5. ~~TLS — STARTTLS on 25 / 587 / 143, implicit TLS on 465 / 993,
    cleartext auth refused once a certificate is configured.~~ *Done.*
-6. Spam pipeline — *connection-time stage (rate limiting, DNS
-   blocklists, greylisting) and content stage (Rspamd over HTTP) done.*
-   Still to do: the envelope stage — SPF / DKIM / DMARC
-   (`emersion/go-msgauth` + an SPF library).
+6. ~~Spam pipeline — connection-time (rate limiting, DNS blocklists,
+   greylisting), envelope (SPF / DKIM / DMARC), and content (Rspamd)
+   stages.~~ *Done.*
 7. Webmail — *backend API done (login, mailbox / message listing,
    parsed message fetch, send, flag changes, move, delete) and an
    Angular 21 SPA frontend (`web/`) over it.* Still to do: search,

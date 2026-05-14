@@ -6,13 +6,13 @@
 //  2. envelope        — SPF, DKIM, DMARC
 //  3. content         — Rspamd over HTTP
 //
-// Stages 1 and 3 are implemented; stage 2 (envelope) is not yet. Stage 1
-// (ratelimit.go, dnsbl.go, greylist.go) keeps its state in memory, which
-// is fine because it is disposable — losing it on a restart just
-// re-greylists and resets counters. Stage 3 (rspamd.go) runs only when a
+// All three stages are implemented. Stage 1 (ratelimit.go, dnsbl.go,
+// greylist.go) keeps its state in memory, which is fine because it is
+// disposable — losing it on a restart just re-greylists and resets
+// counters. Stage 2 (envelope.go) runs SPF / DKIM / DMARC and rejects
+// only on a DMARC p=reject failure. Stage 3 (rspamd.go) runs only when a
 // Rspamd endpoint is configured.
 //
-// TODO: envelope stage — SPF / DKIM / DMARC (emersion/go-msgauth).
 // TODO: move stage-1 state to OxiMem so a multi-instance deployment
 // shares one view of each sender.
 package spam
@@ -57,6 +57,7 @@ type Pipeline struct {
 	rateLimit *rateLimiter
 	dnsbl     *dnsblChecker
 	greylist  *greylister
+	envelope  *envelopeChecker
 	// rspamd is the content stage; nil when no Rspamd endpoint is
 	// configured.
 	rspamd *rspamdChecker
@@ -69,6 +70,7 @@ func New(rspamdURL string) *Pipeline {
 		rateLimit: newRateLimiter(defaultRateLimit, defaultRateWindow),
 		dnsbl:     newDNSBLChecker(defaultDNSBLZones),
 		greylist:  newGreylister(defaultGreylistDelay),
+		envelope:  newEnvelopeChecker(),
 	}
 	if rspamdURL != "" {
 		p.rspamd = newRspamdChecker(rspamdURL)
@@ -124,7 +126,10 @@ func (p *Pipeline) Check(remoteIP, mailFrom string, rcptTo []string, raw []byte)
 	if v := p.checkConnection(remoteIP, mailFrom); v != Accept {
 		return v, nil
 	}
-	// Stage 2 — envelope (SPF / DKIM / DMARC): TODO.
+	// Stage 2 — envelope (SPF / DKIM / DMARC).
+	if v := p.envelope.check(remoteIP, mailFrom, raw); v != Accept {
+		return v, nil
+	}
 	// Stage 3 — content: Rspamd, when an endpoint is configured.
 	if p.rspamd != nil {
 		if v := p.rspamd.check(remoteIP, mailFrom, rcptTo, raw); v != Accept {
