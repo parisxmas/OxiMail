@@ -1,10 +1,13 @@
 module github.com/parisxmas/OxiMail
 
-go 1.23
+go 1.25.0
 
 require (
+	github.com/emersion/go-imap/v2 v2.0.0-beta.8
+	github.com/emersion/go-message v0.18.2
 	github.com/emersion/go-smtp v0.24.0
 	github.com/parisxmas/OxiDB/go/oxidb v0.0.0
+	golang.org/x/crypto v0.51.0
 )
 
 require (

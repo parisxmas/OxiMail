@@ -55,6 +55,12 @@ const BlobBucket = "message-bodies"
 // matches. Callers should test it with errors.Is.
 var ErrNotFound = errors.New("store: not found")
 
+// ErrAuthFailed is returned by Authenticate when an address is unknown,
+// inactive, or the password does not match. The cause is deliberately
+// not distinguished, so a caller cannot use it to probe which addresses
+// exist.
+var ErrAuthFailed = errors.New("store: authentication failed")
+
 // Store is the handle every component uses to reach OxiDB.
 type Store struct {
 	db *oxidb.Client

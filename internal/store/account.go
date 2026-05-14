@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -124,6 +125,26 @@ func (s *Store) GetAccount(address string) (*Account, error) {
 		return nil, err
 	}
 	return &a, nil
+}
+
+// Authenticate looks an account up by address and checks the password
+// against its stored bcrypt hash. It returns the account on success and
+// ErrAuthFailed for any failure — unknown address, inactive account, or
+// wrong password — so the caller cannot tell those cases apart. A
+// non-auth infrastructure error (e.g. OxiDB unreachable) is returned as
+// itself.
+func (s *Store) Authenticate(address, password string) (*Account, error) {
+	acc, err := s.GetAccount(address)
+	if errors.Is(err, ErrNotFound) {
+		return nil, ErrAuthFailed
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !acc.Active || !VerifyPassword(acc.PasswordHash, password) {
+		return nil, ErrAuthFailed
+	}
+	return acc, nil
 }
 
 // GetAccountByID looks an account up by its OxiDB id.

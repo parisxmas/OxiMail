@@ -117,6 +117,23 @@ func (s *Store) EnsureDefaultMailboxes(accountID uint64) error {
 	return nil
 }
 
+// SetMailboxSubscribed updates a mailbox's IMAP subscription state
+// (the SUBSCRIBE / UNSUBSCRIBE commands).
+func (s *Store) SetMailboxSubscribed(mailboxID uint64, subscribed bool) error {
+	doc, err := s.db.FindAndModify(
+		CollMailboxes,
+		map[string]any{"_id": mailboxID},
+		map[string]any{"$set": map[string]any{"subscribed": subscribed}},
+	)
+	if err != nil {
+		return fmt.Errorf("store: set subscribed on mailbox %d: %w", mailboxID, err)
+	}
+	if doc == nil {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // NextUID atomically allocates the next IMAP UID for a mailbox and
 // returns it.
 //

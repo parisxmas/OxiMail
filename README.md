@@ -5,10 +5,11 @@ submission), IMAP, and a layered spam pipeline — backed entirely by
 **OxiDB**.
 
 > Status: **early.** The structure, configuration, component wiring, the
-> OxiDB-backed store layer, and the inbound SMTP (MX) server are built,
-> each with integration tests against a live `oxidb-server`. The IMAP,
-> spam-pipeline, outbound-queue, and submission implementations are
-> still stubs. See "Roadmap" below.
+> OxiDB-backed store layer, the inbound SMTP (MX) server, and the IMAP
+> server are built, each with integration tests against a live
+> `oxidb-server`. The IMAP server still stubs SEARCH, COPY, and mailbox
+> DELETE / RENAME. The spam-pipeline, outbound-queue, and submission
+> implementations are stubs. See "Roadmap" below.
 
 ## Architecture
 
@@ -76,9 +77,10 @@ Configuration is via `OXIMAIL_*` environment variables — see
 
 The integration tests boot a throwaway `oxidb-server` and exercise a
 layer end to end — the store (schema, entity CRUD, cascade delete,
-concurrent UID allocation) and the SMTP server (a real SMTP client
-delivering into a mailbox, and recipient rejection). They are gated
-behind a build tag:
+concurrent UID allocation), the SMTP server (a real SMTP client
+delivering into a mailbox, and recipient rejection), and the IMAP
+server (a real IMAP client doing LOGIN / LIST / SELECT / FETCH / STORE /
+APPEND / EXPUNGE). They are gated behind a build tag:
 
 ```sh
 go test -tags=integration ./internal/...
@@ -95,7 +97,9 @@ skipped.
    an integration test against a live `oxidb-server`.~~ *Done.*
 2. ~~Inbound SMTP (MX) on `emersion/go-smtp` — spam-pipeline call,
    recipient resolution, delivery into mailboxes.~~ *Done.*
-3. IMAP on `emersion/go-imap`.
+3. ~~IMAP on `emersion/go-imap/v2` — LOGIN, LIST, SELECT, STATUS, FETCH,
+   STORE, APPEND, EXPUNGE.~~ *Done.* Still to do: SEARCH, COPY, mailbox
+   DELETE / RENAME, SASL AUTHENTICATE, and STARTTLS / IMAPS.
 4. Spam pipeline — DNSBL / greylisting / rate limits, then SPF/DKIM/DMARC
    (`emersion/go-msgauth`), then Rspamd.
 5. Outbound queue + submission (port 587).
