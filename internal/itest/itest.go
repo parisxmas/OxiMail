@@ -19,6 +19,24 @@ import (
 	"time"
 )
 
+// Option tweaks how StartOxiDB boots the server.
+type Option func(*config)
+
+type config struct {
+	extraEnv []string
+}
+
+// LazySync starts the server with OXIDB_LAZY_SYNC=true: commits are
+// batched by a background thread instead of being fsync'd per write.
+//
+// This trades crash durability for speed. Use it only for tests that
+// exercise in-memory behaviour — logical correctness, atomicity,
+// concurrency — and not durability across a restart. Atomicity is
+// lock-based in OxiDB, so it holds regardless of the sync mode.
+func LazySync() Option {
+	return func(c *config) { c.extraEnv = append(c.extraEnv, "OXIDB_LAZY_SYNC=true") }
+}
+
 // StartOxiDB boots an oxidb-server in a fresh temp directory on a free
 // port and registers its teardown with t. If the server binary cannot
 // be found the test is skipped, not failed. It returns the host and
@@ -26,9 +44,14 @@ import (
 //
 // The binary is located at $OXIDB_BIN, then at the sibling OxiDB
 // checkout's target/{release,debug}/oxidb-server.
-func StartOxiDB(t *testing.T) (host string, port int) {
+func StartOxiDB(t *testing.T, opts ...Option) (host string, port int) {
 	t.Helper()
 	bin := findOxiDBBinary(t)
+
+	var cfg config
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 
 	port = FreePort(t)
 	cmd := exec.Command(bin)
@@ -38,6 +61,7 @@ func StartOxiDB(t *testing.T) (host string, port int) {
 		"OXIDB_S3_PORT=0", // S3 surface off — blob ops go over the native protocol
 		"OXIDB_IDLE_TIMEOUT=120",
 	)
+	cmd.Env = append(cmd.Env, cfg.extraEnv...)
 	cmd.Stdout = os.Stderr // surfaced by `go test` only on failure
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {

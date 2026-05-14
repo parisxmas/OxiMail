@@ -22,7 +22,11 @@ import (
 )
 
 func TestStore(t *testing.T) {
-	host, port := itest.StartOxiDB(t)
+	// These tests cover logical correctness, atomicity, and concurrency
+	// — not durability across a restart — so lazy sync is safe here and
+	// keeps the 800-way NextUID contention test off the per-write fsync
+	// path.
+	host, port := itest.StartOxiDB(t, itest.LazySync())
 
 	st, err := store.Open(host, port)
 	if err != nil {
