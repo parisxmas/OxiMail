@@ -4,6 +4,8 @@
 package config
 
 import (
+	"crypto/tls"
+	"fmt"
 	"os"
 	"strconv"
 )
@@ -19,6 +21,16 @@ type Config struct {
 	SubmissionAddr string
 	// IMAPAddr — mailbox access, conventionally port 143.
 	IMAPAddr string
+	// SMTPSAddr / IMAPSAddr — implicit-TLS listeners, conventionally
+	// ports 465 and 993. Started only when a TLS certificate is set.
+	SMTPSAddr string
+	IMAPSAddr string
+
+	// TLSCert / TLSKey — PEM file paths for STARTTLS and implicit TLS.
+	// When unset, TLS is disabled: STARTTLS is not advertised and the
+	// implicit-TLS listeners are not started.
+	TLSCert string
+	TLSKey  string
 
 	// OxiDB — the backing store (collections + blob store + OxiMem).
 	OxiDBHost string
@@ -36,10 +48,35 @@ func Load() Config {
 		SMTPAddr:       env("OXIMAIL_SMTP_ADDR", ":25"),
 		SubmissionAddr: env("OXIMAIL_SUBMISSION_ADDR", ":587"),
 		IMAPAddr:       env("OXIMAIL_IMAP_ADDR", ":143"),
+		SMTPSAddr:      env("OXIMAIL_SMTPS_ADDR", ":465"),
+		IMAPSAddr:      env("OXIMAIL_IMAPS_ADDR", ":993"),
+		TLSCert:        env("OXIMAIL_TLS_CERT", ""),
+		TLSKey:         env("OXIMAIL_TLS_KEY", ""),
 		OxiDBHost:      env("OXIMAIL_OXIDB_HOST", "127.0.0.1"),
 		OxiDBPort:      envInt("OXIMAIL_OXIDB_PORT", 4444),
 		RspamdURL:      env("OXIMAIL_RSPAMD_URL", ""),
 	}
+}
+
+// TLSConfig builds the server TLS configuration from the configured
+// certificate and key. It returns (nil, nil) when neither is set — TLS
+// is simply disabled — and an error only when one is set without the
+// other, or the files will not load.
+func (c Config) TLSConfig() (*tls.Config, error) {
+	if c.TLSCert == "" && c.TLSKey == "" {
+		return nil, nil
+	}
+	if c.TLSCert == "" || c.TLSKey == "" {
+		return nil, fmt.Errorf("config: OXIMAIL_TLS_CERT and OXIMAIL_TLS_KEY must be set together")
+	}
+	cert, err := tls.LoadX509KeyPair(c.TLSCert, c.TLSKey)
+	if err != nil {
+		return nil, fmt.Errorf("config: load TLS keypair: %w", err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }
 
 func env(key, def string) string {

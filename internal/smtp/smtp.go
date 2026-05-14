@@ -1,19 +1,22 @@
-// Package smtp is the inbound SMTP (MX) server: it accepts mail on
-// port 25, runs the spam pipeline on each message, resolves recipients
-// against the store, and files accepted messages into the right
-// mailboxes. It does not relay — a recipient that is not a local mailbox
-// (or an alias to one) is rejected.
+// Package smtp provides OxiMail's two SMTP listeners — the inbound MX
+// (New) and the mail submission server (NewSubmission) — both built on
+// emersion/go-smtp and sharing the lifecycle in this file.
 //
-// Submission (authenticated outbound on port 587) is a near-twin of this
-// server and will share most of its machinery; it is added in a later
-// phase and will additionally implement SMTP AUTH.
+// The inbound MX accepts mail on port 25, runs the spam pipeline on each
+// message, resolves recipients against the store, and files accepted
+// messages into the right mailboxes. It does not relay — a recipient
+// that is not a local mailbox (or an alias to one) is rejected. The
+// submission server (submission.go) requires SMTP AUTH and relays.
 //
-// Built on emersion/go-smtp.
+// When a TLS configuration is supplied, STARTTLS is advertised on the
+// plaintext listeners; NewSubmissionTLS additionally serves implicit
+// TLS (SMTPS).
 package smtp
 
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"log"
@@ -42,20 +45,24 @@ const (
 )
 
 // Server is an SMTP listener — either the inbound MX (New) or the
-// submission server (NewSubmission). The two share this lifecycle; they
-// differ only in their go-smtp backend.
+// submission server (NewSubmission / NewSubmissionTLS). They share this
+// lifecycle; they differ only in their go-smtp backend and in whether
+// the listener is plaintext (with optional STARTTLS) or implicit TLS.
 type Server struct {
-	name string // "smtp" or "submission", for log lines
-	addr string
-	srv  *gosmtp.Server
+	name        string // "smtp", "submission", "submission-tls" — for log lines
+	addr        string
+	srv         *gosmtp.Server
+	implicitTLS bool // serve TLS from the first byte, rather than STARTTLS-on-plaintext
 }
 
 // newServer builds a go-smtp server with OxiMail's shared tuning, for
-// the given backend.
-func newServer(addr, hostname string, be gosmtp.Backend) *gosmtp.Server {
+// the given backend. A non-nil tlsConfig enables STARTTLS (and, for the
+// implicit-TLS variants, the encrypted listener).
+func newServer(addr, hostname string, be gosmtp.Backend, tlsConfig *tls.Config) *gosmtp.Server {
 	srv := gosmtp.NewServer(be)
 	srv.Addr = addr
 	srv.Domain = hostname
+	srv.TLSConfig = tlsConfig
 	srv.ReadTimeout = readTimeout
 	srv.WriteTimeout = writeTimeout
 	srv.MaxMessageBytes = maxMessageBytes
@@ -65,12 +72,12 @@ func newServer(addr, hostname string, be gosmtp.Backend) *gosmtp.Server {
 }
 
 // New builds the inbound SMTP (MX) server bound to `addr`, announcing
-// `hostname` in its greeting.
-func New(addr, hostname string, st *store.Store, sp *spam.Pipeline) *Server {
+// `hostname` in its greeting. A non-nil tlsConfig advertises STARTTLS.
+func New(addr, hostname string, st *store.Store, sp *spam.Pipeline, tlsConfig *tls.Config) *Server {
 	return &Server{
 		name: "smtp",
 		addr: addr,
-		srv:  newServer(addr, hostname, &backend{store: st, spam: sp}),
+		srv:  newServer(addr, hostname, &backend{store: st, spam: sp}, tlsConfig),
 	}
 }
 
@@ -79,7 +86,12 @@ func New(addr, hostname string, st *store.Store, sp *spam.Pipeline) *Server {
 func (s *Server) Start(ctx context.Context) error {
 	errc := make(chan error, 1)
 	go func() {
-		err := s.srv.ListenAndServe()
+		var err error
+		if s.implicitTLS {
+			err = s.srv.ListenAndServeTLS()
+		} else {
+			err = s.srv.ListenAndServe()
+		}
 		if errors.Is(err, gosmtp.ErrServerClosed) {
 			err = nil
 		}

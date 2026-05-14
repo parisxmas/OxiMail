@@ -10,6 +10,7 @@ package imap_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"testing"
 	"time"
@@ -69,7 +70,7 @@ func TestIMAP(t *testing.T) {
 		t.Fatalf("seed INBOX message: %v", err)
 	}
 
-	addr := startIMAP(t, st)
+	addr := startIMAP(t, st, nil, false)
 
 	t.Run("rejects a bad password", func(t *testing.T) {
 		c := dial(t, addr)
@@ -220,12 +221,89 @@ func TestIMAP(t *testing.T) {
 	})
 }
 
+// TestIMAPTLS covers the IMAP server with TLS configured: STARTTLS on
+// the plaintext listener, the implicit-TLS listener, and that cleartext
+// LOGIN is refused once TLS is available.
+func TestIMAPTLS(t *testing.T) {
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	hash, err := store.HashPassword("s3cret")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	acc, err := st.CreateAccount("tls-user@oximail.test", hash, 0)
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if err := st.EnsureDefaultMailboxes(acc.ID); err != nil {
+		t.Fatalf("ensure mailboxes: %v", err)
+	}
+
+	certFile, keyFile := itest.WriteSelfSignedCert(t)
+	serverTLS := itest.ServerTLS(t, certFile, keyFile)
+	clientOpts := &imapclient.Options{TLSConfig: &tls.Config{InsecureSkipVerify: true}}
+
+	t.Run("STARTTLS login and select", func(t *testing.T) {
+		addr := startIMAP(t, st, serverTLS, false)
+		c, err := imapclient.DialStartTLS(addr, clientOpts)
+		if err != nil {
+			t.Fatalf("dial STARTTLS: %v", err)
+		}
+		defer c.Close()
+		if err := c.Login("tls-user@oximail.test", "s3cret").Wait(); err != nil {
+			t.Fatalf("login over STARTTLS: %v", err)
+		}
+		if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+			t.Fatalf("select over STARTTLS: %v", err)
+		}
+	})
+
+	t.Run("implicit TLS login", func(t *testing.T) {
+		addr := startIMAP(t, st, serverTLS, true)
+		c, err := imapclient.DialTLS(addr, clientOpts)
+		if err != nil {
+			t.Fatalf("dial implicit TLS: %v", err)
+		}
+		defer c.Close()
+		if err := c.Login("tls-user@oximail.test", "s3cret").Wait(); err != nil {
+			t.Fatalf("login over implicit TLS: %v", err)
+		}
+	})
+
+	t.Run("cleartext login refused when TLS is available", func(t *testing.T) {
+		addr := startIMAP(t, st, serverTLS, false)
+		c, err := imapclient.DialInsecure(addr, nil)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer c.Close()
+		if err := c.Login("tls-user@oximail.test", "s3cret").Wait(); err == nil {
+			t.Error("cleartext LOGIN succeeded, want rejection while TLS is available")
+		}
+	})
+}
+
 // startIMAP launches the IMAP server on a free port, wired to st, and
-// returns its address. It is shut down when the test finishes.
-func startIMAP(t *testing.T, st *store.Store) string {
+// returns its address. A non-nil tlsConfig enables STARTTLS; implicit
+// additionally serves implicit TLS (IMAPS). It is shut down when the
+// test finishes.
+func startIMAP(t *testing.T, st *store.Store, tlsConfig *tls.Config, implicit bool) string {
 	t.Helper()
 	addr := fmt.Sprintf("127.0.0.1:%d", itest.FreePort(t))
-	srv := imap.New(addr, st)
+	var srv *imap.Server
+	if implicit {
+		srv = imap.NewTLS(addr, st, tlsConfig)
+	} else {
+		srv = imap.New(addr, st, tlsConfig)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)

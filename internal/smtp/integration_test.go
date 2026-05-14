@@ -105,7 +105,7 @@ func TestInboundSMTP(t *testing.T) {
 func startSMTP(t *testing.T, st *store.Store) string {
 	t.Helper()
 	addr := fmt.Sprintf("127.0.0.1:%d", itest.FreePort(t))
-	srv := smtp.New(addr, "oximail.test", st, spam.New(""))
+	srv := smtp.New(addr, "oximail.test", st, spam.New(""), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)

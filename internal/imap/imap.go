@@ -13,14 +13,18 @@
 // TODO: real-time cross-connection updates (IDLE seeing freshly
 // delivered mail) need either polling OxiDB or an OxiMem notification
 // channel.
-// TODO: STARTTLS / IMAPS, and SASL AUTHENTICATE — only LOGIN today.
+// TODO: SASL AUTHENTICATE — only LOGIN today.
 // TODO: SEARCH, COPY, and mailbox DELETE / RENAME are not implemented.
+//
+// When a TLS configuration is supplied, STARTTLS is advertised on the
+// plaintext listener; NewTLS additionally serves implicit TLS (IMAPS).
 //
 // Built on emersion/go-imap/v2.
 package imap
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log"
 	"net"
@@ -35,15 +39,21 @@ import (
 // mailboxDelim is the IMAP hierarchy separator OxiMail uses.
 const mailboxDelim = '/'
 
-// Server is the IMAP listener.
+// Server is the IMAP listener — plaintext (New, with optional STARTTLS)
+// or implicit TLS (NewTLS).
 type Server struct {
-	addr string
-	srv  *imapserver.Server
-	stop sync.Once
+	name        string // "imap" or "imap-tls", for log lines
+	addr        string
+	srv         *imapserver.Server
+	implicitTLS bool
+	stop        sync.Once
 }
 
-// New builds the IMAP server bound to `addr`.
-func New(addr string, st *store.Store) *Server {
+// New builds the IMAP server bound to `addr`. A non-nil tlsConfig
+// advertises STARTTLS and requires LOGIN to run over an encrypted
+// connection; with no TLS configured at all, cleartext LOGIN is
+// permitted so the server still works for local development.
+func New(addr string, st *store.Store, tlsConfig *tls.Config) *Server {
 	srv := imapserver.New(&imapserver.Options{
 		NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
 			return &session{store: st}, nil, nil
@@ -54,20 +64,35 @@ func New(addr string, st *store.Store) *Server {
 			imap.CapUnselect:  {},
 			imap.CapUIDPlus:   {},
 		},
-		// No TLS is configured yet, so LOGIN has to be allowed in the
-		// clear. TODO: ship STARTTLS / IMAPS and drop InsecureAuth.
-		InsecureAuth: true,
+		TLSConfig:    tlsConfig,
+		InsecureAuth: tlsConfig == nil,
 	})
-	return &Server{addr: addr, srv: srv}
+	return &Server{name: "imap", addr: addr, srv: srv}
+}
+
+// NewTLS builds the implicit-TLS IMAP server (IMAPS, conventionally port
+// 993): the connection is encrypted from the first byte. tlsConfig is
+// required.
+func NewTLS(addr string, st *store.Store, tlsConfig *tls.Config) *Server {
+	s := New(addr, st, tlsConfig)
+	s.name = "imap-tls"
+	s.implicitTLS = true
+	return s
 }
 
 // Start listens and serves until `ctx` is cancelled, then shuts the
 // server down.
 func (s *Server) Start(ctx context.Context) error {
 	errc := make(chan error, 1)
-	go func() { errc <- s.srv.ListenAndServe(s.addr) }()
+	go func() {
+		if s.implicitTLS {
+			errc <- s.srv.ListenAndServeTLS(s.addr)
+		} else {
+			errc <- s.srv.ListenAndServe(s.addr)
+		}
+	}()
 
-	log.Printf("imap: listening on %s", s.addr)
+	log.Printf("%s: listening on %s", s.name, s.addr)
 	select {
 	case <-ctx.Done():
 		return s.Stop()
@@ -86,7 +111,7 @@ func (s *Server) Start(ctx context.Context) error {
 func (s *Server) Stop() error {
 	s.stop.Do(func() {
 		_ = s.srv.Close()
-		log.Print("imap: stopped")
+		log.Printf("%s: stopped", s.name)
 	})
 	return nil
 }

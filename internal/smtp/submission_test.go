@@ -7,6 +7,8 @@ package smtp_test
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -46,7 +48,7 @@ func TestSubmission(t *testing.T) {
 		t.Fatalf("create local recipient account: %v", err)
 	}
 
-	addr := startSubmission(t, st)
+	addr := startSubmission(t, st, nil, false)
 
 	t.Run("rejects MAIL before AUTH", func(t *testing.T) {
 		c, err := gosmtp.Dial(addr)
@@ -121,12 +123,119 @@ func TestSubmission(t *testing.T) {
 	})
 }
 
+// TestSubmissionTLS covers the submission server with TLS configured:
+// STARTTLS on the plaintext listener, and the implicit-TLS listener.
+func TestSubmissionTLS(t *testing.T) {
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	hash, err := store.HashPassword("s3cret")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	acc, err := st.CreateAccount("tls-user@oximail.test", hash, 0)
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+
+	certFile, keyFile := itest.WriteSelfSignedCert(t)
+	serverTLS := itest.ServerTLS(t, certFile, keyFile)
+	clientTLS := &tls.Config{InsecureSkipVerify: true}
+
+	const msg = "From: tls-user@oximail.test\r\nSubject: over TLS\r\n\r\nsecure\r\n"
+
+	t.Run("STARTTLS: cleartext AUTH refused, encrypted AUTH works", func(t *testing.T) {
+		addr := startSubmission(t, st, serverTLS, false)
+
+		// With TLS available, AUTH must not be accepted in the clear.
+		plain, err := gosmtp.Dial(addr)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		if err := plain.Auth(sasl.NewPlainClient("", "tls-user@oximail.test", "s3cret")); err == nil {
+			t.Error("cleartext AUTH succeeded, want rejection before STARTTLS")
+		}
+		_ = plain.Close()
+
+		// Over STARTTLS it works.
+		before := inboxCount(t, st, acc.ID)
+		c, err := gosmtp.DialStartTLS(addr, clientTLS)
+		if err != nil {
+			t.Fatalf("dial STARTTLS: %v", err)
+		}
+		defer c.Close()
+		if err := c.Auth(sasl.NewPlainClient("", "tls-user@oximail.test", "s3cret")); err != nil {
+			t.Fatalf("auth over STARTTLS: %v", err)
+		}
+		if err := c.SendMail("tls-user@oximail.test",
+			[]string{"tls-user@oximail.test"}, strings.NewReader(msg)); err != nil {
+			t.Fatalf("send over STARTTLS: %v", err)
+		}
+		if got := inboxCount(t, st, acc.ID); got != before+1 {
+			t.Fatalf("INBOX count = %d, want %d after one delivery", got, before+1)
+		}
+	})
+
+	t.Run("implicit TLS: AUTH and send work", func(t *testing.T) {
+		addr := startSubmission(t, st, serverTLS, true)
+
+		before := inboxCount(t, st, acc.ID)
+		c, err := gosmtp.DialTLS(addr, clientTLS)
+		if err != nil {
+			t.Fatalf("dial implicit TLS: %v", err)
+		}
+		defer c.Close()
+		if err := c.Auth(sasl.NewPlainClient("", "tls-user@oximail.test", "s3cret")); err != nil {
+			t.Fatalf("auth over implicit TLS: %v", err)
+		}
+		if err := c.SendMail("tls-user@oximail.test",
+			[]string{"tls-user@oximail.test"}, strings.NewReader(msg)); err != nil {
+			t.Fatalf("send over implicit TLS: %v", err)
+		}
+		if got := inboxCount(t, st, acc.ID); got != before+1 {
+			t.Fatalf("INBOX count = %d, want %d after one delivery", got, before+1)
+		}
+	})
+}
+
+// inboxCount returns how many messages are in an account's INBOX,
+// treating a not-yet-created INBOX as empty.
+func inboxCount(t *testing.T, st *store.Store, accountID uint64) int {
+	t.Helper()
+	inbox, err := st.GetMailboxByName(accountID, "INBOX")
+	if errors.Is(err, store.ErrNotFound) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("get INBOX: %v", err)
+	}
+	msgs, err := st.ListMessages(inbox.ID)
+	if err != nil {
+		t.Fatalf("list INBOX: %v", err)
+	}
+	return len(msgs)
+}
+
 // startSubmission launches the submission server on a free port, wired
-// to st, and returns its address. It is shut down when the test ends.
-func startSubmission(t *testing.T, st *store.Store) string {
+// to st, and returns its address. A non-nil tlsConfig enables STARTTLS;
+// implicit additionally serves implicit TLS (SMTPS). It is shut down
+// when the test ends.
+func startSubmission(t *testing.T, st *store.Store, tlsConfig *tls.Config, implicit bool) string {
 	t.Helper()
 	addr := fmt.Sprintf("127.0.0.1:%d", itest.FreePort(t))
-	srv := smtp.NewSubmission(addr, "oximail.test", st)
+	var srv *smtp.Server
+	if implicit {
+		srv = smtp.NewSubmissionTLS(addr, "oximail.test", st, tlsConfig)
+	} else {
+		srv = smtp.NewSubmission(addr, "oximail.test", st, tlsConfig)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)

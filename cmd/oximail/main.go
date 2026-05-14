@@ -20,12 +20,34 @@ import (
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
+// component is a long-running server or worker. Start blocks until the
+// context is cancelled or the component fails; Stop triggers a graceful
+// shutdown.
+type component interface {
+	Start(context.Context) error
+	Stop() error
+}
+
+// named pairs a component with the label used for its log lines.
+type named struct {
+	name string
+	component
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("oximail: ")
 
 	cfg := config.Load()
 	log.Printf("starting — hostname=%s oxidb=%s:%d", cfg.Hostname, cfg.OxiDBHost, cfg.OxiDBPort)
+
+	tlsConfig, err := cfg.TLSConfig()
+	if err != nil {
+		log.Fatalf("tls: %v", err)
+	}
+	if tlsConfig == nil {
+		log.Print("TLS not configured (set OXIMAIL_TLS_CERT and OXIMAIL_TLS_KEY) — running without TLS")
+	}
 
 	// Storage — everything sits on OxiDB.
 	st, err := store.Open(cfg.OxiDBHost, cfg.OxiDBPort)
@@ -37,12 +59,21 @@ func main() {
 		log.Fatalf("schema: %v", err)
 	}
 
-	// Components.
+	// Components, in start order. The implicit-TLS surfaces are only
+	// brought up when a certificate is configured.
 	pipeline := spam.New(cfg.RspamdURL)
-	smtpSrv := smtp.New(cfg.SMTPAddr, cfg.Hostname, st, pipeline)
-	subSrv := smtp.NewSubmission(cfg.SubmissionAddr, cfg.Hostname, st)
-	imapSrv := imap.New(cfg.IMAPAddr, st)
-	outQueue := queue.New(st, cfg.Hostname)
+	components := []named{
+		{"smtp", smtp.New(cfg.SMTPAddr, cfg.Hostname, st, pipeline, tlsConfig)},
+		{"submission", smtp.NewSubmission(cfg.SubmissionAddr, cfg.Hostname, st, tlsConfig)},
+		{"imap", imap.New(cfg.IMAPAddr, st, tlsConfig)},
+	}
+	if tlsConfig != nil {
+		components = append(components,
+			named{"submission-tls", smtp.NewSubmissionTLS(cfg.SMTPSAddr, cfg.Hostname, st, tlsConfig)},
+			named{"imap-tls", imap.NewTLS(cfg.IMAPSAddr, st, tlsConfig)},
+		)
+	}
+	components = append(components, named{"queue", queue.New(st, cfg.Hostname)})
 
 	// Run each component until the process is asked to stop.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -58,17 +89,15 @@ func main() {
 			}
 		}()
 	}
-	run("smtp", smtpSrv.Start)
-	run("submission", subSrv.Start)
-	run("imap", imapSrv.Start)
-	run("queue", outQueue.Start)
+	for _, c := range components {
+		run(c.name, c.Start)
+	}
 
 	<-ctx.Done()
 	log.Print("shutdown signal received")
-	_ = smtpSrv.Stop()
-	_ = subSrv.Stop()
-	_ = imapSrv.Stop()
-	_ = outQueue.Stop()
+	for _, c := range components {
+		_ = c.Stop()
+	}
 	wg.Wait()
 	log.Print("stopped")
 }

@@ -1,6 +1,7 @@
 package smtp
 
 import (
+	"crypto/tls"
 	"io"
 	"log"
 
@@ -22,12 +23,24 @@ var errAuthRequired = &gosmtp.SMTPError{
 // `addr` — conventionally port 587. Unlike the inbound MX, every client
 // must authenticate; and it relays — recipients that are local mailboxes
 // are filed directly, the rest are handed to the outbound queue.
-func NewSubmission(addr, hostname string, st *store.Store) *Server {
-	srv := newServer(addr, hostname, &submissionBackend{store: st})
-	// No TLS is configured yet, so AUTH has to be allowed in the clear.
-	// TODO: ship STARTTLS and drop AllowInsecureAuth.
-	srv.AllowInsecureAuth = true
+//
+// A non-nil tlsConfig advertises STARTTLS and requires AUTH to run over
+// an encrypted connection. With no TLS configured at all, cleartext
+// AUTH is permitted so the server still works for local development.
+func NewSubmission(addr, hostname string, st *store.Store, tlsConfig *tls.Config) *Server {
+	srv := newServer(addr, hostname, &submissionBackend{store: st}, tlsConfig)
+	srv.AllowInsecureAuth = tlsConfig == nil
 	return &Server{name: "submission", addr: addr, srv: srv}
+}
+
+// NewSubmissionTLS builds the implicit-TLS submission server (SMTPS,
+// conventionally port 465): the connection is encrypted from the first
+// byte, with no STARTTLS upgrade step. tlsConfig is required.
+func NewSubmissionTLS(addr, hostname string, st *store.Store, tlsConfig *tls.Config) *Server {
+	s := NewSubmission(addr, hostname, st, tlsConfig)
+	s.name = "submission-tls"
+	s.implicitTLS = true
+	return s
 }
 
 type submissionBackend struct {
