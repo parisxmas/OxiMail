@@ -8,10 +8,10 @@ submission), IMAP, and a layered spam pipeline — backed entirely by
 > IMAP server, the submission server (port 587), the outbound delivery
 > queue, and TLS (STARTTLS + implicit TLS) are built — mail can be
 > received, read, sent, and relayed over encrypted connections — each
-> with integration tests against a live `oxidb-server`. The spam
-> pipeline is still a stub (every message is accepted), and the IMAP
-> server still stubs SEARCH / COPY / mailbox DELETE / RENAME. See
-> "Roadmap" below.
+> with tests. The spam pipeline's connection-time stage (rate limiting,
+> DNS blocklists, greylisting) is built; its envelope (SPF/DKIM/DMARC)
+> and content (Rspamd) stages are not. The IMAP server still stubs
+> SEARCH / COPY / mailbox DELETE / RENAME. See "Roadmap" below.
 
 ## Architecture
 
@@ -53,9 +53,17 @@ Design constraints OxiDB imposes, and how the server handles them:
 - *FTS is eventually consistent* → IMAP `SEARCH` over body text may lag
   delivery by a few seconds.
 
-**Spam — layered**, cheapest checks first: connection-time (DNSBL,
-greylisting, rate limits) → envelope (SPF/DKIM/DMARC) → content
-(Rspamd) → feedback loop.
+**Spam — layered**, cheapest checks first, short-circuiting on the
+first non-Accept verdict:
+
+1. *connection-time* — rate limiting, DNS blocklists, greylisting.
+   **Built.** State is in memory (disposable: losing it just
+   re-greylists); a background sweeper bounds it.
+2. *envelope* — SPF / DKIM / DMARC. *Planned.*
+3. *content* — Rspamd over HTTP. *Planned.*
+
+`spam.Permissive()` builds a pipeline that accepts everything — for
+tests, and for operators who filter elsewhere.
 
 ## Layout
 
@@ -88,7 +96,10 @@ deployment.
 
 ## Testing
 
-`go test ./...` runs the fast unit tests (currently `internal/config`).
+`go test ./...` runs the fast unit tests — `internal/config` (TLS
+config loading) and `internal/spam` (the connection-time stage, with an
+injectable clock and DNS resolver, so no network or `oxidb-server` is
+needed).
 
 The integration tests boot a throwaway `oxidb-server` and exercise a
 layer end to end:
@@ -128,5 +139,7 @@ skipped.
    *Done.* Still to do: bounce messages for permanent failures.
 5. ~~TLS — STARTTLS on 25 / 587 / 143, implicit TLS on 465 / 993,
    cleartext auth refused once a certificate is configured.~~ *Done.*
-6. Spam pipeline — DNSBL / greylisting / rate limits, then SPF/DKIM/DMARC
-   (`emersion/go-msgauth`), then Rspamd.
+6. Spam pipeline — *connection-time stage (rate limiting, DNS
+   blocklists, greylisting) done.* Still to do: the envelope stage
+   (SPF / DKIM / DMARC, `emersion/go-msgauth`) and the content stage
+   (Rspamd over HTTP).

@@ -63,6 +63,7 @@ func main() {
 	// brought up when a certificate is configured.
 	pipeline := spam.New(cfg.RspamdURL)
 	components := []named{
+		{"spam", pipeline},
 		{"smtp", smtp.New(cfg.SMTPAddr, cfg.Hostname, st, pipeline, tlsConfig)},
 		{"submission", smtp.NewSubmission(cfg.SubmissionAddr, cfg.Hostname, st, tlsConfig)},
 		{"imap", imap.New(cfg.IMAPAddr, st, tlsConfig)},
