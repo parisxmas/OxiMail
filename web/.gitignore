@@ -1,0 +1,7 @@
+# Angular / Node build artifacts — the frontend is built with
+# `npm install && npm run build`; only the sources are committed.
+/node_modules/
+/dist/
+/.angular/
+/.nx/
+*.log

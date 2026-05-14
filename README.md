@@ -1,20 +1,19 @@
 # OxiMail
 
 **OxiMail** is a production mail server in Go — SMTP (inbound +
-submission), IMAP, a webmail HTTP API, and a layered spam pipeline —
-backed entirely by **OxiDB**.
+submission), IMAP, a webmail HTTP API with an Angular frontend, and a
+layered spam pipeline — backed entirely by **OxiDB**.
 
 > Status: **early.** The store layer, the inbound SMTP (MX) server, the
 > IMAP server, the submission server (port 587), the outbound delivery
-> queue, TLS (STARTTLS + implicit TLS), and the webmail backend API are
-> built — mail can be received, read, sent, and relayed over encrypted
-> connections — each with tests. The spam pipeline's connection-time
-> stage (rate limiting, DNS blocklists, greylisting) is built; its
-> envelope (SPF/DKIM/DMARC) and content (Rspamd) stages are not. The
-> webmail API does login, read, send, flag changes, move, and delete —
-> but no search or attachment download yet, and there is no frontend.
-> The IMAP server still stubs SEARCH / COPY / mailbox DELETE / RENAME.
-> See "Roadmap" below.
+> queue, TLS (STARTTLS + implicit TLS), and the webmail API + frontend
+> are built — mail can be received, read, sent, and relayed over
+> encrypted connections — each with tests. The spam pipeline's
+> connection-time stage (rate limiting, DNS blocklists, greylisting) is
+> built; its envelope (SPF/DKIM/DMARC) and content (Rspamd) stages are
+> not. The webmail API does login, read, send, flag changes, move, and
+> delete — no search or attachment download yet. The IMAP server still
+> stubs SEARCH / COPY / mailbox DELETE / RENAME. See "Roadmap" below.
 
 ## Architecture
 
@@ -34,7 +33,9 @@ STARTTLS is advertised on 25 / 587 / 143 when a certificate is
 configured; 465 / 993 are implicit-TLS listeners, started only then.
 The webmail API (`internal/webmail`) is an HTTP+JSON surface backed
 directly by the store — not via IMAP — for browser and mobile clients;
-it serves HTTPS when a certificate is configured.
+it serves HTTPS when a certificate is configured. The webmail frontend
+(`web/`) is an Angular 21 SPA over that API; once built, the webmail
+server also serves it as static files.
 
 **Storage — OxiDB, all three tiers:**
 
@@ -83,6 +84,7 @@ internal/imap/       IMAP server
 internal/webmail/    HTTP+JSON API for browser / mobile clients
 internal/spam/       the layered spam pipeline
 internal/queue/      outbound delivery queue
+web/                 the webmail frontend — an Angular 21 SPA
 ```
 
 ## Build & run
@@ -101,6 +103,17 @@ implicit-TLS listeners (465 / 993) are started, and cleartext AUTH /
 LOGIN is refused. With no certificate set, the server runs without TLS
 and allows cleartext auth — fine for local development, not for a real
 deployment.
+
+To serve the webmail frontend, build it and point the server at the
+output:
+
+```sh
+cd web && npm install && npm run build      # -> web/dist/oximail-webmail/browser/
+OXIMAIL_WEBMAIL_STATIC=web/dist/oximail-webmail/browser ./oximail
+```
+
+Without `OXIMAIL_WEBMAIL_STATIC` the webmail port serves the JSON API
+only. See `web/README.md` for the frontend.
 
 ## Testing
 
@@ -154,6 +167,7 @@ skipped.
    blocklists, greylisting) done.* Still to do: the envelope stage
    (SPF / DKIM / DMARC, `emersion/go-msgauth`) and the content stage
    (Rspamd over HTTP).
-7. Webmail — *backend API done: login, mailbox / message listing,
-   parsed message fetch, send, flag changes, move, delete.* Still to
-   do: search, attachment download, and the frontend SPA.
+7. Webmail — *backend API done (login, mailbox / message listing,
+   parsed message fetch, send, flag changes, move, delete) and an
+   Angular 21 SPA frontend (`web/`) over it.* Still to do: search,
+   attachment download, and HTML compose.

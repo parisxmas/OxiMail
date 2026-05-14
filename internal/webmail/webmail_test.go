@@ -363,7 +363,7 @@ func doJSON(t *testing.T, req *http.Request, token string, out any) int {
 func startWebmail(t *testing.T, st *store.Store) string {
 	t.Helper()
 	addr := fmt.Sprintf("127.0.0.1:%d", itest.FreePort(t))
-	srv := webmail.New(addr, st, nil)
+	srv := webmail.New(addr, "", st, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -39,8 +40,9 @@ type Server struct {
 }
 
 // New builds the webmail server bound to `addr`. A non-nil tlsConfig
-// makes it serve HTTPS.
-func New(addr string, st *store.Store, tlsConfig *tls.Config) *Server {
+// makes it serve HTTPS. If staticDir is non-empty and exists, the built
+// frontend SPA is served from it; otherwise only the API is served.
+func New(addr, staticDir string, st *store.Store, tlsConfig *tls.Config) *Server {
 	s := &Server{
 		addr:     addr,
 		store:    st,
@@ -55,6 +57,20 @@ func New(addr string, st *store.Store, tlsConfig *tls.Config) *Server {
 	mux.HandleFunc("PATCH /api/messages/{id}/flags", s.auth(s.handleFlags))
 	mux.HandleFunc("POST /api/messages/{id}/move", s.auth(s.handleMove))
 	mux.HandleFunc("DELETE /api/messages/{id}", s.auth(s.handleDelete))
+	// An unknown /api/ path is a JSON 404, not the SPA shell.
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, http.StatusNotFound, "no such endpoint")
+	})
+
+	// Serve the frontend SPA, if it has been built.
+	if staticDir != "" {
+		if info, err := os.Stat(staticDir); err == nil && info.IsDir() {
+			mux.Handle("/", spaHandler(staticDir))
+			log.Printf("webmail: serving frontend from %s", staticDir)
+		} else {
+			log.Printf("webmail: frontend dir %q not found — serving API only", staticDir)
+		}
+	}
 
 	s.srv = &http.Server{
 		Addr:              addr,

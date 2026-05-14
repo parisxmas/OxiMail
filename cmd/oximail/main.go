@@ -68,7 +68,7 @@ func main() {
 		{"smtp", smtp.New(cfg.SMTPAddr, cfg.Hostname, st, pipeline, tlsConfig)},
 		{"submission", smtp.NewSubmission(cfg.SubmissionAddr, cfg.Hostname, st, tlsConfig)},
 		{"imap", imap.New(cfg.IMAPAddr, st, tlsConfig)},
-		{"webmail", webmail.New(cfg.WebmailAddr, st, tlsConfig)},
+		{"webmail", webmail.New(cfg.WebmailAddr, cfg.WebmailStatic, st, tlsConfig)},
 	}
 	if tlsConfig != nil {
 		components = append(components,

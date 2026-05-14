@@ -28,6 +28,10 @@ type Config struct {
 	// WebmailAddr — the webmail HTTP+JSON API. Serves HTTPS when a TLS
 	// certificate is configured, plain HTTP otherwise.
 	WebmailAddr string
+	// WebmailStatic, if set, is a directory of built frontend assets
+	// (the Angular SPA) that the webmail server also serves, with an
+	// index.html fallback for client-side routing. Empty = API only.
+	WebmailStatic string
 
 	// TLSCert / TLSKey — PEM file paths for STARTTLS and implicit TLS.
 	// When unset, TLS is disabled: STARTTLS is not advertised and the
@@ -54,6 +58,7 @@ func Load() Config {
 		SMTPSAddr:      env("OXIMAIL_SMTPS_ADDR", ":465"),
 		IMAPSAddr:      env("OXIMAIL_IMAPS_ADDR", ":993"),
 		WebmailAddr:    env("OXIMAIL_WEBMAIL_ADDR", ":8080"),
+		WebmailStatic:  env("OXIMAIL_WEBMAIL_STATIC", ""),
 		TLSCert:        env("OXIMAIL_TLS_CERT", ""),
 		TLSKey:         env("OXIMAIL_TLS_KEY", ""),
 		OxiDBHost:      env("OXIMAIL_OXIDB_HOST", "127.0.0.1"),
