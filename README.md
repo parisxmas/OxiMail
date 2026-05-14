@@ -9,9 +9,9 @@ layered spam pipeline — backed entirely by **OxiDB**.
 > queue, TLS (STARTTLS + implicit TLS), and the webmail API + frontend
 > are built — mail can be received, read, sent, and relayed over
 > encrypted connections — each with tests. The spam pipeline's
-> connection-time stage (rate limiting, DNS blocklists, greylisting) is
-> built; its envelope (SPF/DKIM/DMARC) and content (Rspamd) stages are
-> not. The webmail API does login, read, send, flag changes, move, and
+> connection-time stage (rate limiting, DNS blocklists, greylisting) and
+> content stage (Rspamd) are built; its envelope (SPF/DKIM/DMARC) stage
+> is not. The webmail API does login, read, send, flag changes, move, and
 > delete — no search or attachment download yet. The IMAP server still
 > stubs SEARCH / COPY / mailbox DELETE / RENAME. See "Roadmap" below.
 
@@ -68,7 +68,11 @@ first non-Accept verdict:
    **Built.** State is in memory (disposable: losing it just
    re-greylists); a background sweeper bounds it.
 2. *envelope* — SPF / DKIM / DMARC. *Planned.*
-3. *content* — Rspamd over HTTP. *Planned.*
+3. *content* — Rspamd over HTTP. **Built**, and active when
+   `OXIMAIL_RSPAMD_URL` is set: the message is POSTed to Rspamd's
+   `/checkv2`, and its action maps to accept / greylist / reject. It
+   fails open — a Rspamd outage degrades filtering, it does not block
+   mail.
 
 `spam.Permissive()` builds a pipeline that accepts everything — for
 tests, and for operators who filter elsewhere.
@@ -164,9 +168,9 @@ skipped.
 5. ~~TLS — STARTTLS on 25 / 587 / 143, implicit TLS on 465 / 993,
    cleartext auth refused once a certificate is configured.~~ *Done.*
 6. Spam pipeline — *connection-time stage (rate limiting, DNS
-   blocklists, greylisting) done.* Still to do: the envelope stage
-   (SPF / DKIM / DMARC, `emersion/go-msgauth`) and the content stage
-   (Rspamd over HTTP).
+   blocklists, greylisting) and content stage (Rspamd over HTTP) done.*
+   Still to do: the envelope stage — SPF / DKIM / DMARC
+   (`emersion/go-msgauth` + an SPF library).
 7. Webmail — *backend API done (login, mailbox / message listing,
    parsed message fetch, send, flag changes, move, delete) and an
    Angular 21 SPA frontend (`web/`) over it.* Still to do: search,

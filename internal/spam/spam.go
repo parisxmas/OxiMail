@@ -6,12 +6,13 @@
 //  2. envelope        — SPF, DKIM, DMARC
 //  3. content         — Rspamd over HTTP
 //
-// Stage 1 is implemented here (ratelimit.go, dnsbl.go, greylist.go). Its
-// state is in memory, which is fine because it is disposable — losing it
-// on a restart just re-greylists and resets counters.
+// Stages 1 and 3 are implemented; stage 2 (envelope) is not yet. Stage 1
+// (ratelimit.go, dnsbl.go, greylist.go) keeps its state in memory, which
+// is fine because it is disposable — losing it on a restart just
+// re-greylists and resets counters. Stage 3 (rspamd.go) runs only when a
+// Rspamd endpoint is configured.
 //
 // TODO: envelope stage — SPF / DKIM / DMARC (emersion/go-msgauth).
-// TODO: content stage — POST the message to Rspamd's /checkv2 endpoint.
 // TODO: move stage-1 state to OxiMem so a multi-instance deployment
 // shares one view of each sender.
 package spam
@@ -50,27 +51,29 @@ var defaultDNSBLZones = []string{"zen.spamhaus.org"}
 // by the SMTP servers, and runs a background sweeper (Start) to bound the
 // memory its connection-time state uses.
 type Pipeline struct {
-	// rspamdURL is the Rspamd HTTP endpoint for the content stage; empty
-	// disables it. TODO: the content stage is not wired up yet.
-	rspamdURL string
-
 	// disabled short-circuits Check to Accept — see Permissive.
 	disabled bool
 
 	rateLimit *rateLimiter
 	dnsbl     *dnsblChecker
 	greylist  *greylister
+	// rspamd is the content stage; nil when no Rspamd endpoint is
+	// configured.
+	rspamd *rspamdChecker
 }
 
-// New builds the pipeline. An empty rspamdURL will disable the content
-// stage once it is implemented.
+// New builds the pipeline. An empty rspamdURL disables the content
+// (Rspamd) stage; the connection-time stage always runs.
 func New(rspamdURL string) *Pipeline {
-	return &Pipeline{
-		rspamdURL: rspamdURL,
+	p := &Pipeline{
 		rateLimit: newRateLimiter(defaultRateLimit, defaultRateWindow),
 		dnsbl:     newDNSBLChecker(defaultDNSBLZones),
 		greylist:  newGreylister(defaultGreylistDelay),
 	}
+	if rspamdURL != "" {
+		p.rspamd = newRspamdChecker(rspamdURL)
+	}
+	return p
 }
 
 // Permissive returns a pipeline that accepts every message without any
@@ -122,7 +125,12 @@ func (p *Pipeline) Check(remoteIP, mailFrom string, rcptTo []string, raw []byte)
 		return v, nil
 	}
 	// Stage 2 — envelope (SPF / DKIM / DMARC): TODO.
-	// Stage 3 — content (Rspamd): TODO.
+	// Stage 3 — content: Rspamd, when an endpoint is configured.
+	if p.rspamd != nil {
+		if v := p.rspamd.check(remoteIP, mailFrom, rcptTo, raw); v != Accept {
+			return v, nil
+		}
+	}
 	return Accept, nil
 }
 
