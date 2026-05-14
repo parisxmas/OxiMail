@@ -189,6 +189,85 @@ func TestQueue(t *testing.T) {
 			t.Error("message from a keyless domain was signed")
 		}
 	})
+
+	t.Run("bounces a permanent failure back to the sender", func(t *testing.T) {
+		rejectAddr := startRejectingMX(t)
+
+		// A local sender, to receive the bounce in their INBOX.
+		sender, err := st.CreateAccount("bounce-sender@oximail.test", "h", 0)
+		if err != nil {
+			t.Fatalf("create sender account: %v", err)
+		}
+		if err := st.EnsureDefaultMailboxes(sender.ID); err != nil {
+			t.Fatalf("ensure mailboxes: %v", err)
+		}
+
+		q := New(st, "oximail.test")
+		q.resolve = func(string) ([]string, error) { return []string{rejectAddr}, nil }
+
+		raw := []byte("From: bounce-sender@oximail.test\r\nTo: nobody@remote.test\r\n" +
+			"Subject: will not arrive\r\n\r\nhi\r\n")
+		m, err := st.Enqueue("bounce-sender@oximail.test", []string{"nobody@remote.test"}, raw)
+		if err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+
+		q.runOnce(context.Background())
+
+		// The original is resolved (permanently failed, then bounced).
+		if _, err := st.GetOutbound(m.ID); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("queue row still present after a permanent failure: err = %v", err)
+		}
+		// A bounce landed in the sender's INBOX.
+		inbox, err := st.GetMailboxByName(sender.ID, "INBOX")
+		if err != nil {
+			t.Fatalf("get sender INBOX: %v", err)
+		}
+		msgs, err := st.ListMessages(inbox.ID)
+		if err != nil {
+			t.Fatalf("list sender INBOX: %v", err)
+		}
+		if len(msgs) != 1 {
+			t.Fatalf("sender INBOX has %d messages, want 1 bounce", len(msgs))
+		}
+		if msgs[0].Subject != "Undelivered Mail Returned to Sender" {
+			t.Errorf("bounce subject = %q", msgs[0].Subject)
+		}
+		body, err := st.FetchBody(&msgs[0])
+		if err != nil {
+			t.Fatalf("fetch bounce body: %v", err)
+		}
+		if !bytes.Contains(body, []byte("multipart/report")) {
+			t.Error("bounce is not a multipart/report DSN")
+		}
+		if !bytes.Contains(body, []byte("nobody@remote.test")) {
+			t.Error("bounce does not name the failed recipient")
+		}
+		if !bytes.Contains(body, []byte("will not arrive")) {
+			t.Error("bounce does not include the original message")
+		}
+	})
+
+	t.Run("does not bounce a null-sender message", func(t *testing.T) {
+		rejectAddr := startRejectingMX(t)
+
+		q := New(st, "oximail.test")
+		q.resolve = func(string) ([]string, error) { return []string{rejectAddr}, nil }
+
+		raw := []byte("From: MAILER-DAEMON@oximail.test\r\nTo: x@remote.test\r\n\r\nbounce body\r\n")
+		m, err := st.Enqueue("", []string{"x@remote.test"}, raw)
+		if err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+
+		q.runOnce(context.Background())
+
+		// A null-sender message that fails is dropped, not bounced —
+		// bouncing it would loop. It is simply removed from the queue.
+		if _, err := st.GetOutbound(m.ID); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("null-sender message still in the queue: err = %v", err)
+		}
+	})
 }
 
 // -----------------------------------------------------------------------
@@ -244,4 +323,44 @@ func startCaptureMX(t *testing.T) (*captureMX, string) {
 	t.Cleanup(func() { _ = srv.Close() })
 	itest.WaitTCP(t, addr)
 	return mx, addr
+}
+
+// -----------------------------------------------------------------------
+// rejectingMX — an SMTP server that permanently rejects every recipient
+// -----------------------------------------------------------------------
+
+type rejectBackend struct{}
+
+func (rejectBackend) NewSession(*gosmtp.Conn) (gosmtp.Session, error) {
+	return rejectSession{}, nil
+}
+
+type rejectSession struct{}
+
+func (rejectSession) Mail(string, *gosmtp.MailOptions) error { return nil }
+
+func (rejectSession) Rcpt(string, *gosmtp.RcptOptions) error {
+	return &gosmtp.SMTPError{
+		Code:         550,
+		EnhancedCode: gosmtp.EnhancedCode{5, 1, 1},
+		Message:      "no such user here",
+	}
+}
+
+func (rejectSession) Data(io.Reader) error { return nil }
+func (rejectSession) Reset()               {}
+func (rejectSession) Logout() error        { return nil }
+
+// startRejectingMX runs an SMTP server that 5xx-rejects every recipient,
+// on a free port. It is shut down when the test ends.
+func startRejectingMX(t *testing.T) string {
+	t.Helper()
+	addr := fmt.Sprintf("127.0.0.1:%d", itest.FreePort(t))
+	srv := gosmtp.NewServer(rejectBackend{})
+	srv.Addr = addr
+	srv.Domain = "reject.test"
+	go func() { _ = srv.ListenAndServe() }()
+	t.Cleanup(func() { _ = srv.Close() })
+	itest.WaitTCP(t, addr)
+	return addr
 }

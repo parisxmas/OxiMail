@@ -6,8 +6,9 @@
 // Queue state lives in OxiDB, so delivery survives a restart; the
 // message bodies it sends are read from the blob store.
 //
-// TODO: bounce messages for permanent failures and exhausted retries —
-// abandoned recipients are currently just logged.
+// A permanent failure — or a recipient still failing after the last
+// retry — produces a bounce (a DSN) back to the original sender.
+//
 // TODO: opportunistic STARTTLS when delivering to remote MX hosts.
 package queue
 
@@ -97,10 +98,11 @@ func (q *Queue) runOnce(ctx context.Context) {
 	}
 }
 
-// deliver attempts one queued message and updates the queue: a message
-// whose every recipient is resolved (delivered or permanently
-// abandoned) is removed, one with recipients still temp-failing is
-// deferred with backoff.
+// deliver attempts one queued message. Recipients that permanently
+// fail — and, after the final attempt, those still temp-failing — are
+// bounced back to the sender; recipients still worth a retry are
+// deferred with backoff; a message with nothing left to retry is
+// removed from the queue.
 func (q *Queue) deliver(m *store.OutboundMessage) {
 	raw, err := q.store.FetchOutboundBody(m)
 	if err != nil {
@@ -113,34 +115,32 @@ func (q *Queue) deliver(m *store.OutboundMessage) {
 	// DKIM-sign before delivery — this is the point mail leaves OxiMail
 	// for another domain. signMessage is a no-op for domains without a
 	// configured key.
-	raw = signMessage(q.store, raw)
+	signed := signMessage(q.store, raw)
 
-	var (
-		deferred []string
-		lastErr  string
-	)
+	var temp, perm []rcptFailure
 	for domain, rcpts := range groupByDomain(m.Recipients) {
-		temp, perm, errStr := q.deliverDomain(m.From, domain, rcpts, raw)
-		deferred = append(deferred, temp...)
-		if errStr != "" {
-			lastErr = errStr
-		}
-		for _, pf := range perm {
-			log.Printf("queue: message %d: %q permanently rejected — dropping (TODO: bounce)", m.ID, pf)
-		}
-	}
-
-	if len(deferred) == 0 {
-		if err := q.store.CompleteOutbound(m); err != nil {
-			log.Printf("queue: message %d: cleanup: %v", m.ID, err)
-		}
-		return
+		t, p := q.deliverDomain(m.From, domain, rcpts, signed)
+		temp = append(temp, t...)
+		perm = append(perm, p...)
 	}
 
 	attempts := m.Attempts + 1
+
+	// Permanent failures bounce now; recipients still temp-failing bounce
+	// too once the retry budget is spent.
+	bounced := perm
+	var stillDeferred []rcptFailure
 	if attempts >= maxAttempts {
-		log.Printf("queue: message %d: %d recipient(s) undelivered after %d attempts — giving up (TODO: bounce)",
-			m.ID, len(deferred), attempts)
+		bounced = append(bounced, temp...)
+	} else {
+		stillDeferred = temp
+	}
+	if len(bounced) > 0 {
+		q.bounce(m, raw, bounced)
+	}
+
+	if len(stillDeferred) == 0 {
+		// Everything is resolved — delivered, or bounced.
 		if err := q.store.CompleteOutbound(m); err != nil {
 			log.Printf("queue: message %d: cleanup: %v", m.ID, err)
 		}
@@ -148,22 +148,31 @@ func (q *Queue) deliver(m *store.OutboundMessage) {
 	}
 
 	next := time.Now().Add(backoff(attempts))
-	if err := q.store.DeferOutbound(m.ID, deferred, attempts, next, lastErr); err != nil {
+	recipients := failureRecipients(stillDeferred)
+	lastErr := stillDeferred[len(stillDeferred)-1].reason
+	if err := q.store.DeferOutbound(m.ID, recipients, attempts, next, lastErr); err != nil {
 		log.Printf("queue: message %d: defer: %v", m.ID, err)
 		return
 	}
 	log.Printf("queue: message %d: %d recipient(s) deferred, attempt %d at %s",
-		m.ID, len(deferred), attempts, next.Format(time.RFC3339))
+		m.ID, len(recipients), attempts, next.Format(time.RFC3339))
+}
+
+// rcptFailure is one recipient that could not be delivered to, with the
+// reason why.
+type rcptFailure struct {
+	recipient string
+	reason    string
 }
 
 // deliverDomain delivers to every recipient at one domain over a single
-// SMTP connection. It returns the recipients that temp-failed (retry
-// later), the ones that permanently failed (drop), and a representative
-// error string; recipients in neither list were delivered.
-func (q *Queue) deliverDomain(from, domain string, rcpts []string, raw []byte) (temp, perm []string, lastErr string) {
+// SMTP connection. It returns the recipients that temp-failed (worth a
+// retry) and the ones that permanently failed; recipients in neither
+// list were delivered.
+func (q *Queue) deliverDomain(from, domain string, rcpts []string, raw []byte) (temp, perm []rcptFailure) {
 	targets, err := q.resolve(domain)
 	if err != nil || len(targets) == 0 {
-		return rcpts, nil, fmt.Sprintf("resolve %s: %v", domain, err)
+		return failuresFor(rcpts, fmt.Sprintf("could not resolve %s: %v", domain, err)), nil
 	}
 
 	var conn net.Conn
@@ -174,53 +183,73 @@ func (q *Queue) deliverDomain(from, domain string, rcpts []string, raw []byte) (
 		}
 	}
 	if conn == nil {
-		return rcpts, nil, fmt.Sprintf("dial %s: %v", domain, err)
+		return failuresFor(rcpts, fmt.Sprintf("could not connect to %s: %v", domain, err)), nil
 	}
 
 	c := gosmtp.NewClient(conn)
 	defer c.Close()
 
 	if err := c.Hello(q.hostname); err != nil {
-		return rcpts, nil, fmt.Sprintf("EHLO %s: %v", domain, err)
+		return failuresFor(rcpts, fmt.Sprintf("EHLO to %s failed: %v", domain, err)), nil
 	}
 	if err := c.Mail(from, nil); err != nil {
 		// A MAIL FROM rejection applies to the whole transaction.
+		reason := fmt.Sprintf("MAIL FROM rejected by %s: %v", domain, err)
 		if isPermanent(err) {
-			return nil, rcpts, err.Error()
+			return nil, failuresFor(rcpts, reason)
 		}
-		return rcpts, nil, err.Error()
+		return failuresFor(rcpts, reason), nil
 	}
 
 	var accepted []string
 	for _, rcpt := range rcpts {
 		if err := c.Rcpt(rcpt, nil); err != nil {
-			lastErr = err.Error()
+			f := rcptFailure{recipient: rcpt, reason: err.Error()}
 			if isPermanent(err) {
-				perm = append(perm, rcpt)
+				perm = append(perm, f)
 			} else {
-				temp = append(temp, rcpt)
+				temp = append(temp, f)
 			}
 			continue
 		}
 		accepted = append(accepted, rcpt)
 	}
 	if len(accepted) == 0 {
-		return temp, perm, lastErr
+		return temp, perm
 	}
 
 	if err := writeData(c, raw); err != nil {
 		// The body was rejected after RCPT — applies to every accepted
 		// recipient.
+		reason := fmt.Sprintf("DATA rejected by %s: %v", domain, err)
 		if isPermanent(err) {
-			perm = append(perm, accepted...)
+			perm = append(perm, failuresFor(accepted, reason)...)
 		} else {
-			temp = append(temp, accepted...)
+			temp = append(temp, failuresFor(accepted, reason)...)
 		}
-		return temp, perm, err.Error()
+		return temp, perm
 	}
 	_ = c.Quit()
-	// `accepted` were delivered: in neither the temp nor the perm list.
-	return temp, perm, lastErr
+	// `accepted` were delivered: in neither list.
+	return temp, perm
+}
+
+// failuresFor pairs each recipient with a shared reason.
+func failuresFor(rcpts []string, reason string) []rcptFailure {
+	out := make([]rcptFailure, len(rcpts))
+	for i, r := range rcpts {
+		out[i] = rcptFailure{recipient: r, reason: reason}
+	}
+	return out
+}
+
+// failureRecipients pulls the recipient addresses out of a failure list.
+func failureRecipients(fs []rcptFailure) []string {
+	out := make([]string, len(fs))
+	for i, f := range fs {
+		out[i] = f.recipient
+	}
+	return out
 }
 
 // writeData runs the SMTP DATA phase, writing the raw message.

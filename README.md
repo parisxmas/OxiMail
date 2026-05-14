@@ -14,8 +14,9 @@ layered spam pipeline — backed entirely by **OxiDB**.
 > built. The webmail API does login, read, send, flag changes, move, and
 > delete — no search or attachment download yet. The `oximailctl` admin
 > CLI provisions domains, accounts, and aliases and generates per-domain
-> DKIM keys; outbound mail is DKIM-signed by the delivery queue. The
-> IMAP server still stubs SEARCH / COPY / mailbox DELETE / RENAME. See
+> DKIM keys; outbound mail is DKIM-signed by the delivery queue, which
+> also returns a bounce to the sender on permanent failure. The IMAP
+> server still stubs SEARCH / COPY / mailbox DELETE / RENAME. See
 > "Roadmap" below.
 
 ## Architecture
@@ -196,7 +197,7 @@ skipped.
    DELETE / RENAME, SASL AUTHENTICATE.
 4. ~~Submission (port 587) + the outbound delivery queue — SMTP AUTH,
    local/remote recipient split, MX delivery with retry/backoff.~~
-   *Done.* Still to do: bounce messages for permanent failures.
+   *Done.*
 5. ~~TLS — STARTTLS on 25 / 587 / 143, implicit TLS on 465 / 993,
    cleartext auth refused once a certificate is configured.~~ *Done.*
 6. ~~Spam pipeline — connection-time (rate limiting, DNS blocklists,
@@ -211,6 +212,9 @@ skipped.
    a password-change command, and domain delete.
 9. ~~Outbound DKIM signing — the delivery queue signs each message with
    the sender domain's key.~~ *Done.*
+10. ~~Bounce messages — the queue returns an RFC 3464 delivery-status
+    notification to the sender on a permanent failure or exhausted
+    retries; never bounces a null-sender message.~~ *Done.*
 
 Beyond the roadmap: IMAP SEARCH / COPY / mailbox DELETE / RENAME / SASL,
-bounce messages, and observability.
+and observability.
