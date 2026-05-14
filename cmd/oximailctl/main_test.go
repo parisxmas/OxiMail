@@ -116,4 +116,31 @@ func TestCLI(t *testing.T) {
 			t.Errorf("account with no verb: code %d, want 2", code)
 		}
 	})
+
+	t.Run("domain dkim generates and stores a key", func(t *testing.T) {
+		if _, code := cli("", "domain", "add", "dkim.test"); code != 0 {
+			t.Fatal("setup: domain add failed")
+		}
+		out, code := cli("", "domain", "dkim", "-selector", "s1", "dkim.test")
+		if code != 0 {
+			t.Fatalf("domain dkim: code %d, output %q", code, out)
+		}
+		if !strings.Contains(out, "s1._domainkey.dkim.test") || !strings.Contains(out, "v=DKIM1") {
+			t.Errorf("dkim output is missing the DNS record: %q", out)
+		}
+		// The key landed on the domain.
+		d, err := st.GetDomain("dkim.test")
+		if err != nil {
+			t.Fatalf("get domain: %v", err)
+		}
+		if d.DKIMSelector != "s1" || d.DKIMPrivateKey == "" {
+			t.Errorf("DKIM key not stored: selector=%q key-length=%d", d.DKIMSelector, len(d.DKIMPrivateKey))
+		}
+	})
+
+	t.Run("domain dkim requires the domain to exist", func(t *testing.T) {
+		if out, code := cli("", "domain", "dkim", "no-such-domain.test"); code == 0 {
+			t.Errorf("domain dkim on a missing domain succeeded: output %q", out)
+		}
+	})
 }

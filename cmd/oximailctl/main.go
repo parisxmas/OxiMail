@@ -6,6 +6,7 @@
 //
 //	oximailctl domain  add <domain>
 //	oximailctl domain  list
+//	oximailctl domain  dkim [-selector S] <domain>   generate a signing key
 //	oximailctl account add [-quota N] <address>      password read from stdin
 //	oximailctl account list [-domain <domain>]
 //	oximailctl account delete <address>

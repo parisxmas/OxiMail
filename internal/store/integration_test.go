@@ -377,6 +377,21 @@ func TestStore(t *testing.T) {
 			t.Fatal("ListDomains is missing the created domain")
 		}
 
+		// DKIM key storage.
+		if err := st.SetDKIMKey("adminlist.test", "sel", "PEM-DATA"); err != nil {
+			t.Fatalf("set DKIM key: %v", err)
+		}
+		d, err := st.GetDomain("adminlist.test")
+		if err != nil {
+			t.Fatalf("get domain: %v", err)
+		}
+		if d.DKIMSelector != "sel" || d.DKIMPrivateKey != "PEM-DATA" {
+			t.Fatalf("DKIM key not stored: selector=%q key=%q", d.DKIMSelector, d.DKIMPrivateKey)
+		}
+		if err := st.SetDKIMKey("no-such-domain.test", "s", "k"); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("SetDKIMKey on a missing domain: err = %v, want ErrNotFound", err)
+		}
+
 		// Two accounts in a domain unique to this subtest, so the
 		// per-domain filter has an exact expected count.
 		for _, addr := range []string{"u1@adminaccts.test", "u2@adminaccts.test"} {

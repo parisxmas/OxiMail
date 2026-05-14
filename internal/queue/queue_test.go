@@ -11,13 +11,20 @@ package queue
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/emersion/go-msgauth/dkim"
 	gosmtp "github.com/emersion/go-smtp"
 
 	"github.com/parisxmas/OxiMail/internal/itest"
@@ -94,6 +101,92 @@ func TestQueue(t *testing.T) {
 		}
 		if got.LastError == "" {
 			t.Error("last_error is empty, want the dial failure recorded")
+		}
+	})
+
+	t.Run("signs outbound mail with the sender domain's DKIM key", func(t *testing.T) {
+		mx, mxAddr := startCaptureMX(t)
+
+		// A domain with a freshly generated DKIM key.
+		if _, err := st.CreateDomain("signing.test"); err != nil {
+			t.Fatalf("create domain: %v", err)
+		}
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("generate key: %v", err)
+		}
+		privPEM := pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(key),
+		})
+		if err := st.SetDKIMKey("signing.test", "sel", string(privPEM)); err != nil {
+			t.Fatalf("set DKIM key: %v", err)
+		}
+
+		q := New(st, "oximail.test")
+		q.resolve = func(string) ([]string, error) { return []string{mxAddr}, nil }
+
+		raw := []byte("From: alice@signing.test\r\nTo: rcpt@remote.test\r\n" +
+			"Subject: signed\r\n\r\nhello\r\n")
+		if _, err := st.Enqueue("alice@signing.test", []string{"rcpt@remote.test"}, raw); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+
+		q.runOnce(context.Background())
+
+		got := mx.messages()
+		if len(got) != 1 {
+			t.Fatalf("remote MX received %d message(s), want 1", len(got))
+		}
+		if !bytes.Contains(got[0], []byte("DKIM-Signature:")) {
+			t.Fatal("delivered message has no DKIM-Signature header")
+		}
+
+		// The signature verifies against the published public key.
+		pub, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+		if err != nil {
+			t.Fatalf("marshal public key: %v", err)
+		}
+		dkimTXT := "v=DKIM1; k=rsa; p=" + base64.StdEncoding.EncodeToString(pub)
+		verifs, err := dkim.VerifyWithOptions(bytes.NewReader(got[0]), &dkim.VerifyOptions{
+			LookupTXT: func(name string) ([]string, error) {
+				if name == "sel._domainkey.signing.test" {
+					return []string{dkimTXT}, nil
+				}
+				return nil, &net.DNSError{Err: "no such host", IsNotFound: true}
+			},
+		})
+		if err != nil {
+			t.Fatalf("dkim verify: %v", err)
+		}
+		if len(verifs) != 1 || verifs[0].Err != nil {
+			t.Fatalf("DKIM signature did not verify: %+v", verifs)
+		}
+		if verifs[0].Domain != "signing.test" {
+			t.Errorf("signature domain = %q, want signing.test", verifs[0].Domain)
+		}
+	})
+
+	t.Run("sends unsigned when the sender domain has no key", func(t *testing.T) {
+		mx, mxAddr := startCaptureMX(t)
+
+		q := New(st, "oximail.test")
+		q.resolve = func(string) ([]string, error) { return []string{mxAddr}, nil }
+
+		raw := []byte("From: bob@nokey.test\r\nTo: rcpt@remote.test\r\n" +
+			"Subject: unsigned\r\n\r\nhi\r\n")
+		if _, err := st.Enqueue("bob@nokey.test", []string{"rcpt@remote.test"}, raw); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+
+		q.runOnce(context.Background())
+
+		got := mx.messages()
+		if len(got) != 1 {
+			t.Fatalf("remote MX received %d message(s), want 1", len(got))
+		}
+		if bytes.Contains(got[0], []byte("DKIM-Signature:")) {
+			t.Error("message from a keyless domain was signed")
 		}
 	})
 }

@@ -12,6 +12,10 @@ type Domain struct {
 	Domain    string `json:"domain"`
 	Active    bool   `json:"active"`
 	CreatedAt string `json:"created_at"`
+	// DKIM signing material, set via SetDKIMKey. When DKIMPrivateKey is
+	// empty, outbound mail from the domain is sent unsigned.
+	DKIMSelector   string `json:"dkim_selector,omitempty"`
+	DKIMPrivateKey string `json:"dkim_private_key,omitempty"` // PEM-encoded PKCS#1 RSA key
 }
 
 // Account is a mailbox account: a login (for SMTP AUTH and IMAP) plus a
@@ -95,6 +99,27 @@ func (s *Store) ListDomains() ([]Domain, error) {
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// SetDKIMKey stores a domain's DKIM signing key and selector. The
+// private key is PEM-encoded; outbound mail from the domain is then
+// signed with it. The domain must already exist.
+func (s *Store) SetDKIMKey(domain, selector, privateKeyPEM string) error {
+	doc, err := s.db.FindAndModify(
+		CollDomains,
+		map[string]any{"domain": strings.ToLower(domain)},
+		map[string]any{"$set": map[string]any{
+			"dkim_selector":    selector,
+			"dkim_private_key": privateKeyPEM,
+		}},
+	)
+	if err != nil {
+		return fmt.Errorf("store: set DKIM key for %q: %w", domain, err)
+	}
+	if doc == nil {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // CreateAccount registers a mailbox account. The domain is derived from

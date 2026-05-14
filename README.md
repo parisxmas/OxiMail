@@ -13,8 +13,10 @@ layered spam pipeline — backed entirely by **OxiDB**.
 > greylisting), envelope (SPF/DKIM/DMARC), and content (Rspamd) — are
 > built. The webmail API does login, read, send, flag changes, move, and
 > delete — no search or attachment download yet. The `oximailctl` admin
-> CLI provisions domains, accounts, and aliases. The IMAP server still
-> stubs SEARCH / COPY / mailbox DELETE / RENAME. See "Roadmap" below.
+> CLI provisions domains, accounts, and aliases and generates per-domain
+> DKIM keys; outbound mail is DKIM-signed by the delivery queue. The
+> IMAP server still stubs SEARCH / COPY / mailbox DELETE / RENAME. See
+> "Roadmap" below.
 
 ## Architecture
 
@@ -134,14 +136,18 @@ the server.
 go build ./cmd/oximailctl
 
 oximailctl domain  add example.com
+oximailctl domain  dkim example.com              # generate a DKIM key; prints the DNS record
 echo 's3cret' | oximailctl account add -quota 1073741824 alice@example.com
 oximailctl alias   add sales@example.com alice@example.com,bob@example.com
 oximailctl account list
 oximailctl account delete alice@example.com      # also removes its mail
 ```
 
-`account add` reads the password from stdin. Run `oximailctl help` for
-the full command list.
+`account add` reads the password from stdin. `domain dkim` generates a
+signing key, stores it on the domain, and prints the public-key DNS TXT
+record to publish — once published, outbound mail from the domain is
+DKIM-signed by the delivery queue. Run `oximailctl help` for the full
+command list.
 
 ## Testing
 
@@ -201,8 +207,10 @@ skipped.
    Angular 21 SPA frontend (`web/`) over it.* Still to do: search,
    attachment download, and HTML compose.
 8. ~~Administration — `oximailctl` CLI for domains, accounts, and
-   aliases.~~ *Done.* Still to do: a password-change command, and
-   domain delete.
+   aliases, plus per-domain DKIM key generation.~~ *Done.* Still to do:
+   a password-change command, and domain delete.
+9. ~~Outbound DKIM signing — the delivery queue signs each message with
+   the sender domain's key.~~ *Done.*
 
-Beyond the roadmap: outbound DKIM signing, IMAP SEARCH / COPY /
-mailbox DELETE / RENAME / SASL, bounce messages, and observability.
+Beyond the roadmap: IMAP SEARCH / COPY / mailbox DELETE / RENAME / SASL,
+bounce messages, and observability.

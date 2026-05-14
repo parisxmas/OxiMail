@@ -110,6 +110,10 @@ func (q *Queue) deliver(m *store.OutboundMessage) {
 		}
 		return
 	}
+	// DKIM-sign before delivery — this is the point mail leaves OxiMail
+	// for another domain. signMessage is a no-op for domains without a
+	// configured key.
+	raw = signMessage(q.store, raw)
 
 	var (
 		deferred []string
