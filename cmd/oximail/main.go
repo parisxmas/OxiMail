@@ -18,6 +18,7 @@ import (
 	"github.com/parisxmas/OxiMail/internal/smtp"
 	"github.com/parisxmas/OxiMail/internal/spam"
 	"github.com/parisxmas/OxiMail/internal/store"
+	"github.com/parisxmas/OxiMail/internal/webmail"
 )
 
 // component is a long-running server or worker. Start blocks until the
@@ -67,6 +68,7 @@ func main() {
 		{"smtp", smtp.New(cfg.SMTPAddr, cfg.Hostname, st, pipeline, tlsConfig)},
 		{"submission", smtp.NewSubmission(cfg.SubmissionAddr, cfg.Hostname, st, tlsConfig)},
 		{"imap", imap.New(cfg.IMAPAddr, st, tlsConfig)},
+		{"webmail", webmail.New(cfg.WebmailAddr, st, tlsConfig)},
 	}
 	if tlsConfig != nil {
 		components = append(components,

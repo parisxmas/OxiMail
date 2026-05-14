@@ -1,16 +1,17 @@
 # OxiMail
 
 **OxiMail** is a production mail server in Go — SMTP (inbound +
-submission), IMAP, and a layered spam pipeline — backed entirely by
-**OxiDB**.
+submission), IMAP, a webmail HTTP API, and a layered spam pipeline —
+backed entirely by **OxiDB**.
 
 > Status: **early.** The store layer, the inbound SMTP (MX) server, the
 > IMAP server, the submission server (port 587), the outbound delivery
-> queue, and TLS (STARTTLS + implicit TLS) are built — mail can be
-> received, read, sent, and relayed over encrypted connections — each
-> with tests. The spam pipeline's connection-time stage (rate limiting,
-> DNS blocklists, greylisting) is built; its envelope (SPF/DKIM/DMARC)
-> and content (Rspamd) stages are not. The IMAP server still stubs
+> queue, TLS (STARTTLS + implicit TLS), and the webmail backend API are
+> built — mail can be received, read, sent, and relayed over encrypted
+> connections — each with tests. The spam pipeline's connection-time
+> stage (rate limiting, DNS blocklists, greylisting) is built; its
+> envelope (SPF/DKIM/DMARC) and content (Rspamd) stages are not. The
+> webmail API is read-only so far, and the IMAP server still stubs
 > SEARCH / COPY / mailbox DELETE / RENAME. See "Roadmap" below.
 
 ## Architecture
@@ -18,16 +19,20 @@ submission), IMAP, and a layered spam pipeline — backed entirely by
 The protocol surfaces sit on one storage layer:
 
 ```
-        :25  SMTP (MX)   ─┐
-        :587 Submission  ─┤
-        :465 SMTPS       ─┼─►  spam pipeline ──►  store ──►  OxiDB
-        :143 IMAP        ─┤                         ▲          ├─ collections   (canonical metadata)
-        :993 IMAPS       ─┘                         │          ├─ blob store    (message bodies)
-                           outbound queue ──────────┘          └─ OxiMem        (ephemeral state)
+        :25   SMTP (MX)   ─┐
+        :587  Submission  ─┤
+        :465  SMTPS       ─┤
+        :143  IMAP        ─┼─►  spam pipeline ──►  store ──►  OxiDB
+        :993  IMAPS       ─┤                         ▲          ├─ collections   (canonical metadata)
+        :8080 Webmail API ─┘                         │          ├─ blob store    (message bodies)
+                            outbound queue ──────────┘          └─ OxiMem        (ephemeral state)
 ```
 
 STARTTLS is advertised on 25 / 587 / 143 when a certificate is
 configured; 465 / 993 are implicit-TLS listeners, started only then.
+The webmail API (`internal/webmail`) is an HTTP+JSON surface backed
+directly by the store — not via IMAP — for browser and mobile clients;
+it serves HTTPS when a certificate is configured.
 
 **Storage — OxiDB, all three tiers:**
 
@@ -73,6 +78,7 @@ internal/config/     configuration, loaded from the environment
 internal/store/      the OxiDB-backed data layer
 internal/smtp/       inbound SMTP (MX) + submission
 internal/imap/       IMAP server
+internal/webmail/    HTTP+JSON API for browser / mobile clients
 internal/spam/       the layered spam pipeline
 internal/queue/      outbound delivery queue
 ```
@@ -111,6 +117,9 @@ layer end to end:
   from queued relay, and STARTTLS / implicit-TLS submission.
 - **imap** — a real IMAP client doing LOGIN / LIST / SELECT / FETCH /
   STORE / APPEND / EXPUNGE, over plaintext and over STARTTLS / IMAPS.
+- **webmail** — a real HTTP client doing login, mailbox / message
+  listing, fetching a parsed message, and the auth / cross-account
+  access rejections.
 - **queue** — the worker delivering a queued message to a throwaway
   remote MX, and deferring one when the MX is unreachable.
 
@@ -143,3 +152,6 @@ skipped.
    blocklists, greylisting) done.* Still to do: the envelope stage
    (SPF / DKIM / DMARC, `emersion/go-msgauth`) and the content stage
    (Rspamd over HTTP).
+7. Webmail — *backend API scaffold (login, mailbox / message listing,
+   parsed message fetch) done.* Still to do: sending, search, flag
+   changes, move / delete, attachment download, and the frontend SPA.
