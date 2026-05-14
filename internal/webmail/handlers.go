@@ -2,9 +2,12 @@ package webmail
 
 import (
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/parisxmas/OxiMail/internal/store"
 )
@@ -107,20 +110,8 @@ type messageDetail struct {
 // handleGetMessage returns one message with its body parsed into text,
 // HTML, and an attachment listing.
 func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request, acc *store.Account) {
-	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid message id")
-		return
-	}
-	m, err := s.store.GetMessage(id)
-	// Hide other accounts' messages behind the same 404 as ones that do
-	// not exist, so the API does not leak which ids are in use.
-	if errors.Is(err, store.ErrNotFound) || (err == nil && m.AccountID != acc.ID) {
-		writeError(w, http.StatusNotFound, "no such message")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load message")
+	m, ok := s.loadOwnedMessage(w, r, acc)
+	if !ok {
 		return
 	}
 	raw, err := s.store.FetchBody(m)
@@ -139,6 +130,197 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request, acc *s
 		HTML:           body.HTML,
 		Attachments:    body.Attachments,
 	})
+}
+
+// flagsRequest is the body of PATCH /api/messages/{id}/flags.
+type flagsRequest struct {
+	Op    string   `json:"op"` // "add" | "remove" | "set"
+	Flags []string `json:"flags"`
+}
+
+// handleFlags changes a message's IMAP flags and returns its updated
+// summary.
+func (s *Server) handleFlags(w http.ResponseWriter, r *http.Request, acc *store.Account) {
+	m, ok := s.loadOwnedMessage(w, r, acc)
+	if !ok {
+		return
+	}
+	var req flagsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	var err error
+	switch req.Op {
+	case "add":
+		err = s.store.AddFlags(m.ID, req.Flags...)
+	case "remove":
+		err = s.store.RemoveFlags(m.ID, req.Flags...)
+	case "set":
+		err = s.store.SetFlags(m.ID, req.Flags)
+	default:
+		writeError(w, http.StatusBadRequest, `op must be "add", "remove", or "set"`)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not update flags")
+		return
+	}
+	updated, err := s.store.GetMessage(m.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not reload message")
+		return
+	}
+	writeJSON(w, http.StatusOK, summarize(updated))
+}
+
+// moveRequest is the body of POST /api/messages/{id}/move.
+type moveRequest struct {
+	Mailbox string `json:"mailbox"`
+}
+
+// handleMove moves a message into another of the account's mailboxes.
+func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, acc *store.Account) {
+	m, ok := s.loadOwnedMessage(w, r, acc)
+	if !ok {
+		return
+	}
+	var req moveRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	dest, err := s.store.GetMailboxByName(acc.ID, req.Mailbox)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "no such mailbox")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not open destination mailbox")
+		return
+	}
+	moved, err := s.store.MoveMessage(m.ID, dest.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not move message")
+		return
+	}
+	writeJSON(w, http.StatusOK, summarize(moved))
+}
+
+// handleDelete permanently removes a message.
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, acc *store.Account) {
+	m, ok := s.loadOwnedMessage(w, r, acc)
+	if !ok {
+		return
+	}
+	if err := s.store.DeleteMessage(m.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not delete message")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// sendRequest is the body of POST /api/messages.
+type sendRequest struct {
+	To      []string `json:"to"`
+	Cc      []string `json:"cc"`
+	Subject string   `json:"subject"`
+	Text    string   `json:"text"`
+}
+
+// sendResponse reports how a sent message was dispatched.
+type sendResponse struct {
+	Delivered int `json:"delivered"` // copies filed into local mailboxes
+	Queued    int `json:"queued"`    // recipients handed to the outbound queue
+}
+
+// handleSend composes a message from the request, files a copy into the
+// sender's Sent mailbox, and routes it: local recipients are delivered
+// directly, remote ones are queued for relay.
+func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, acc *store.Account) {
+	var req sendRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	recipients, err := collectRecipients(req.To, req.Cc)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	messageID := randomID() + "@" + addressDomain(acc.Address)
+	in := store.IncomingMessage{
+		Raw:       buildTextMessage(acc.Address, req.To, req.Cc, req.Subject, req.Text, messageID),
+		Subject:   req.Subject,
+		FromAddr:  acc.Address,
+		MessageID: messageID,
+	}
+
+	routed, err := s.store.Route(acc.Address, recipients, in)
+	if err != nil {
+		log.Printf("webmail: send from %s: %v", acc.Address, err)
+		writeError(w, http.StatusBadGateway, "could not send message")
+		return
+	}
+
+	// File a copy into Sent — best-effort; the message is already on its
+	// way, so a Sent-folder hiccup must not fail the send.
+	if sent, err := s.store.GetMailboxByName(acc.ID, "Sent"); err == nil {
+		if _, err := s.store.AppendMessage(sent.ID, in); err != nil {
+			log.Printf("webmail: save to Sent for %s: %v", acc.Address, err)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, sendResponse{Delivered: routed.LocalCount, Queued: routed.QueuedCount})
+}
+
+// loadOwnedMessage parses the {id} path value and loads the message,
+// requiring it to belong to acc. A message that is missing — or that
+// belongs to another account — yields the same 404, so the API does not
+// leak which ids are in use. It writes the error response itself and
+// returns ok=false when the caller should stop.
+func (s *Server) loadOwnedMessage(w http.ResponseWriter, r *http.Request, acc *store.Account) (*store.Message, bool) {
+	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid message id")
+		return nil, false
+	}
+	m, err := s.store.GetMessage(id)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && m.AccountID != acc.ID) {
+		writeError(w, http.StatusNotFound, "no such message")
+		return nil, false
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load message")
+		return nil, false
+	}
+	return m, true
+}
+
+// collectRecipients merges, trims, and de-duplicates the To and Cc
+// lists, requiring each address to look like an address and the result
+// to be non-empty.
+func collectRecipients(to, cc []string) ([]string, error) {
+	seen := make(map[string]bool)
+	var out []string
+	for _, addr := range append(append([]string{}, to...), cc...) {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			continue
+		}
+		if !strings.Contains(addr, "@") {
+			return nil, fmt.Errorf("invalid recipient address %q", addr)
+		}
+		if !seen[addr] {
+			seen[addr] = true
+			out = append(out, addr)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("at least one recipient is required")
+	}
+	return out, nil
 }
 
 // summarize projects a store.Message into its API summary.

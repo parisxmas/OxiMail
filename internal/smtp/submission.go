@@ -120,50 +120,19 @@ func (s *submissionSession) Data(r io.Reader) error {
 	}
 
 	subject, messageID, fromAddr := parseHeaders(raw)
-	in := store.IncomingMessage{
+	routed, err := s.store.Route(s.from, s.rcpts, store.IncomingMessage{
 		Raw:       raw,
 		MessageID: messageID,
 		Subject:   subject,
 		FromAddr:  fromAddr,
-	}
-
-	var (
-		remote     []string
-		localCount int
-		failed     int
-	)
-	for _, rcpt := range s.rcpts {
-		accts, err := s.store.ResolveRecipient(rcpt)
-		if err != nil {
-			log.Printf("submission: resolve %q: %v", rcpt, err)
-			return tempError("Temporary local problem, please try again later")
-		}
-		if len(accts) == 0 {
-			remote = append(remote, rcpt) // not a local mailbox — relay it
-			continue
-		}
-		for _, id := range accts {
-			if _, err := s.store.Deliver(id, in); err != nil {
-				log.Printf("submission: deliver to account %d failed: %v", id, err)
-				failed++
-				continue
-			}
-			localCount++
-		}
-	}
-
-	if len(remote) > 0 {
-		if _, err := s.store.Enqueue(s.from, remote, raw); err != nil {
-			log.Printf("submission: enqueue for %v failed: %v", remote, err)
-			return tempError("Could not queue message for delivery, please try again later")
-		}
-	}
-	if failed > 0 {
+	})
+	if err != nil {
+		log.Printf("submission: routing message from %s: %v", s.account.Address, err)
 		return tempError("Temporary delivery failure, please try again later")
 	}
 
 	log.Printf("submission: accepted from %s (%d bytes) — %d local, %d queued for relay",
-		s.account.Address, len(raw), localCount, len(remote))
+		s.account.Address, len(raw), routed.LocalCount, routed.QueuedCount)
 	return nil
 }
 

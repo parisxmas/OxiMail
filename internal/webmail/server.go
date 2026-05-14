@@ -51,6 +51,10 @@ func New(addr string, st *store.Store, tlsConfig *tls.Config) *Server {
 	mux.HandleFunc("GET /api/mailboxes", s.auth(s.handleMailboxes))
 	mux.HandleFunc("GET /api/mailboxes/{mailbox}/messages", s.auth(s.handleListMessages))
 	mux.HandleFunc("GET /api/messages/{id}", s.auth(s.handleGetMessage))
+	mux.HandleFunc("POST /api/messages", s.auth(s.handleSend))
+	mux.HandleFunc("PATCH /api/messages/{id}/flags", s.auth(s.handleFlags))
+	mux.HandleFunc("POST /api/messages/{id}/move", s.auth(s.handleMove))
+	mux.HandleFunc("DELETE /api/messages/{id}", s.auth(s.handleDelete))
 
 	s.srv = &http.Server{
 		Addr:              addr,

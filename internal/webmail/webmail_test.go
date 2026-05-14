@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -63,8 +64,10 @@ func TestWebmail(t *testing.T) {
 		t.Fatalf("seed INBOX message: %v", err)
 	}
 
-	// A second account, to test cross-account isolation.
-	if _, err := st.CreateAccount("other@oximail.test", hash, 0); err != nil {
+	// A second account, both to test cross-account isolation and to be
+	// a local recipient for the send test.
+	other, err := st.CreateAccount("other@oximail.test", hash, 0)
+	if err != nil {
 		t.Fatalf("create other account: %v", err)
 	}
 
@@ -173,6 +176,92 @@ func TestWebmail(t *testing.T) {
 			t.Fatalf("status = %d, want 404", status)
 		}
 	})
+
+	// --- mutations (these run after the read subtests, in order) ---
+
+	t.Run("send a message to a local recipient", func(t *testing.T) {
+		body := mustJSON(map[string]any{
+			"to":      []string{"other@oximail.test"},
+			"subject": "Sent from webmail",
+			"text":    "hello from the API",
+		})
+		var out struct{ Delivered, Queued int }
+		if status := postJSON(t, base+"/api/messages", token, body, &out); status != http.StatusOK {
+			t.Fatalf("status = %d, want 200", status)
+		}
+		if out.Delivered != 1 || out.Queued != 0 {
+			t.Fatalf("routed delivered=%d queued=%d, want 1/0", out.Delivered, out.Queued)
+		}
+		// The recipient received it.
+		otherInbox, err := st.GetMailboxByName(other.ID, "INBOX")
+		if err != nil {
+			t.Fatalf("get other INBOX: %v", err)
+		}
+		recvd, err := st.ListMessages(otherInbox.ID)
+		if err != nil {
+			t.Fatalf("list other INBOX: %v", err)
+		}
+		if len(recvd) != 1 || recvd[0].Subject != "Sent from webmail" {
+			t.Fatalf("recipient INBOX = %+v", recvd)
+		}
+		// A copy landed in the sender's Sent mailbox.
+		sent, err := st.GetMailboxByName(acc.ID, "Sent")
+		if err != nil {
+			t.Fatalf("get Sent: %v", err)
+		}
+		if sentMsgs, _ := st.ListMessages(sent.ID); len(sentMsgs) != 1 {
+			t.Fatalf("Sent has %d messages, want 1", len(sentMsgs))
+		}
+	})
+
+	t.Run("change flags", func(t *testing.T) {
+		body := mustJSON(map[string]any{"op": "add", "flags": []string{`\Seen`}})
+		var out struct{ Seen bool }
+		url := fmt.Sprintf("%s/api/messages/%d/flags", base, seeded.ID)
+		if status := patchJSON(t, url, token, body, &out); status != http.StatusOK {
+			t.Fatalf("status = %d, want 200", status)
+		}
+		if !out.Seen {
+			t.Error("seen = false after adding \\Seen")
+		}
+		// Verify it was persisted, not just echoed.
+		m, err := st.GetMessage(seeded.ID)
+		if err != nil {
+			t.Fatalf("get message: %v", err)
+		}
+		if !flagSet(m.Flags, `\Seen`) {
+			t.Errorf("\\Seen not persisted to the store: %v", m.Flags)
+		}
+	})
+
+	t.Run("move a message to another mailbox", func(t *testing.T) {
+		body := mustJSON(map[string]string{"mailbox": "Trash"})
+		url := fmt.Sprintf("%s/api/messages/%d/move", base, seeded.ID)
+		if status := postJSON(t, url, token, body, nil); status != http.StatusOK {
+			t.Fatalf("status = %d, want 200", status)
+		}
+		m, err := st.GetMessage(seeded.ID)
+		if err != nil {
+			t.Fatalf("get message: %v", err)
+		}
+		trash, err := st.GetMailboxByName(acc.ID, "Trash")
+		if err != nil {
+			t.Fatalf("get Trash: %v", err)
+		}
+		if m.MailboxID != trash.ID {
+			t.Errorf("message mailbox = %d, want Trash (%d)", m.MailboxID, trash.ID)
+		}
+	})
+
+	t.Run("delete a message", func(t *testing.T) {
+		url := fmt.Sprintf("%s/api/messages/%d", base, seeded.ID)
+		if status := del(t, url, token); status != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204", status)
+		}
+		if _, err := st.GetMessage(seeded.ID); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("message still present after delete: err = %v", err)
+		}
+	})
 }
 
 // -----------------------------------------------------------------------
@@ -182,6 +271,25 @@ func TestWebmail(t *testing.T) {
 func loginBody(address, password string) []byte {
 	b, _ := json.Marshal(map[string]string{"address": address, "password": password})
 	return b
+}
+
+// mustJSON marshals v or panics — for building request bodies in tests.
+func mustJSON(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// flagSet reports whether flag is present in flags.
+func flagSet(flags []string, flag string) bool {
+	for _, f := range flags {
+		if f == flag {
+			return true
+		}
+	}
+	return false
 }
 
 func post(t *testing.T, url, token string, body []byte) int {
@@ -211,6 +319,25 @@ func getJSON(t *testing.T, url, token string, out any) int {
 		t.Fatalf("new request: %v", err)
 	}
 	return doJSON(t, req, token, out)
+}
+
+func patchJSON(t *testing.T, url, token string, body []byte, out any) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPatch, url, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return doJSON(t, req, token, out)
+}
+
+func del(t *testing.T, url, token string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	return doJSON(t, req, token, nil)
 }
 
 func doJSON(t *testing.T, req *http.Request, token string, out any) int {

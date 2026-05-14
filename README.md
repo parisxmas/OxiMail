@@ -11,8 +11,10 @@ backed entirely by **OxiDB**.
 > connections — each with tests. The spam pipeline's connection-time
 > stage (rate limiting, DNS blocklists, greylisting) is built; its
 > envelope (SPF/DKIM/DMARC) and content (Rspamd) stages are not. The
-> webmail API is read-only so far, and the IMAP server still stubs
-> SEARCH / COPY / mailbox DELETE / RENAME. See "Roadmap" below.
+> webmail API does login, read, send, flag changes, move, and delete —
+> but no search or attachment download yet, and there is no frontend.
+> The IMAP server still stubs SEARCH / COPY / mailbox DELETE / RENAME.
+> See "Roadmap" below.
 
 ## Architecture
 
@@ -118,8 +120,8 @@ layer end to end:
 - **imap** — a real IMAP client doing LOGIN / LIST / SELECT / FETCH /
   STORE / APPEND / EXPUNGE, over plaintext and over STARTTLS / IMAPS.
 - **webmail** — a real HTTP client doing login, mailbox / message
-  listing, fetching a parsed message, and the auth / cross-account
-  access rejections.
+  listing, fetching a parsed message, sending, flag changes, move and
+  delete, and the auth / cross-account access rejections.
 - **queue** — the worker delivering a queued message to a throwaway
   remote MX, and deferring one when the MX is unreachable.
 
@@ -152,6 +154,6 @@ skipped.
    blocklists, greylisting) done.* Still to do: the envelope stage
    (SPF / DKIM / DMARC, `emersion/go-msgauth`) and the content stage
    (Rspamd over HTTP).
-7. Webmail — *backend API scaffold (login, mailbox / message listing,
-   parsed message fetch) done.* Still to do: sending, search, flag
-   changes, move / delete, attachment download, and the frontend SPA.
+7. Webmail — *backend API done: login, mailbox / message listing,
+   parsed message fetch, send, flag changes, move, delete.* Still to
+   do: search, attachment download, and the frontend SPA.

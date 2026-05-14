@@ -229,6 +229,47 @@ func (s *Store) modifyFlags(messageID uint64, update map[string]any) error {
 	return nil
 }
 
+// MoveMessage moves a message into another of the same account's
+// mailboxes, allocating a fresh UID in the destination (IMAP UIDs are
+// per-mailbox). The body blob is untouched — only the document's
+// mailbox and UID change. It backs the webmail "move" action and, in
+// time, IMAP MOVE.
+func (s *Store) MoveMessage(messageID, destMailboxID uint64) (*Message, error) {
+	msg, err := s.GetMessage(messageID)
+	if err != nil {
+		return nil, err
+	}
+	if msg.MailboxID == destMailboxID {
+		return msg, nil // already there
+	}
+	dest, err := s.GetMailbox(destMailboxID)
+	if err != nil {
+		return nil, err
+	}
+	if dest.AccountID != msg.AccountID {
+		return nil, fmt.Errorf("store: move message %d: destination mailbox belongs to another account", messageID)
+	}
+
+	uid, err := s.NextUID(destMailboxID)
+	if err != nil {
+		return nil, err
+	}
+	doc, err := s.db.FindAndModify(
+		CollMessages,
+		map[string]any{"_id": messageID},
+		map[string]any{"$set": map[string]any{"mailbox_id": destMailboxID, "uid": uid}},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: move message %d: %w", messageID, err)
+	}
+	if doc == nil {
+		return nil, ErrNotFound
+	}
+	msg.MailboxID = destMailboxID
+	msg.UID = uid
+	return msg, nil
+}
+
 // DeleteMessage removes a message: the metadata document first, then its
 // body blob (an orphaned blob is just wasted disk; a document pointing
 // at a missing blob would be a broken read). The account's used-bytes
