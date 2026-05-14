@@ -6,29 +6,23 @@
 //
 //	go test -tags=integration ./internal/store/...
 //
-// The test boots its own oxidb-server in a temp directory. It looks for
-// the binary at $OXIDB_BIN, then at ../../../docdb/target/{release,debug}
-// /oxidb-server; if none is found the test is skipped (not failed).
+// The oxidb-server harness lives in internal/itest; if the server
+// binary cannot be found the test is skipped, not failed.
 package store_test
 
 import (
 	"bytes"
 	"errors"
 	"fmt"
-	"net"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"sync"
-	"syscall"
 	"testing"
-	"time"
 
+	"github.com/parisxmas/OxiMail/internal/itest"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
 func TestStore(t *testing.T) {
-	host, port := startOxiDB(t)
+	host, port := itest.StartOxiDB(t)
 
 	st, err := store.Open(host, port)
 	if err != nil {
@@ -397,85 +391,4 @@ func mailboxNames(boxes []store.Mailbox) []string {
 		names[i] = b.Name
 	}
 	return names
-}
-
-// -----------------------------------------------------------------------
-// oxidb-server harness
-// -----------------------------------------------------------------------
-
-// startOxiDB boots an oxidb-server in a fresh temp directory on a free
-// port and registers its teardown with t. If the server binary cannot
-// be found the test is skipped, not failed.
-func startOxiDB(t *testing.T) (host string, port int) {
-	t.Helper()
-	bin := findOxiDBBinary(t)
-
-	port = freePort(t)
-	cmd := exec.Command(bin)
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("OXIDB_ADDR=127.0.0.1:%d", port),
-		"OXIDB_DATA="+t.TempDir(),
-		"OXIDB_S3_PORT=0",
-		"OXIDB_IDLE_TIMEOUT=120",
-	)
-	cmd.Stdout = os.Stderr // surfaced by `go test` only on failure
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start oxidb-server: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		_, _ = cmd.Process.Wait()
-	})
-
-	waitReady(t, port)
-	return "127.0.0.1", port
-}
-
-// findOxiDBBinary locates the oxidb-server binary: $OXIDB_BIN, then the
-// release and debug build outputs of the sibling OxiDB checkout.
-func findOxiDBBinary(t *testing.T) string {
-	t.Helper()
-	if bin := os.Getenv("OXIDB_BIN"); bin != "" {
-		if _, err := os.Stat(bin); err == nil {
-			return bin
-		}
-		t.Fatalf("OXIDB_BIN=%s does not exist", bin)
-	}
-	for _, p := range []string{
-		"../../../docdb/target/release/oxidb-server",
-		"../../../docdb/target/debug/oxidb-server",
-	} {
-		if abs, err := filepath.Abs(p); err == nil {
-			if _, err := os.Stat(abs); err == nil {
-				return abs
-			}
-		}
-	}
-	t.Skip("oxidb-server binary not found — set OXIDB_BIN or build it (cargo build -p oxidb-server)")
-	return ""
-}
-
-func freePort(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("pick free port: %v", err)
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
-}
-
-func waitReady(t *testing.T, port int) {
-	t.Helper()
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
-			_ = c.Close()
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("oxidb-server did not become ready on :%d within 10s", port)
 }

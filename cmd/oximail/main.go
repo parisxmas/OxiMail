@@ -39,7 +39,7 @@ func main() {
 
 	// Components.
 	pipeline := spam.New(cfg.RspamdURL)
-	smtpSrv := smtp.New(cfg.SMTPAddr, st, pipeline)
+	smtpSrv := smtp.New(cfg.SMTPAddr, cfg.Hostname, st, pipeline)
 	imapSrv := imap.New(cfg.IMAPAddr, st)
 	outQueue := queue.New(st)
 	// TODO: submission server on cfg.SubmissionAddr (authenticated send).

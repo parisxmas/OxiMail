@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -120,6 +121,28 @@ func (s *Store) AppendMessage(mailboxID uint64, in IncomingMessage) (*Message, e
 		map[string]any{"$inc": map[string]any{"used_bytes": msg.SizeBytes}},
 	)
 	return msg, nil
+}
+
+// Deliver files an inbound message into an account's INBOX. It is the
+// delivery entry point for the SMTP server (and, later, local alias
+// forwarding): callers resolve a recipient address to account IDs with
+// ResolveRecipient, then Deliver to each.
+//
+// The account's default mailboxes are created on first delivery if they
+// do not exist yet, so an account is reachable the moment it is created
+// without a separate provisioning step.
+func (s *Store) Deliver(accountID uint64, in IncomingMessage) (*Message, error) {
+	mb, err := s.GetMailboxByName(accountID, "INBOX")
+	if errors.Is(err, ErrNotFound) {
+		if err := s.EnsureDefaultMailboxes(accountID); err != nil {
+			return nil, fmt.Errorf("store: deliver to account %d: %w", accountID, err)
+		}
+		mb, err = s.GetMailboxByName(accountID, "INBOX")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: deliver to account %d: %w", accountID, err)
+	}
+	return s.AppendMessage(mb.ID, in)
 }
 
 // GetMessage looks a message up by its OxiDB id.

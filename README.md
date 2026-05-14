@@ -4,11 +4,11 @@
 submission), IMAP, and a layered spam pipeline — backed entirely by
 **OxiDB**.
 
-> Status: **early.** The structure, configuration, component wiring, and
-> the OxiDB-backed store layer (schema, entity types, CRUD, and an
-> integration test against a live `oxidb-server`) are built; the SMTP /
-> IMAP / spam / queue protocol implementations are still stubs. See
-> "Roadmap" below.
+> Status: **early.** The structure, configuration, component wiring, the
+> OxiDB-backed store layer, and the inbound SMTP (MX) server are built,
+> each with integration tests against a live `oxidb-server`. The IMAP,
+> spam-pipeline, outbound-queue, and submission implementations are
+> still stubs. See "Roadmap" below.
 
 ## Architecture
 
@@ -74,23 +74,27 @@ Configuration is via `OXIMAIL_*` environment variables — see
 
 ## Testing
 
-The store layer has an integration test that boots its own
-`oxidb-server` and exercises the schema, the entity CRUD, the cascade
-delete, and concurrent UID allocation. It is gated behind a build tag:
+The integration tests boot a throwaway `oxidb-server` and exercise a
+layer end to end — the store (schema, entity CRUD, cascade delete,
+concurrent UID allocation) and the SMTP server (a real SMTP client
+delivering into a mailbox, and recipient rejection). They are gated
+behind a build tag:
 
 ```sh
-go test -tags=integration ./internal/store/...
+go test -tags=integration ./internal/...
 ```
 
-It finds the server binary at `$OXIDB_BIN`, or at the sibling OxiDB
-checkout's `target/{release,debug}/oxidb-server`; if neither exists the
-test is skipped.
+The shared harness (`internal/itest`) finds the server binary at
+`$OXIDB_BIN`, or at the sibling OxiDB checkout's
+`target/{release,debug}/oxidb-server`; if neither exists the tests are
+skipped.
 
 ## Roadmap
 
 1. ~~Store layer — collection schema, entity types and operations, and
    an integration test against a live `oxidb-server`.~~ *Done.*
-2. Inbound SMTP on `emersion/go-smtp`.
+2. ~~Inbound SMTP (MX) on `emersion/go-smtp` — spam-pipeline call,
+   recipient resolution, delivery into mailboxes.~~ *Done.*
 3. IMAP on `emersion/go-imap`.
 4. Spam pipeline — DNSBL / greylisting / rate limits, then SPF/DKIM/DMARC
    (`emersion/go-msgauth`), then Rspamd.
