@@ -41,16 +41,19 @@ const (
 	maxMessageBytes = 25 << 20 // 25 MiB
 )
 
-// Server is the inbound SMTP listener.
+// Server is an SMTP listener — either the inbound MX (New) or the
+// submission server (NewSubmission). The two share this lifecycle; they
+// differ only in their go-smtp backend.
 type Server struct {
+	name string // "smtp" or "submission", for log lines
 	addr string
 	srv  *gosmtp.Server
 }
 
-// New builds the inbound SMTP server bound to `addr`, announcing
-// `hostname` in its greeting.
-func New(addr, hostname string, st *store.Store, sp *spam.Pipeline) *Server {
-	srv := gosmtp.NewServer(&backend{store: st, spam: sp})
+// newServer builds a go-smtp server with OxiMail's shared tuning, for
+// the given backend.
+func newServer(addr, hostname string, be gosmtp.Backend) *gosmtp.Server {
+	srv := gosmtp.NewServer(be)
 	srv.Addr = addr
 	srv.Domain = hostname
 	srv.ReadTimeout = readTimeout
@@ -58,7 +61,17 @@ func New(addr, hostname string, st *store.Store, sp *spam.Pipeline) *Server {
 	srv.MaxMessageBytes = maxMessageBytes
 	srv.MaxRecipients = maxRecipients
 	srv.ErrorLog = log.Default()
-	return &Server{addr: addr, srv: srv}
+	return srv
+}
+
+// New builds the inbound SMTP (MX) server bound to `addr`, announcing
+// `hostname` in its greeting.
+func New(addr, hostname string, st *store.Store, sp *spam.Pipeline) *Server {
+	return &Server{
+		name: "smtp",
+		addr: addr,
+		srv:  newServer(addr, hostname, &backend{store: st, spam: sp}),
+	}
 }
 
 // Start listens and serves until `ctx` is cancelled, then shuts the
@@ -73,7 +86,7 @@ func (s *Server) Start(ctx context.Context) error {
 		errc <- err
 	}()
 
-	log.Printf("smtp: listening on %s", s.addr)
+	log.Printf("%s: listening on %s", s.name, s.addr)
 	select {
 	case <-ctx.Done():
 		return s.Stop()
@@ -90,7 +103,7 @@ func (s *Server) Stop() error {
 	if err := s.srv.Shutdown(ctx); err != nil && !errors.Is(err, gosmtp.ErrServerClosed) {
 		return err
 	}
-	log.Print("smtp: stopped")
+	log.Printf("%s: stopped", s.name)
 	return nil
 }
 

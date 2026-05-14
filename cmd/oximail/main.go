@@ -40,9 +40,9 @@ func main() {
 	// Components.
 	pipeline := spam.New(cfg.RspamdURL)
 	smtpSrv := smtp.New(cfg.SMTPAddr, cfg.Hostname, st, pipeline)
+	subSrv := smtp.NewSubmission(cfg.SubmissionAddr, cfg.Hostname, st)
 	imapSrv := imap.New(cfg.IMAPAddr, st)
-	outQueue := queue.New(st)
-	// TODO: submission server on cfg.SubmissionAddr (authenticated send).
+	outQueue := queue.New(st, cfg.Hostname)
 
 	// Run each component until the process is asked to stop.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -59,12 +59,14 @@ func main() {
 		}()
 	}
 	run("smtp", smtpSrv.Start)
+	run("submission", subSrv.Start)
 	run("imap", imapSrv.Start)
 	run("queue", outQueue.Start)
 
 	<-ctx.Done()
 	log.Print("shutdown signal received")
 	_ = smtpSrv.Stop()
+	_ = subSrv.Stop()
 	_ = imapSrv.Stop()
 	_ = outQueue.Stop()
 	wg.Wait()

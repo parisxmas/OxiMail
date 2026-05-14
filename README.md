@@ -4,12 +4,13 @@
 submission), IMAP, and a layered spam pipeline — backed entirely by
 **OxiDB**.
 
-> Status: **early.** The structure, configuration, component wiring, the
-> OxiDB-backed store layer, the inbound SMTP (MX) server, and the IMAP
-> server are built, each with integration tests against a live
-> `oxidb-server`. The IMAP server still stubs SEARCH, COPY, and mailbox
-> DELETE / RENAME. The spam-pipeline, outbound-queue, and submission
-> implementations are stubs. See "Roadmap" below.
+> Status: **early.** The store layer, the inbound SMTP (MX) server, the
+> IMAP server, the submission server (port 587), and the outbound
+> delivery queue are built — mail can be received, read, sent, and
+> relayed — each with integration tests against a live `oxidb-server`.
+> The spam pipeline is still a stub (every message is accepted), the
+> IMAP server still stubs SEARCH / COPY / mailbox DELETE / RENAME, and
+> there is no TLS yet. See "Roadmap" below.
 
 ## Architecture
 
@@ -76,11 +77,19 @@ Configuration is via `OXIMAIL_*` environment variables — see
 ## Testing
 
 The integration tests boot a throwaway `oxidb-server` and exercise a
-layer end to end — the store (schema, entity CRUD, cascade delete,
-concurrent UID allocation), the SMTP server (a real SMTP client
-delivering into a mailbox, and recipient rejection), and the IMAP
-server (a real IMAP client doing LOGIN / LIST / SELECT / FETCH / STORE /
-APPEND / EXPUNGE). They are gated behind a build tag:
+layer end to end:
+
+- **store** — schema, entity CRUD, cascade delete, concurrent UID
+  allocation.
+- **smtp** — a real SMTP client delivering into a mailbox, recipient
+  rejection, and (submission) authenticated send splitting local
+  delivery from queued relay.
+- **imap** — a real IMAP client doing LOGIN / LIST / SELECT / FETCH /
+  STORE / APPEND / EXPUNGE.
+- **queue** — the worker delivering a queued message to a throwaway
+  remote MX, and deferring one when the MX is unreachable.
+
+They are gated behind a build tag:
 
 ```sh
 go test -tags=integration ./internal/...
@@ -100,6 +109,9 @@ skipped.
 3. ~~IMAP on `emersion/go-imap/v2` — LOGIN, LIST, SELECT, STATUS, FETCH,
    STORE, APPEND, EXPUNGE.~~ *Done.* Still to do: SEARCH, COPY, mailbox
    DELETE / RENAME, SASL AUTHENTICATE, and STARTTLS / IMAPS.
-4. Spam pipeline — DNSBL / greylisting / rate limits, then SPF/DKIM/DMARC
+4. ~~Submission (port 587) + the outbound delivery queue — SMTP AUTH,
+   local/remote recipient split, MX delivery with retry/backoff.~~
+   *Done.* Still to do: bounce messages for permanent failures.
+5. Spam pipeline — DNSBL / greylisting / rate limits, then SPF/DKIM/DMARC
    (`emersion/go-msgauth`), then Rspamd.
-5. Outbound queue + submission (port 587).
+6. TLS — STARTTLS on 25 / 587 / 143, implicit TLS on 465 / 993.
