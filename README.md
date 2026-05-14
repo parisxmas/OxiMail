@@ -12,7 +12,8 @@ layered spam pipeline — backed entirely by **OxiDB**.
 > three stages — connection-time (rate limiting, DNS blocklists,
 > greylisting), envelope (SPF/DKIM/DMARC), and content (Rspamd) — are
 > built. The webmail API does login, read, send, flag changes, move, and
-> delete — no search or attachment download yet. The IMAP server still
+> delete — no search or attachment download yet. The `oximailctl` admin
+> CLI provisions domains, accounts, and aliases. The IMAP server still
 > stubs SEARCH / COPY / mailbox DELETE / RENAME. See "Roadmap" below.
 
 ## Architecture
@@ -83,7 +84,8 @@ tests, and for operators who filter elsewhere.
 ## Layout
 
 ```
-cmd/oximail/         entry point — config, wiring, graceful shutdown
+cmd/oximail/         server entry point — config, wiring, graceful shutdown
+cmd/oximailctl/      administration CLI — domains, accounts, aliases
 internal/config/     configuration, loaded from the environment
 internal/store/      the OxiDB-backed data layer
 internal/smtp/       inbound SMTP (MX) + submission
@@ -122,6 +124,25 @@ OXIMAIL_WEBMAIL_STATIC=web/dist/oximail-webmail/browser ./oximail
 Without `OXIMAIL_WEBMAIL_STATIC` the webmail port serves the JSON API
 only. See `web/README.md` for the frontend.
 
+## Administration
+
+`oximailctl` provisions domains, accounts, and aliases directly against
+the store. It reads the same `OXIMAIL_OXIDB_*` environment variables as
+the server.
+
+```sh
+go build ./cmd/oximailctl
+
+oximailctl domain  add example.com
+echo 's3cret' | oximailctl account add -quota 1073741824 alice@example.com
+oximailctl alias   add sales@example.com alice@example.com,bob@example.com
+oximailctl account list
+oximailctl account delete alice@example.com      # also removes its mail
+```
+
+`account add` reads the password from stdin. Run `oximailctl help` for
+the full command list.
+
 ## Testing
 
 `go test ./...` runs the fast unit tests — `internal/config` (TLS
@@ -144,11 +165,13 @@ layer end to end:
   delete, and the auth / cross-account access rejections.
 - **queue** — the worker delivering a queued message to a throwaway
   remote MX, and deferring one when the MX is unreachable.
+- **oximailctl** — the admin CLI provisioning a domain, an account
+  (then authenticating as it), and an alias, then deleting them.
 
 They are gated behind a build tag:
 
 ```sh
-go test -tags=integration ./internal/...
+go test -tags=integration ./...
 ```
 
 The shared harness (`internal/itest`) finds the server binary at
@@ -177,3 +200,9 @@ skipped.
    parsed message fetch, send, flag changes, move, delete) and an
    Angular 21 SPA frontend (`web/`) over it.* Still to do: search,
    attachment download, and HTML compose.
+8. ~~Administration — `oximailctl` CLI for domains, accounts, and
+   aliases.~~ *Done.* Still to do: a password-change command, and
+   domain delete.
+
+Beyond the roadmap: outbound DKIM signing, IMAP SEARCH / COPY /
+mailbox DELETE / RENAME / SASL, bounce messages, and observability.

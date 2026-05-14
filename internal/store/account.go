@@ -80,6 +80,23 @@ func (s *Store) GetDomain(domain string) (*Domain, error) {
 	return &d, nil
 }
 
+// ListDomains returns every hosted domain.
+func (s *Store) ListDomains() ([]Domain, error) {
+	rows, err := s.db.Find(CollDomains, map[string]any{}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: list domains: %w", err)
+	}
+	out := make([]Domain, 0, len(rows))
+	for _, r := range rows {
+		var d Domain
+		if err := decodeDoc(r, &d); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
 // CreateAccount registers a mailbox account. The domain is derived from
 // the address; the caller is responsible for hashing the password.
 func (s *Store) CreateAccount(address, passwordHash string, quotaBytes int64) (*Account, error) {
@@ -163,6 +180,28 @@ func (s *Store) GetAccountByID(id uint64) (*Account, error) {
 	return &a, nil
 }
 
+// ListAccounts returns every account, or — when `domain` is non-empty —
+// just the accounts in that domain.
+func (s *Store) ListAccounts(domain string) ([]Account, error) {
+	query := map[string]any{}
+	if domain != "" {
+		query["domain"] = strings.ToLower(domain)
+	}
+	rows, err := s.db.Find(CollAccounts, query, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: list accounts: %w", err)
+	}
+	out := make([]Account, 0, len(rows))
+	for _, r := range rows {
+		var a Account
+		if err := decodeDoc(r, &a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
 // DeleteAccount removes an account and everything that hangs off it.
 //
 // OxiDB has no foreign keys or cascading deletes, so this layer performs
@@ -236,6 +275,32 @@ func (s *Store) GetAlias(address string) (*Alias, error) {
 		return nil, err
 	}
 	return &al, nil
+}
+
+// ListAliases returns every forwarding alias.
+func (s *Store) ListAliases() ([]Alias, error) {
+	rows, err := s.db.Find(CollAliases, map[string]any{}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: list aliases: %w", err)
+	}
+	out := make([]Alias, 0, len(rows))
+	for _, r := range rows {
+		var al Alias
+		if err := decodeDoc(r, &al); err != nil {
+			return nil, err
+		}
+		out = append(out, al)
+	}
+	return out, nil
+}
+
+// DeleteAlias removes a forwarding alias by address. Deleting an alias
+// that does not exist is not an error.
+func (s *Store) DeleteAlias(address string) error {
+	if _, err := s.db.Delete(CollAliases, map[string]any{"address": strings.ToLower(address)}); err != nil {
+		return fmt.Errorf("store: delete alias %q: %w", address, err)
+	}
+	return nil
 }
 
 // ResolveRecipient maps an inbound RCPT address to the local account IDs

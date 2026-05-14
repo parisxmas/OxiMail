@@ -364,6 +364,58 @@ func TestStore(t *testing.T) {
 			t.Fatal("a body blob survived DeleteAccount")
 		}
 	})
+
+	t.Run("admin list and delete operations", func(t *testing.T) {
+		if _, err := st.CreateDomain("adminlist.test"); err != nil {
+			t.Fatalf("create domain: %v", err)
+		}
+		domains, err := st.ListDomains()
+		if err != nil {
+			t.Fatalf("list domains: %v", err)
+		}
+		if !domainListed(domains, "adminlist.test") {
+			t.Fatal("ListDomains is missing the created domain")
+		}
+
+		// Two accounts in a domain unique to this subtest, so the
+		// per-domain filter has an exact expected count.
+		for _, addr := range []string{"u1@adminaccts.test", "u2@adminaccts.test"} {
+			if _, err := st.CreateAccount(addr, "h", 0); err != nil {
+				t.Fatalf("create account %s: %v", addr, err)
+			}
+		}
+		inDomain, err := st.ListAccounts("adminaccts.test")
+		if err != nil {
+			t.Fatalf("list accounts by domain: %v", err)
+		}
+		if len(inDomain) != 2 {
+			t.Fatalf("ListAccounts(adminaccts.test) = %d, want 2", len(inDomain))
+		}
+		all, err := st.ListAccounts("")
+		if err != nil {
+			t.Fatalf("list all accounts: %v", err)
+		}
+		if len(all) < len(inDomain) {
+			t.Fatalf("ListAccounts(\"\") = %d, want at least %d", len(all), len(inDomain))
+		}
+
+		if _, err := st.CreateAlias("team@adminaccts.test", []string{"u1@adminaccts.test"}); err != nil {
+			t.Fatalf("create alias: %v", err)
+		}
+		aliases, err := st.ListAliases()
+		if err != nil {
+			t.Fatalf("list aliases: %v", err)
+		}
+		if !aliasListed(aliases, "team@adminaccts.test") {
+			t.Fatal("ListAliases is missing the created alias")
+		}
+		if err := st.DeleteAlias("team@adminaccts.test"); err != nil {
+			t.Fatalf("delete alias: %v", err)
+		}
+		if _, err := st.GetAlias("team@adminaccts.test"); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("alias still present after delete: err = %v", err)
+		}
+	})
 }
 
 // flagsOf re-reads a message and returns its flags.
@@ -395,4 +447,22 @@ func mailboxNames(boxes []store.Mailbox) []string {
 		names[i] = b.Name
 	}
 	return names
+}
+
+func domainListed(domains []store.Domain, name string) bool {
+	for _, d := range domains {
+		if d.Domain == name {
+			return true
+		}
+	}
+	return false
+}
+
+func aliasListed(aliases []store.Alias, address string) bool {
+	for _, a := range aliases {
+		if a.Address == address {
+			return true
+		}
+	}
+	return false
 }
