@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -291,6 +292,167 @@ func TestIMAPTLS(t *testing.T) {
 	})
 }
 
+// TestIMAPSearch covers the SEARCH command: metadata criteria (flags,
+// size, sequence) over the snapshot, and header / body criteria that
+// read the message from the blob store.
+func TestIMAPSearch(t *testing.T) {
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	hash, err := store.HashPassword(testPassword)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	acc, err := st.CreateAccount(testAddr, hash, 0)
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if err := st.EnsureDefaultMailboxes(acc.ID); err != nil {
+		t.Fatalf("ensure mailboxes: %v", err)
+	}
+	inbox, err := st.GetMailboxByName(acc.ID, "INBOX")
+	if err != nil {
+		t.Fatalf("get INBOX: %v", err)
+	}
+
+	// Seed INBOX with three messages of varied sender, subject, body,
+	// size, and flags — they become sequence numbers 1, 2, 3.
+	seed := func(from, subject, body string, flags []string) *store.Message {
+		t.Helper()
+		raw := []byte("From: " + from + "\r\nTo: " + testAddr + "\r\n" +
+			"Subject: " + subject + "\r\nDate: Wed, 14 May 2025 10:00:00 +0000\r\n" +
+			"\r\n" + body + "\r\n")
+		m, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+			Raw: raw, Subject: subject, FromAddr: from, Flags: flags,
+		})
+		if err != nil {
+			t.Fatalf("seed message: %v", err)
+		}
+		return m
+	}
+	seed("alice@partners.test", "Quarterly report", "the revenue numbers look strong", nil)
+	m2 := seed("bob@partners.test", "Lunch tomorrow?", "want to grab lunch", []string{`\Seen`})
+	seed("alice@partners.test", "Re: Quarterly report", "thanks — "+strings.Repeat("padding ", 400), nil)
+
+	addr := startIMAP(t, st, nil, false)
+	c := dial(t, addr)
+	t.Cleanup(func() { _ = c.Close() })
+	if err := c.Login(testAddr, testPassword).Wait(); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+		t.Fatalf("select INBOX: %v", err)
+	}
+
+	// searchSeq runs a SEARCH and returns the matched sequence numbers.
+	searchSeq := func(t *testing.T, criteria *goimap.SearchCriteria) []uint32 {
+		t.Helper()
+		data, err := c.Search(criteria, nil).Wait()
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		return data.AllSeqNums()
+	}
+
+	t.Run("ALL", func(t *testing.T) {
+		if got := searchSeq(t, &goimap.SearchCriteria{}); len(got) != 3 {
+			t.Fatalf("SEARCH ALL = %v, want 3 messages", got)
+		}
+	})
+
+	t.Run("FROM", func(t *testing.T) {
+		got := searchSeq(t, &goimap.SearchCriteria{
+			Header: []goimap.SearchCriteriaHeaderField{{Key: "From", Value: "alice"}},
+		})
+		if !sameSet(got, []uint32{1, 3}) {
+			t.Fatalf("SEARCH FROM alice = %v, want [1 3]", got)
+		}
+	})
+
+	t.Run("SUBJECT", func(t *testing.T) {
+		got := searchSeq(t, &goimap.SearchCriteria{
+			Header: []goimap.SearchCriteriaHeaderField{{Key: "Subject", Value: "report"}},
+		})
+		if !sameSet(got, []uint32{1, 3}) {
+			t.Fatalf("SEARCH SUBJECT report = %v, want [1 3]", got)
+		}
+	})
+
+	t.Run("SEEN and UNSEEN", func(t *testing.T) {
+		if got := searchSeq(t, &goimap.SearchCriteria{Flag: []goimap.Flag{goimap.FlagSeen}}); !sameSet(got, []uint32{2}) {
+			t.Fatalf("SEARCH SEEN = %v, want [2]", got)
+		}
+		if got := searchSeq(t, &goimap.SearchCriteria{NotFlag: []goimap.Flag{goimap.FlagSeen}}); !sameSet(got, []uint32{1, 3}) {
+			t.Fatalf("SEARCH UNSEEN = %v, want [1 3]", got)
+		}
+	})
+
+	t.Run("BODY", func(t *testing.T) {
+		if got := searchSeq(t, &goimap.SearchCriteria{Body: []string{"lunch"}}); !sameSet(got, []uint32{2}) {
+			t.Fatalf("SEARCH BODY lunch = %v, want [2]", got)
+		}
+	})
+
+	t.Run("LARGER", func(t *testing.T) {
+		// m3's padded body makes it far larger than the other two.
+		if got := searchSeq(t, &goimap.SearchCriteria{Larger: 1000}); !sameSet(got, []uint32{3}) {
+			t.Fatalf("SEARCH LARGER 1000 = %v, want [3]", got)
+		}
+	})
+
+	t.Run("NOT", func(t *testing.T) {
+		got := searchSeq(t, &goimap.SearchCriteria{
+			Not: []goimap.SearchCriteria{{
+				Header: []goimap.SearchCriteriaHeaderField{{Key: "From", Value: "alice"}},
+			}},
+		})
+		if !sameSet(got, []uint32{2}) {
+			t.Fatalf("SEARCH NOT FROM alice = %v, want [2]", got)
+		}
+	})
+
+	t.Run("OR", func(t *testing.T) {
+		got := searchSeq(t, &goimap.SearchCriteria{
+			Or: [][2]goimap.SearchCriteria{{
+				{Body: []string{"lunch"}},
+				{Body: []string{"revenue"}},
+			}},
+		})
+		if !sameSet(got, []uint32{1, 2}) {
+			t.Fatalf("SEARCH OR BODY lunch BODY revenue = %v, want [1 2]", got)
+		}
+	})
+
+	t.Run("no matches", func(t *testing.T) {
+		if got := searchSeq(t, &goimap.SearchCriteria{
+			Header: []goimap.SearchCriteriaHeaderField{{Key: "From", Value: "nobody"}},
+		}); len(got) != 0 {
+			t.Fatalf("SEARCH FROM nobody = %v, want no matches", got)
+		}
+	})
+
+	t.Run("UID SEARCH", func(t *testing.T) {
+		data, err := c.UIDSearch(&goimap.SearchCriteria{
+			Header: []goimap.SearchCriteriaHeaderField{{Key: "From", Value: "bob"}},
+		}, nil).Wait()
+		if err != nil {
+			t.Fatalf("uid search: %v", err)
+		}
+		uids := data.AllUIDs()
+		if len(uids) != 1 || uids[0] != goimap.UID(m2.UID) {
+			t.Fatalf("UID SEARCH FROM bob = %v, want [%d]", uids, m2.UID)
+		}
+	})
+}
+
 // startIMAP launches the IMAP server on a free port, wired to st, and
 // returns its address. A non-nil tlsConfig enables STARTTLS; implicit
 // additionally serves implicit TLS (IMAPS). It is shut down when the
@@ -349,4 +511,25 @@ func hasStringFlag(flags []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// sameSet reports whether got and want hold the same uint32 values,
+// regardless of order.
+func sameSet(got, want []uint32) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	counts := make(map[uint32]int, len(got))
+	for _, v := range got {
+		counts[v]++
+	}
+	for _, v := range want {
+		counts[v]--
+	}
+	for _, n := range counts {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
 }

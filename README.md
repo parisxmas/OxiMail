@@ -16,8 +16,8 @@ layered spam pipeline — backed entirely by **OxiDB**.
 > CLI provisions domains, accounts, and aliases and generates per-domain
 > DKIM keys; outbound mail is DKIM-signed by the delivery queue, which
 > also returns a bounce to the sender on permanent failure. The IMAP
-> server still stubs SEARCH / COPY / mailbox DELETE / RENAME. See
-> "Roadmap" below.
+> server still stubs COPY and mailbox DELETE / RENAME. See "Roadmap"
+> below.
 
 ## Architecture
 
@@ -166,7 +166,8 @@ layer end to end:
   rejection, (submission) authenticated send splitting local delivery
   from queued relay, and STARTTLS / implicit-TLS submission.
 - **imap** — a real IMAP client doing LOGIN / LIST / SELECT / FETCH /
-  STORE / APPEND / EXPUNGE, over plaintext and over STARTTLS / IMAPS.
+  STORE / APPEND / EXPUNGE / SEARCH, over plaintext and over
+  STARTTLS / IMAPS.
 - **webmail** — a real HTTP client doing login, mailbox / message
   listing, fetching a parsed message, sending, flag changes, move and
   delete, and the auth / cross-account access rejections.
@@ -193,7 +194,7 @@ skipped.
 2. ~~Inbound SMTP (MX) on `emersion/go-smtp` — spam-pipeline call,
    recipient resolution, delivery into mailboxes.~~ *Done.*
 3. ~~IMAP on `emersion/go-imap/v2` — LOGIN, LIST, SELECT, STATUS, FETCH,
-   STORE, APPEND, EXPUNGE.~~ *Done.* Still to do: SEARCH, COPY, mailbox
+   STORE, APPEND, EXPUNGE, SEARCH.~~ *Done.* Still to do: COPY, mailbox
    DELETE / RENAME, SASL AUTHENTICATE.
 4. ~~Submission (port 587) + the outbound delivery queue — SMTP AUTH,
    local/remote recipient split, MX delivery with retry/backoff.~~
@@ -216,5 +217,5 @@ skipped.
     notification to the sender on a permanent failure or exhausted
     retries; never bounces a null-sender message.~~ *Done.*
 
-Beyond the roadmap: IMAP SEARCH / COPY / mailbox DELETE / RENAME / SASL,
-and observability.
+Beyond the roadmap: IMAP COPY / mailbox DELETE / RENAME / SASL, and
+observability.

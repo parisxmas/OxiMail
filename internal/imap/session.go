@@ -318,10 +318,11 @@ func (s *session) Expunge(w *imapserver.ExpungeWriter, uids *imap.UIDSet) error 
 	return s.mbox.expunge(w, uids)
 }
 
-func (s *session) Search(imapserver.NumKind, *imap.SearchCriteria, *imap.SearchOptions) (*imap.SearchData, error) {
-	// TODO: criteria matching (flags, dates, sizes) over the snapshot,
-	// and body-text search via OxiDB FTS.
-	return nil, notImplemented("SEARCH")
+func (s *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriteria, _ *imap.SearchOptions) (*imap.SearchData, error) {
+	if s.mbox == nil {
+		return nil, notSelected()
+	}
+	return s.mbox.search(kind, criteria), nil
 }
 
 func (s *session) Copy(imap.NumSet, string) (*imap.CopyData, error) {
