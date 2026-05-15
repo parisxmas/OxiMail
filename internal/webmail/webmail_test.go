@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -376,6 +378,142 @@ func TestWebmail(t *testing.T) {
 			t.Errorf("message still present after delete: err = %v", err)
 		}
 	})
+}
+
+// TestWebmailCookieSession covers the browser session path: login sets
+// HttpOnly oximail_session and readable oximail_csrf cookies; cookie-
+// authenticated GETs go through, mutating requests fail without a
+// matching X-CSRF-Token, succeed with one, and POST /api/logout
+// revokes the session so the cookie no longer works.
+func TestWebmailCookieSession(t *testing.T) {
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	hash, err := store.HashPassword("s3cret")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	acc, err := st.CreateAccount("user@oximail.test", hash, 0)
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if err := st.EnsureDefaultMailboxes(acc.ID); err != nil {
+		t.Fatalf("ensure default mailboxes: %v", err)
+	}
+
+	base := startWebmail(t, st)
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookie jar: %v", err)
+	}
+	client := &http.Client{Jar: jar}
+
+	// --- Login: cookies land in the jar. ---
+	req, _ := http.NewRequest(http.MethodPost, base+"/api/login", bytes.NewReader(loginBody("user@oximail.test", "s3cret")))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d, want 200", resp.StatusCode)
+	}
+
+	u, _ := url.Parse(base)
+	var sessionVal, csrfVal string
+	var sessionHTTPOnly bool
+	for _, c := range jar.Cookies(u) {
+		switch c.Name {
+		case "oximail_session":
+			sessionVal = c.Value
+		case "oximail_csrf":
+			csrfVal = c.Value
+		}
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == "oximail_session" {
+			sessionHTTPOnly = c.HttpOnly
+		}
+	}
+	if sessionVal == "" || csrfVal == "" {
+		t.Fatalf("login did not set both cookies: session=%q csrf=%q", sessionVal, csrfVal)
+	}
+	if !sessionHTTPOnly {
+		t.Error("oximail_session is not HttpOnly — XSS could steal the session")
+	}
+
+	// --- Cookie-authenticated GET: jar carries the session cookie. ---
+	req, _ = http.NewRequest(http.MethodGet, base+"/api/mailboxes", nil)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("cookie GET: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("cookie GET /api/mailboxes status = %d, want 200", resp.StatusCode)
+	}
+
+	// --- Mutating request without the CSRF header: must be refused. ---
+	moveReq, _ := http.NewRequest(http.MethodPost, base+"/api/messages/999/move", bytes.NewReader(mustJSON(map[string]string{"mailbox": "Trash"})))
+	moveReq.Header.Set("Content-Type", "application/json")
+	resp, err = client.Do(moveReq)
+	if err != nil {
+		t.Fatalf("CSRF-less POST: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("CSRF-less POST status = %d, want 403", resp.StatusCode)
+	}
+
+	// --- Mutating request with the right CSRF header: ordinary 404
+	//     (no such message), proving the CSRF check passed. ---
+	moveReq, _ = http.NewRequest(http.MethodPost, base+"/api/messages/999/move", bytes.NewReader(mustJSON(map[string]string{"mailbox": "Trash"})))
+	moveReq.Header.Set("Content-Type", "application/json")
+	moveReq.Header.Set("X-CSRF-Token", csrfVal)
+	resp, err = client.Do(moveReq)
+	if err != nil {
+		t.Fatalf("CSRF-armed POST: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("CSRF-armed POST status = %d, want 404 (got past CSRF, message id 999 does not exist)", resp.StatusCode)
+	}
+
+	// --- Logout: invalidates the session; the cookie is no longer
+	//     accepted on a subsequent request. ---
+	logoutReq, _ := http.NewRequest(http.MethodPost, base+"/api/logout", nil)
+	logoutReq.Header.Set("X-CSRF-Token", csrfVal)
+	resp, err = client.Do(logoutReq)
+	if err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("logout status = %d, want 204", resp.StatusCode)
+	}
+	// Force-restore the old session cookie — the server cleared it via
+	// Set-Cookie, but we want to prove that *the value itself* is now
+	// rejected even if a client kept it.
+	cookies := []*http.Cookie{{Name: "oximail_session", Value: sessionVal}}
+	jar.SetCookies(u, cookies)
+	req, _ = http.NewRequest(http.MethodGet, base+"/api/mailboxes", nil)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("post-logout GET: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("post-logout GET status = %d, want 401 (session must be invalidated server-side)", resp.StatusCode)
+	}
 }
 
 // TestWebmailRateLimit covers the per-IP brute-force shield over POST

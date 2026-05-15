@@ -50,6 +50,17 @@ func (s *sessionStore) create(accountID uint64) (string, error) {
 	return token, nil
 }
 
+// delete revokes a token, if it exists. Used by logout to invalidate
+// the bearer credential. Deleting an unknown token is a no-op.
+func (s *sessionStore) delete(token string) {
+	if token == "" {
+		return
+	}
+	s.mu.Lock()
+	delete(s.sessions, token)
+	s.mu.Unlock()
+}
+
 // lookup resolves a token to its account id, reporting false if the
 // token is unknown or expired.
 func (s *sessionStore) lookup(token string) (uint64, bool) {

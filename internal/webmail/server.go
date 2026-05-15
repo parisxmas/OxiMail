@@ -2,14 +2,20 @@
 // clients. It is backed directly by the store — it does not go through
 // IMAP — and authenticates against the same account credentials.
 //
-// Endpoints cover login, mailbox listing, message listing (with an
-// optional ?q= substring search), fetching one parsed message,
-// downloading an attachment, sending (text or multipart/alternative
-// HTML), flag changes, move, and delete.
+// Endpoints cover login, logout, mailbox listing, message listing
+// (with an optional ?q= substring search), fetching one parsed
+// message, downloading an attachment, sending (text or multipart/
+// alternative HTML), flag changes, move, and delete.
 //
-// TODO: HttpOnly session cookies + CSRF protection for browser
-// frontends — today auth is a bearer token, which is simplest for an
-// API and for tests.
+// Auth carries two transports:
+//
+//   - "Authorization: Bearer <token>" for programmatic clients (the
+//     integration tests, a future CLI / mobile client). No CSRF check.
+//   - HttpOnly oximail_session cookie for browser SPAs, paired with a
+//     readable oximail_csrf cookie. Mutating requests over cookie auth
+//     must echo the CSRF value in X-CSRF-Token (the double-submit
+//     cookie pattern); SameSite=Strict on both cookies blocks the
+//     classic cross-origin replay vector.
 package webmail
 
 import (
@@ -40,7 +46,12 @@ type Server struct {
 	store    *store.Store
 	sessions *sessionStore
 	limiter  *ratelimit.Limiter
-	stop     sync.Once
+	// secure reports whether this server is serving HTTPS. It controls
+	// the Secure flag on session and CSRF cookies — a Secure cookie
+	// would never travel over a development plaintext listener and the
+	// browser would silently drop the login.
+	secure bool
+	stop   sync.Once
 }
 
 // New builds the webmail server bound to `addr`. A non-nil tlsConfig
@@ -52,9 +63,11 @@ func New(addr, staticDir string, st *store.Store, tlsConfig *tls.Config) *Server
 		store:    st,
 		sessions: newSessionStore(),
 		limiter:  ratelimit.NewDefault(),
+		secure:   tlsConfig != nil,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", s.handleLogin)
+	mux.HandleFunc("POST /api/logout", s.auth(s.handleLogout))
 	mux.HandleFunc("GET /api/mailboxes", s.auth(s.handleMailboxes))
 	mux.HandleFunc("GET /api/mailboxes/{mailbox}/messages", s.auth(s.handleListMessages))
 	mux.HandleFunc("GET /api/messages/{id}", s.auth(s.handleGetMessage))

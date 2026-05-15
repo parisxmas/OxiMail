@@ -100,8 +100,8 @@ export class LoginComponent {
     this.busy.set(true);
     this.error.set('');
     this.api.login(this.address, this.password).subscribe({
-      next: (res) => {
-        this.api.setSession(res.token, res.address);
+      next: () => {
+        // ApiService.setAddress already ran in the login pipe.
         void this.router.navigate(['/mail']);
       },
       error: () => {

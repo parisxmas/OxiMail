@@ -424,8 +424,14 @@ export class MailboxComponent implements OnInit {
   }
 
   logout(): void {
-    this.api.clearSession();
-    void this.router.navigate(['/login']);
+    // Tell the server to revoke the session; even on error, drop local
+    // state and bounce to the login page — the server is the authority
+    // but the user clearly wants out either way.
+    const done = () => {
+      this.api.clearSession();
+      void this.router.navigate(['/login']);
+    };
+    this.api.logout().subscribe({ next: done, error: done });
   }
 
   private refreshMailboxes(): void {
