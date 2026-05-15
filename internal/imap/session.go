@@ -10,6 +10,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 
+	"github.com/parisxmas/OxiMail/internal/observability"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
@@ -62,12 +63,14 @@ func normalizeMailbox(name string) string {
 func (s *session) Login(username, password string) error {
 	acc, err := s.store.Authenticate(username, password)
 	if err != nil {
+		observability.Logins.WithLabelValues("imap", "fail").Inc()
 		if errors.Is(err, store.ErrAuthFailed) {
 			return imapserver.ErrAuthFailed
 		}
 		log.Printf("imap: login %q: %v", username, err)
 		return &imap.Error{Type: imap.StatusResponseTypeNo, Text: "Temporary authentication failure"}
 	}
+	observability.Logins.WithLabelValues("imap", "ok").Inc()
 	s.account = acc
 	return nil
 }

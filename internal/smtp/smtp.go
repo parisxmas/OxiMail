@@ -27,6 +27,7 @@ import (
 
 	gosmtp "github.com/emersion/go-smtp"
 
+	"github.com/parisxmas/OxiMail/internal/observability"
 	"github.com/parisxmas/OxiMail/internal/spam"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
@@ -213,6 +214,7 @@ func (s *session) Data(r io.Reader) error {
 			Message:      "Temporary local problem, please try again later",
 		}
 	}
+	observability.SMTPMessages.WithLabelValues(verdictLabel(verdict)).Inc()
 	switch verdict {
 	case spam.Greylist:
 		return &gosmtp.SMTPError{
@@ -268,6 +270,18 @@ func (s *session) Reset() {
 // Logout releases the session. There is nothing connection-scoped to
 // free yet.
 func (s *session) Logout() error { return nil }
+
+// verdictLabel maps a spam.Verdict to its Prometheus label value.
+func verdictLabel(v spam.Verdict) string {
+	switch v {
+	case spam.Greylist:
+		return "greylist"
+	case spam.Reject:
+		return "reject"
+	default:
+		return "accept"
+	}
+}
 
 // parseHeaders pulls the metadata fields the store records from the raw
 // message. A malformed header block is not fatal — the raw bytes and the

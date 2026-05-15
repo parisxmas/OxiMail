@@ -15,9 +15,10 @@ layered spam pipeline — backed entirely by **OxiDB**.
 > delete — no search or attachment download yet. The `oximailctl` admin
 > CLI provisions domains, accounts, and aliases and generates per-domain
 > DKIM keys; outbound mail is DKIM-signed by the delivery queue, which
-> also returns a bounce to the sender on permanent failure. The IMAP
-> server still stubs COPY and mailbox DELETE / RENAME. See "Roadmap"
-> below.
+> also returns a bounce to the sender on permanent failure. Observability
+> is wired up: structured logging via slog, Prometheus metrics, and
+> liveness / readiness probes. The IMAP server still stubs COPY and
+> mailbox DELETE / RENAME. See "Roadmap" below.
 
 ## Architecture
 
@@ -31,6 +32,7 @@ The protocol surfaces sit on one storage layer:
         :993  IMAPS       ─┤                         ▲          ├─ collections   (canonical metadata)
         :8080 Webmail API ─┘                         │          ├─ blob store    (message bodies)
                             outbound queue ──────────┘          └─ OxiMem        (ephemeral state)
+        :9090 /metrics, /healthz, /readyz  (observability)
 ```
 
 STARTTLS is advertised on 25 / 587 / 143 when a certificate is
@@ -94,6 +96,7 @@ internal/store/      the OxiDB-backed data layer
 internal/smtp/       inbound SMTP (MX) + submission
 internal/imap/       IMAP server
 internal/webmail/    HTTP+JSON API for browser / mobile clients
+internal/observability/  /metrics, /healthz, /readyz; slog setup
 internal/spam/       the layered spam pipeline
 internal/queue/      outbound delivery queue
 web/                 the webmail frontend — an Angular 21 SPA
@@ -150,6 +153,24 @@ record to publish — once published, outbound mail from the domain is
 DKIM-signed by the delivery queue. Run `oximailctl help` for the full
 command list.
 
+## Observability
+
+OxiMail exposes a dedicated HTTP port (`OXIMAIL_METRICS_ADDR`, default
+`:9090`) for ops:
+
+- `GET /metrics` — Prometheus exposition: `oximail_smtp_messages_total`
+  by verdict, `oximail_queue_deliveries_total` by result,
+  `oximail_queue_due_messages`, `oximail_logins_total` by protocol and
+  result.
+- `GET /healthz` — liveness; always 200 if the binary is up.
+- `GET /readyz` — readiness; 200 when the store is reachable, 503
+  otherwise.
+
+Logging is structured via `log/slog`. `OXIMAIL_LOG_FORMAT=json` switches
+the handler to JSON for log aggregators; `OXIMAIL_LOG_LEVEL` accepts
+`debug` / `info` / `warn` / `error`. Legacy `log.Print` calls are
+routed through slog automatically.
+
 ## Testing
 
 `go test ./...` runs the fast unit tests — `internal/config` (TLS
@@ -175,6 +196,8 @@ layer end to end:
   remote MX, and deferring one when the MX is unreachable.
 - **oximailctl** — the admin CLI provisioning a domain, an account
   (then authenticating as it), and an alias, then deleting them.
+- **observability** — `/healthz`, `/readyz` against a working and a
+  closed store, and a counter increment reflected in `/metrics`.
 
 They are gated behind a build tag:
 
@@ -216,6 +239,8 @@ skipped.
 10. ~~Bounce messages — the queue returns an RFC 3464 delivery-status
     notification to the sender on a permanent failure or exhausted
     retries; never bounces a null-sender message.~~ *Done.*
+11. ~~Observability — structured logging via `log/slog`, Prometheus
+    metrics (`/metrics`), and liveness / readiness probes on a
+    dedicated `:9090`.~~ *Done.*
 
-Beyond the roadmap: IMAP COPY / mailbox DELETE / RENAME / SASL, and
-observability.
+Beyond the roadmap: IMAP COPY / mailbox DELETE / RENAME / SASL.

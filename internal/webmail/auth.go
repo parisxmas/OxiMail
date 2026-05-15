@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/parisxmas/OxiMail/internal/observability"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
@@ -29,6 +30,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Authenticate collapses every failure to ErrAuthFailed, so we
 		// cannot — and should not — tell the client which part was wrong.
+		observability.Logins.WithLabelValues("webmail", "fail").Inc()
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -37,6 +39,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not create a session")
 		return
 	}
+	observability.Logins.WithLabelValues("webmail", "ok").Inc()
 	writeJSON(w, http.StatusOK, loginResponse{Token: token, Address: acc.Address})
 }
 

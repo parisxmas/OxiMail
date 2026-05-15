@@ -14,6 +14,7 @@ import (
 
 	"github.com/parisxmas/OxiMail/internal/config"
 	"github.com/parisxmas/OxiMail/internal/imap"
+	"github.com/parisxmas/OxiMail/internal/observability"
 	"github.com/parisxmas/OxiMail/internal/queue"
 	"github.com/parisxmas/OxiMail/internal/smtp"
 	"github.com/parisxmas/OxiMail/internal/spam"
@@ -36,10 +37,8 @@ type named struct {
 }
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
-	log.SetPrefix("oximail: ")
-
 	cfg := config.Load()
+	observability.SetupLogging(cfg.LogFormat, cfg.LogLevel)
 	log.Printf("starting — hostname=%s oxidb=%s:%d", cfg.Hostname, cfg.OxiDBHost, cfg.OxiDBPort)
 
 	tlsConfig, err := cfg.TLSConfig()
@@ -64,6 +63,7 @@ func main() {
 	// brought up when a certificate is configured.
 	pipeline := spam.New(cfg.RspamdURL)
 	components := []named{
+		{"observability", observability.New(cfg.MetricsAddr, st)},
 		{"spam", pipeline},
 		{"smtp", smtp.New(cfg.SMTPAddr, cfg.Hostname, st, pipeline, tlsConfig)},
 		{"submission", smtp.NewSubmission(cfg.SubmissionAddr, cfg.Hostname, st, tlsConfig)},

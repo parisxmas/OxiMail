@@ -23,6 +23,7 @@ import (
 
 	gosmtp "github.com/emersion/go-smtp"
 
+	"github.com/parisxmas/OxiMail/internal/observability"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
@@ -90,6 +91,7 @@ func (q *Queue) runOnce(ctx context.Context) {
 		log.Printf("queue: list due messages: %v", err)
 		return
 	}
+	observability.QueueDue.Set(float64(len(msgs)))
 	for i := range msgs {
 		if ctx.Err() != nil {
 			return
@@ -137,6 +139,10 @@ func (q *Queue) deliver(m *store.OutboundMessage) {
 	}
 	if len(bounced) > 0 {
 		q.bounce(m, raw, bounced)
+		observability.QueueDeliveries.WithLabelValues("bounced").Add(float64(len(bounced)))
+	}
+	if len(stillDeferred) > 0 {
+		observability.QueueDeliveries.WithLabelValues("deferred").Add(float64(len(stillDeferred)))
 	}
 
 	if len(stillDeferred) == 0 {
@@ -231,6 +237,7 @@ func (q *Queue) deliverDomain(from, domain string, rcpts []string, raw []byte) (
 	}
 	_ = c.Quit()
 	// `accepted` were delivered: in neither list.
+	observability.QueueDeliveries.WithLabelValues("delivered").Add(float64(len(accepted)))
 	return temp, perm
 }
 

@@ -8,6 +8,7 @@ import (
 	"github.com/emersion/go-sasl"
 	gosmtp "github.com/emersion/go-smtp"
 
+	"github.com/parisxmas/OxiMail/internal/observability"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
@@ -76,12 +77,15 @@ func (s *submissionSession) Auth(string) (sasl.Server, error) {
 		// A PLAIN authorization identity, if given, must match the
 		// authentication identity — OxiMail has no proxy-auth.
 		if identity != "" && identity != username {
+			observability.Logins.WithLabelValues("submission", "fail").Inc()
 			return gosmtp.ErrAuthFailed
 		}
 		acc, err := s.store.Authenticate(username, password)
 		if err != nil {
+			observability.Logins.WithLabelValues("submission", "fail").Inc()
 			return gosmtp.ErrAuthFailed
 		}
+		observability.Logins.WithLabelValues("submission", "ok").Inc()
 		s.account = acc
 		return nil
 	}), nil

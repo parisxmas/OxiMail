@@ -33,6 +33,16 @@ type Config struct {
 	// index.html fallback for client-side routing. Empty = API only.
 	WebmailStatic string
 
+	// MetricsAddr — the observability HTTP port. It exposes Prometheus
+	// metrics at /metrics plus /healthz (liveness) and /readyz
+	// (readiness — checks the store).
+	MetricsAddr string
+
+	// LogFormat — slog output: "text" (default) or "json".
+	LogFormat string
+	// LogLevel — slog minimum level: debug | info | warn | error.
+	LogLevel string
+
 	// TLSCert / TLSKey — PEM file paths for STARTTLS and implicit TLS.
 	// When unset, TLS is disabled: STARTTLS is not advertised and the
 	// implicit-TLS listeners are not started.
@@ -59,6 +69,9 @@ func Load() Config {
 		IMAPSAddr:      env("OXIMAIL_IMAPS_ADDR", ":993"),
 		WebmailAddr:    env("OXIMAIL_WEBMAIL_ADDR", ":8080"),
 		WebmailStatic:  env("OXIMAIL_WEBMAIL_STATIC", ""),
+		MetricsAddr:    env("OXIMAIL_METRICS_ADDR", ":9090"),
+		LogFormat:      env("OXIMAIL_LOG_FORMAT", "text"),
+		LogLevel:       env("OXIMAIL_LOG_LEVEL", "info"),
 		TLSCert:        env("OXIMAIL_TLS_CERT", ""),
 		TLSKey:         env("OXIMAIL_TLS_KEY", ""),
 		OxiDBHost:      env("OXIMAIL_OXIDB_HOST", "127.0.0.1"),
