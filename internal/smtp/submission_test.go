@@ -205,6 +205,58 @@ func TestSubmissionTLS(t *testing.T) {
 	})
 }
 
+// TestSubmissionRateLimit covers the per-IP brute-force shield: after
+// the rate limiter's default threshold of failed AUTHs from one client,
+// further attempts are rejected outright — even with the right
+// password, because the limiter check runs before the store lookup.
+func TestSubmissionRateLimit(t *testing.T) {
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	hash, err := store.HashPassword("s3cret")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	if _, err := st.CreateAccount("sender@oximail.test", hash, 0); err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+
+	addr := startSubmission(t, st, nil, false)
+
+	// Drive the default threshold (10) of failed AUTHs. Each one opens
+	// a fresh connection, so we are exercising the per-IP bucket, not a
+	// per-session counter.
+	for i := 0; i < 10; i++ {
+		c, err := gosmtp.Dial(addr)
+		if err != nil {
+			t.Fatalf("dial #%d: %v", i, err)
+		}
+		if err := c.Auth(sasl.NewPlainClient("", "sender@oximail.test", "wrong")); err == nil {
+			t.Fatalf("AUTH #%d with bad password succeeded, want rejection", i)
+		}
+		_ = c.Close()
+	}
+
+	// The next attempt comes from the same IP — with the right password
+	// — and must still be refused. Without the limiter this would
+	// succeed.
+	c, err := gosmtp.Dial(addr)
+	if err != nil {
+		t.Fatalf("dial after threshold: %v", err)
+	}
+	defer c.Close()
+	if err := c.Auth(sasl.NewPlainClient("", "sender@oximail.test", "s3cret")); err == nil {
+		t.Fatal("AUTH succeeded after exceeding the rate-limit budget; brute-force shield is not engaged")
+	}
+}
+
 // inboxCount returns how many messages are in an account's INBOX,
 // treating a not-yet-created INBOX as empty.
 func inboxCount(t *testing.T, st *store.Store, accountID uint64) int {

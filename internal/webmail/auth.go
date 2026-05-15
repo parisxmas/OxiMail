@@ -21,6 +21,14 @@ type loginResponse struct {
 
 // handleLogin authenticates an account and issues a bearer token.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	if s.limiter.Blocked(ip) {
+		// The 429 status is honest about *why* we are refusing; the
+		// per-IP key still leaks zero account information.
+		observability.Logins.WithLabelValues("webmail", "fail").Inc()
+		writeError(w, http.StatusTooManyRequests, "too many failed attempts, try again later")
+		return
+	}
 	var req loginRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -30,6 +38,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Authenticate collapses every failure to ErrAuthFailed, so we
 		// cannot — and should not — tell the client which part was wrong.
+		s.limiter.RecordFailure(ip)
 		observability.Logins.WithLabelValues("webmail", "fail").Inc()
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return

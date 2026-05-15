@@ -18,11 +18,13 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"sync"
 	"time"
 
+	"github.com/parisxmas/OxiMail/internal/ratelimit"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
@@ -37,6 +39,7 @@ type Server struct {
 	srv      *http.Server
 	store    *store.Store
 	sessions *sessionStore
+	limiter  *ratelimit.Limiter
 	stop     sync.Once
 }
 
@@ -48,6 +51,7 @@ func New(addr, staticDir string, st *store.Store, tlsConfig *tls.Config) *Server
 		addr:     addr,
 		store:    st,
 		sessions: newSessionStore(),
+		limiter:  ratelimit.NewDefault(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", s.handleLogin)
@@ -144,4 +148,18 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 func decodeJSON(r *http.Request, v any) error {
 	defer r.Body.Close()
 	return json.NewDecoder(r.Body).Decode(v)
+}
+
+// clientIP returns the IP portion of r.RemoteAddr. X-Forwarded-For is
+// intentionally not consulted — trusting it without a configured proxy
+// list would let any client spoof the rate-limit key.
+//
+// TODO: an OXIMAIL_TRUSTED_PROXIES env var would let an operator opt
+// in to X-Forwarded-For when running behind a reverse proxy.
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return ""
+	}
+	return host
 }

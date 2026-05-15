@@ -12,6 +12,7 @@ import (
 	"github.com/emersion/go-sasl"
 
 	"github.com/parisxmas/OxiMail/internal/observability"
+	"github.com/parisxmas/OxiMail/internal/ratelimit"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
@@ -20,7 +21,9 @@ import (
 // (no SELECT before LOGIN, no FETCH before SELECT), so the fields need
 // no locking.
 type session struct {
-	store *store.Store
+	store    *store.Store
+	limiter  *ratelimit.Limiter
+	remoteIP string
 
 	account *store.Account   // set by Login; nil until authenticated
 	mbox    *selectedMailbox // set by Select; nil in the authenticated state
@@ -65,8 +68,13 @@ func normalizeMailbox(name string) string {
 // --- Not authenticated state ---
 
 func (s *session) Login(username, password string) error {
+	if s.limiter.Blocked(s.remoteIP) {
+		observability.Logins.WithLabelValues("imap", "fail").Inc()
+		return imapserver.ErrAuthFailed
+	}
 	acc, err := s.store.Authenticate(username, password)
 	if err != nil {
+		s.limiter.RecordFailure(s.remoteIP)
 		observability.Logins.WithLabelValues("imap", "fail").Inc()
 		if errors.Is(err, store.ErrAuthFailed) {
 			return imapserver.ErrAuthFailed
@@ -88,12 +96,18 @@ func (s *session) AuthenticateMechanisms() []string {
 // Authenticate handles SASL authentication. Only PLAIN is offered.
 func (s *session) Authenticate(string) (sasl.Server, error) {
 	return sasl.NewPlainServer(func(identity, username, password string) error {
+		if s.limiter.Blocked(s.remoteIP) {
+			observability.Logins.WithLabelValues("imap", "fail").Inc()
+			return imapserver.ErrAuthFailed
+		}
 		if identity != "" && identity != username {
+			s.limiter.RecordFailure(s.remoteIP)
 			observability.Logins.WithLabelValues("imap", "fail").Inc()
 			return imapserver.ErrAuthFailed
 		}
 		acc, err := s.store.Authenticate(username, password)
 		if err != nil {
+			s.limiter.RecordFailure(s.remoteIP)
 			observability.Logins.WithLabelValues("imap", "fail").Inc()
 			return imapserver.ErrAuthFailed
 		}

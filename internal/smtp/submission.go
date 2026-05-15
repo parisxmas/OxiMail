@@ -9,6 +9,7 @@ import (
 	gosmtp "github.com/emersion/go-smtp"
 
 	"github.com/parisxmas/OxiMail/internal/observability"
+	"github.com/parisxmas/OxiMail/internal/ratelimit"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
@@ -29,7 +30,8 @@ var errAuthRequired = &gosmtp.SMTPError{
 // an encrypted connection. With no TLS configured at all, cleartext
 // AUTH is permitted so the server still works for local development.
 func NewSubmission(addr, hostname string, st *store.Store, tlsConfig *tls.Config) *Server {
-	srv := newServer(addr, hostname, &submissionBackend{store: st}, tlsConfig)
+	be := &submissionBackend{store: st, limiter: ratelimit.NewDefault()}
+	srv := newServer(addr, hostname, be, tlsConfig)
 	srv.AllowInsecureAuth = tlsConfig == nil
 	return &Server{name: "submission", addr: addr, srv: srv}
 }
@@ -45,18 +47,25 @@ func NewSubmissionTLS(addr, hostname string, st *store.Store, tlsConfig *tls.Con
 }
 
 type submissionBackend struct {
-	store *store.Store
+	store   *store.Store
+	limiter *ratelimit.Limiter
 }
 
-func (b *submissionBackend) NewSession(*gosmtp.Conn) (gosmtp.Session, error) {
-	return &submissionSession{store: b.store}, nil
+func (b *submissionBackend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
+	return &submissionSession{
+		store:    b.store,
+		limiter:  b.limiter,
+		remoteIP: remoteIPOf(c.Conn()),
+	}, nil
 }
 
 // submissionSession is the per-connection state for the submission
 // server. go-smtp serializes the calls for one connection, so the
 // fields need no locking.
 type submissionSession struct {
-	store *store.Store
+	store    *store.Store
+	limiter  *ratelimit.Limiter
+	remoteIP string
 
 	account *store.Account // set by Auth; nil until the client authenticates
 	from    string
@@ -71,17 +80,26 @@ func (s *submissionSession) AuthMechanisms() []string {
 }
 
 // Auth handles SASL authentication. Only PLAIN is offered; credentials
-// are checked against the account store.
+// are checked against the account store, and the per-IP rate limiter
+// guards against brute force.
 func (s *submissionSession) Auth(string) (sasl.Server, error) {
 	return sasl.NewPlainServer(func(identity, username, password string) error {
+		// Block before consulting the store — and before paying the
+		// bcrypt cost — when this IP has burned through its budget.
+		if s.limiter.Blocked(s.remoteIP) {
+			observability.Logins.WithLabelValues("submission", "fail").Inc()
+			return gosmtp.ErrAuthFailed
+		}
 		// A PLAIN authorization identity, if given, must match the
 		// authentication identity — OxiMail has no proxy-auth.
 		if identity != "" && identity != username {
+			s.limiter.RecordFailure(s.remoteIP)
 			observability.Logins.WithLabelValues("submission", "fail").Inc()
 			return gosmtp.ErrAuthFailed
 		}
 		acc, err := s.store.Authenticate(username, password)
 		if err != nil {
+			s.limiter.RecordFailure(s.remoteIP)
 			observability.Logins.WithLabelValues("submission", "fail").Inc()
 			return gosmtp.ErrAuthFailed
 		}

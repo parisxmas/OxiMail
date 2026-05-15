@@ -131,13 +131,25 @@ type backend struct {
 }
 
 func (b *backend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
-	remoteIP := ""
-	if addr := c.Conn().RemoteAddr(); addr != nil {
-		if host, _, err := net.SplitHostPort(addr.String()); err == nil {
-			remoteIP = host
-		}
+	return &session{backend: b, remoteIP: remoteIPOf(c.Conn())}, nil
+}
+
+// remoteIPOf returns the IP part of a connection's remote address, or
+// "" if the address is missing or unparseable. Used by both SMTP
+// backends to key the rate limiter and the spam pipeline.
+func remoteIPOf(c net.Conn) string {
+	if c == nil {
+		return ""
 	}
-	return &session{backend: b, remoteIP: remoteIP}, nil
+	addr := c.RemoteAddr()
+	if addr == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return ""
+	}
+	return host
 }
 
 // session is the per-connection state machine. go-smtp serializes the

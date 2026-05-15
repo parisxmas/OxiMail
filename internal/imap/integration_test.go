@@ -659,6 +659,49 @@ func TestIMAPIdle(t *testing.T) {
 	}
 }
 
+// TestIMAPRateLimit covers the per-IP brute-force shield over LOGIN:
+// once the rate-limit budget is burned, further attempts from the same
+// client are rejected outright — even when the password is right.
+func TestIMAPRateLimit(t *testing.T) {
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	hash, err := store.HashPassword(testPassword)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	if _, err := st.CreateAccount(testAddr, hash, 0); err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+
+	addr := startIMAP(t, st, nil, false)
+
+	// Burn through the default budget (10) of failed LOGINs. Each
+	// connection comes from 127.0.0.1, sharing one bucket.
+	for i := 0; i < 10; i++ {
+		c := dial(t, addr)
+		if err := c.Login(testAddr, "wrong").Wait(); err == nil {
+			t.Fatalf("LOGIN #%d with bad password succeeded, want rejection", i)
+		}
+		_ = c.Close()
+	}
+
+	// The right password from the same IP must now be refused too.
+	c := dial(t, addr)
+	defer c.Close()
+	if err := c.Login(testAddr, testPassword).Wait(); err == nil {
+		t.Fatal("LOGIN with the right password succeeded after exceeding the rate-limit budget")
+	}
+}
+
 // startIMAP launches the IMAP server on a free port, wired to st, and
 // returns its address. A non-nil tlsConfig enables STARTTLS; implicit
 // additionally serves implicit TLS (IMAPS). It is shut down when the

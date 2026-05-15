@@ -378,6 +378,45 @@ func TestWebmail(t *testing.T) {
 	})
 }
 
+// TestWebmailRateLimit covers the per-IP brute-force shield over POST
+// /api/login: after the default threshold of failed attempts, further
+// requests get 429 — even when the password is right — because the
+// limiter check runs before the store lookup.
+func TestWebmailRateLimit(t *testing.T) {
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	hash, err := store.HashPassword("s3cret")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	if _, err := st.CreateAccount("user@oximail.test", hash, 0); err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+
+	base := startWebmail(t, st)
+
+	// Burn through the default budget of failed logins (10). Each call
+	// gets 401; the bucket fills up as a side effect.
+	for i := 0; i < 10; i++ {
+		if status := post(t, base+"/api/login", "", loginBody("user@oximail.test", "wrong")); status != http.StatusUnauthorized {
+			t.Fatalf("login #%d: status = %d, want 401", i, status)
+		}
+	}
+
+	// The right password now gets 429 instead of 200.
+	if status := post(t, base+"/api/login", "", loginBody("user@oximail.test", "s3cret")); status != http.StatusTooManyRequests {
+		t.Fatalf("login with the right password after exhausting the budget: status = %d, want 429", status)
+	}
+}
+
 // -----------------------------------------------------------------------
 // HTTP helpers
 // -----------------------------------------------------------------------

@@ -7,12 +7,9 @@
 // from the blob store lazily, only when a FETCH asks for them. Mutations
 // a session makes itself (STORE, EXPUNGE, APPEND) are tracked and
 // reported correctly within that session; changes from *other*
-// connections or from SMTP delivery are not seen until the mailbox is
-// re-selected.
-//
-// TODO: real-time cross-connection updates (IDLE seeing freshly
-// delivered mail) need either polling OxiDB or an OxiMem notification
-// channel.
+// connections — fresh mail dropped by SMTP or another IMAP session —
+// arrive via internal/notifier, which wakes the session's watch
+// goroutine and emits an unsolicited EXISTS during IDLE.
 //
 // When a TLS configuration is supplied, STARTTLS is advertised on the
 // plaintext listener; NewTLS additionally serves implicit TLS (IMAPS).
@@ -31,6 +28,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 
+	"github.com/parisxmas/OxiMail/internal/ratelimit"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
@@ -52,9 +50,14 @@ type Server struct {
 // connection; with no TLS configured at all, cleartext LOGIN is
 // permitted so the server still works for local development.
 func New(addr string, st *store.Store, tlsConfig *tls.Config) *Server {
+	limiter := ratelimit.NewDefault()
 	srv := imapserver.New(&imapserver.Options{
-		NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-			return &session{store: st}, nil, nil
+		NewSession: func(conn *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+			return &session{
+				store:    st,
+				limiter:  limiter,
+				remoteIP: remoteIPOf(conn.NetConn()),
+			}, nil, nil
 		},
 		Caps: imap.CapSet{
 			imap.CapIMAP4rev1: {},
@@ -66,6 +69,23 @@ func New(addr string, st *store.Store, tlsConfig *tls.Config) *Server {
 		InsecureAuth: tlsConfig == nil,
 	})
 	return &Server{name: "imap", addr: addr, srv: srv}
+}
+
+// remoteIPOf returns the IP part of a connection's remote address, or
+// "" if the address is missing or unparseable.
+func remoteIPOf(c net.Conn) string {
+	if c == nil {
+		return ""
+	}
+	addr := c.RemoteAddr()
+	if addr == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return ""
+	}
+	return host
 }
 
 // NewTLS builds the implicit-TLS IMAP server (IMAPS, conventionally port
