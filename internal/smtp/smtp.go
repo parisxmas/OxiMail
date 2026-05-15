@@ -331,6 +331,14 @@ func (s *session) Data(r io.Reader) error {
 		}
 	}
 
+	// DMARC p=quarantine: accept the message but file it into Junk
+	// rather than INBOX. The sender sees 2xx (the message is not
+	// bounced), the recipient finds it on the spam shelf.
+	folder := "INBOX"
+	if verdict == spam.Quarantine {
+		folder = "Junk"
+	}
+
 	in := store.IncomingMessage{
 		Raw:       raw,
 		MessageID: messageID,
@@ -339,8 +347,8 @@ func (s *session) Data(r io.Reader) error {
 	}
 	var failed int
 	for acctID := range s.rcptAccts {
-		if _, err := s.backend.store.Deliver(acctID, in); err != nil {
-			log.Printf("smtp: deliver to account %d failed: %v", acctID, err)
+		if _, err := s.backend.store.DeliverTo(acctID, folder, in); err != nil {
+			log.Printf("smtp: deliver to account %d (%s) failed: %v", acctID, folder, err)
 			failed++
 		}
 	}
@@ -408,6 +416,8 @@ func verdictLabel(v spam.Verdict) string {
 		return "greylist"
 	case spam.Reject:
 		return "reject"
+	case spam.Quarantine:
+		return "quarantine"
 	default:
 		return "accept"
 	}

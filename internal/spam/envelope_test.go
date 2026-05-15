@@ -68,7 +68,7 @@ func TestEvaluate(t *testing.T) {
 		{"spf pass, not aligned", dmarc.PolicyReject, spf.Pass, "evil.test", nil, Reject},
 		{"dkim valid, aligned", dmarc.PolicyReject, spf.Fail, "evil.test", []string{"example.com"}, Accept},
 		{"all fail, p=reject", dmarc.PolicyReject, spf.Fail, "evil.test", nil, Reject},
-		{"all fail, p=quarantine", dmarc.PolicyQuarantine, spf.Fail, "evil.test", nil, Accept},
+		{"all fail, p=quarantine", dmarc.PolicyQuarantine, spf.Fail, "evil.test", nil, Quarantine},
 		{"all fail, p=none", dmarc.PolicyNone, spf.Fail, "evil.test", nil, Accept},
 	}
 	for _, c := range cases {

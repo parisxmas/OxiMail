@@ -27,12 +27,16 @@ import (
 type Verdict int
 
 const (
-	// Accept — deliver the message.
+	// Accept — deliver the message into INBOX.
 	Accept Verdict = iota
 	// Greylist — temporarily reject (4xx); a legitimate sender retries.
 	Greylist
 	// Reject — permanently reject (5xx).
 	Reject
+	// Quarantine — accept the message, but file it into the Junk
+	// folder rather than INBOX. Used by the envelope stage on a DMARC
+	// p=quarantine failure.
+	Quarantine
 )
 
 // Connection-time defaults. They are reasonable starting points; TODO:

@@ -128,24 +128,27 @@ func (s *Store) AppendMessage(mailboxID uint64, in IncomingMessage) (*Message, e
 	return msg, nil
 }
 
-// Deliver files an inbound message into an account's INBOX. It is the
-// delivery entry point for the SMTP server (and, later, local alias
-// forwarding): callers resolve a recipient address to account IDs with
-// ResolveRecipient, then Deliver to each.
-//
-// The account's default mailboxes are created on first delivery if they
-// do not exist yet, so an account is reachable the moment it is created
-// without a separate provisioning step.
+// Deliver is the common "deliver to INBOX" path.
 func (s *Store) Deliver(accountID uint64, in IncomingMessage) (*Message, error) {
-	mb, err := s.GetMailboxByName(accountID, "INBOX")
+	return s.DeliverTo(accountID, "INBOX", in)
+}
+
+// DeliverTo files an inbound message into the named folder of an
+// account — INBOX in the common case, "Junk" for quarantined mail,
+// any other default folder for special-case routing. The default
+// mailboxes are created on first delivery if they do not exist yet,
+// so an account is reachable the moment it is created without a
+// separate provisioning step.
+func (s *Store) DeliverTo(accountID uint64, folder string, in IncomingMessage) (*Message, error) {
+	mb, err := s.GetMailboxByName(accountID, folder)
 	if errors.Is(err, ErrNotFound) {
 		if err := s.EnsureDefaultMailboxes(accountID); err != nil {
-			return nil, fmt.Errorf("store: deliver to account %d: %w", accountID, err)
+			return nil, fmt.Errorf("store: deliver to account %d (%s): %w", accountID, folder, err)
 		}
-		mb, err = s.GetMailboxByName(accountID, "INBOX")
+		mb, err = s.GetMailboxByName(accountID, folder)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("store: deliver to account %d: %w", accountID, err)
+		return nil, fmt.Errorf("store: deliver to account %d (%s): %w", accountID, folder, err)
 	}
 	return s.AppendMessage(mb.ID, in)
 }

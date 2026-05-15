@@ -85,13 +85,17 @@ func evaluate(record *dmarc.Record, policy dmarc.Policy, fromDomain string,
 	if pass {
 		return Accept
 	}
-	// DMARC failed. Only an explicit p=reject rejects the message;
-	// p=quarantine is delivered for now.
-	// TODO: honor p=quarantine by tagging the message as junk.
-	if policy == dmarc.PolicyReject {
+	// DMARC failed. Honor the policy: p=reject is a 5xx rejection;
+	// p=quarantine files the message into the Junk folder rather
+	// than INBOX; p=none accepts.
+	switch policy {
+	case dmarc.PolicyReject:
 		return Reject
+	case dmarc.PolicyQuarantine:
+		return Quarantine
+	default:
+		return Accept
 	}
-	return Accept
 }
 
 // dmarcPolicy discovers the DMARC record and effective policy for a

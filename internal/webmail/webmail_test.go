@@ -122,8 +122,8 @@ func TestWebmail(t *testing.T) {
 		if status := getJSON(t, base+"/api/mailboxes", token, &out); status != http.StatusOK {
 			t.Fatalf("status = %d, want 200", status)
 		}
-		if len(out) != 5 {
-			t.Fatalf("got %d mailboxes, want the 5 defaults", len(out))
+		if len(out) != 6 {
+			t.Fatalf("got %d mailboxes, want the 6 defaults", len(out))
 		}
 		var sawInbox bool
 		for _, mb := range out {

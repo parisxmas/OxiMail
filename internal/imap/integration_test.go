@@ -95,12 +95,12 @@ func TestIMAP(t *testing.T) {
 		if err != nil {
 			t.Fatalf("list: %v", err)
 		}
-		if len(boxes) != 5 {
+		if len(boxes) != 6 {
 			names := make([]string, len(boxes))
 			for i, b := range boxes {
 				names[i] = b.Mailbox
 			}
-			t.Fatalf("LIST returned %d mailboxes, want 5: %v", len(boxes), names)
+			t.Fatalf("LIST returned %d mailboxes, want 6: %v", len(boxes), names)
 		}
 	})
 

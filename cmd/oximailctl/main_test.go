@@ -65,8 +65,8 @@ func TestCLI(t *testing.T) {
 		if err != nil {
 			t.Fatalf("list mailboxes: %v", err)
 		}
-		if len(boxes) != 5 {
-			t.Errorf("default mailboxes = %d, want 5", len(boxes))
+		if len(boxes) != 6 {
+			t.Errorf("default mailboxes = %d, want 6", len(boxes))
 		}
 		// It shows up in the listing.
 		if out, code := cli("", "account", "list"); code != 0 || !strings.Contains(out, "user@example.test") {

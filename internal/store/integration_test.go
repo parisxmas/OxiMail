@@ -138,8 +138,8 @@ func TestStore(t *testing.T) {
 		if err != nil {
 			t.Fatalf("list mailboxes: %v", err)
 		}
-		if len(boxes) != 5 {
-			t.Fatalf("default mailboxes = %d, want 5 (%v)", len(boxes), mailboxNames(boxes))
+		if len(boxes) != 6 {
+			t.Fatalf("default mailboxes = %d, want 6 (%v)", len(boxes), mailboxNames(boxes))
 		}
 		inbox, err := st.GetMailboxByName(acc.ID, "INBOX")
 		if err != nil {
@@ -152,14 +152,14 @@ func TestStore(t *testing.T) {
 		if err := st.EnsureDefaultMailboxes(acc.ID); err != nil {
 			t.Fatalf("ensure default mailboxes (2nd): %v", err)
 		}
-		if boxes, _ := st.ListMailboxes(acc.ID); len(boxes) != 5 {
+		if boxes, _ := st.ListMailboxes(acc.ID); len(boxes) != 6 {
 			t.Fatalf("EnsureDefaultMailboxes not idempotent: %d mailboxes", len(boxes))
 		}
 		if _, err := st.CreateMailbox(acc.ID, "Work"); err != nil {
 			t.Fatalf("create mailbox: %v", err)
 		}
-		if boxes, _ := st.ListMailboxes(acc.ID); len(boxes) != 6 {
-			t.Fatalf("after CreateMailbox: %d mailboxes, want 6", len(boxes))
+		if boxes, _ := st.ListMailboxes(acc.ID); len(boxes) != 7 {
+			t.Fatalf("after CreateMailbox: %d mailboxes, want 7", len(boxes))
 		}
 	})
 
@@ -325,6 +325,33 @@ func TestStore(t *testing.T) {
 		}
 		if _, err := st.FetchBody(m); err == nil {
 			t.Fatal("body blob still readable after DeleteMessage")
+		}
+	})
+
+	t.Run("DeliverTo files into the named folder (Junk for quarantine)", func(t *testing.T) {
+		acc, err := st.CreateAccount("quarantine@deliver.test", "h", 0)
+		if err != nil {
+			t.Fatalf("create account: %v", err)
+		}
+		// No EnsureDefaultMailboxes — DeliverTo must auto-create them.
+		raw := []byte("From: s@x.test\r\nSubject: spammy\r\n\r\n")
+		m, err := st.DeliverTo(acc.ID, "Junk", store.IncomingMessage{
+			Raw: raw, Subject: "spammy", FromAddr: "s@x.test",
+		})
+		if err != nil {
+			t.Fatalf("DeliverTo Junk: %v", err)
+		}
+		junk, err := st.GetMailboxByName(acc.ID, "Junk")
+		if err != nil {
+			t.Fatalf("get Junk: %v", err)
+		}
+		if m.MailboxID != junk.ID {
+			t.Errorf("message landed in mailbox %d, want Junk (%d)", m.MailboxID, junk.ID)
+		}
+		// INBOX is empty.
+		inbox, _ := st.GetMailboxByName(acc.ID, "INBOX")
+		if msgs, _ := st.ListMessages(inbox.ID); len(msgs) != 0 {
+			t.Errorf("INBOX has %d messages, want 0 (the Junk delivery should not have leaked here)", len(msgs))
 		}
 	})
 

@@ -22,8 +22,9 @@ type Mailbox struct {
 	CreatedAt   string `json:"created_at"`
 }
 
-// defaultMailboxes are created for every new account.
-var defaultMailboxes = []string{"INBOX", "Sent", "Drafts", "Trash", "Archive"}
+// defaultMailboxes are created for every new account. Junk holds
+// messages quarantined by the spam pipeline (DMARC p=quarantine, etc.).
+var defaultMailboxes = []string{"INBOX", "Sent", "Drafts", "Trash", "Archive", "Junk"}
 
 // CreateMailbox creates a folder for an account. UIDNext starts at 1 and
 // UIDValidity is set once, to the creation time.
