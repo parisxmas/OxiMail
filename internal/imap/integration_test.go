@@ -281,6 +281,48 @@ func TestIMAP(t *testing.T) {
 		}
 	})
 
+	t.Run("MOVE removes the source and recreates it in the destination", func(t *testing.T) {
+		// Land a fresh message in INBOX (the previous subtest already
+		// emptied / archived it).
+		if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+			t.Fatalf("select INBOX: %v", err)
+		}
+		body := "From: <sender@elsewhere.test>\r\nSubject: to move\r\n\r\nbody\r\n"
+		ac := c.Append("INBOX", int64(len(body)), nil)
+		if _, err := ac.Write([]byte(body)); err != nil {
+			t.Fatalf("append write: %v", err)
+		}
+		if err := ac.Close(); err != nil {
+			t.Fatalf("append close: %v", err)
+		}
+		if _, err := ac.Wait(); err != nil {
+			t.Fatalf("append wait: %v", err)
+		}
+		// Re-SELECT INBOX so the new message is on the snapshot.
+		sel, err := c.Select("INBOX", nil).Wait()
+		if err != nil {
+			t.Fatalf("re-select INBOX: %v", err)
+		}
+		before := sel.NumMessages
+
+		data, err := c.Move(goimap.SeqSetNum(1), "Archive").Wait()
+		if err != nil {
+			t.Fatalf("move: %v", err)
+		}
+		if data == nil || data.SourceUIDs == nil || data.DestUIDs == nil {
+			t.Fatalf("MoveData missing UIDs: %+v", data)
+		}
+
+		// INBOX is now one shorter.
+		sel, err = c.Select("INBOX", nil).Wait()
+		if err != nil {
+			t.Fatalf("re-select INBOX after move: %v", err)
+		}
+		if sel.NumMessages != before-1 {
+			t.Errorf("INBOX NumMessages = %d, want %d", sel.NumMessages, before-1)
+		}
+	})
+
 	t.Run("CREATE / RENAME / DELETE a user mailbox", func(t *testing.T) {
 		if err := c.Create("TempA", nil).Wait(); err != nil {
 			t.Fatalf("create TempA: %v", err)

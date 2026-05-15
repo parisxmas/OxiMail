@@ -64,6 +64,7 @@ func New(addr string, st *store.Store, tlsConfig *tls.Config) *Server {
 			imap.CapIdle:      {},
 			imap.CapUnselect:  {},
 			imap.CapUIDPlus:   {},
+			imap.CapMove:      {},
 		},
 		TLSConfig:    tlsConfig,
 		InsecureAuth: tlsConfig == nil,

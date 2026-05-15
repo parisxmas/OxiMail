@@ -32,6 +32,7 @@ type session struct {
 var (
 	_ imapserver.Session     = (*session)(nil)
 	_ imapserver.SessionSASL = (*session)(nil)
+	_ imapserver.SessionMove = (*session)(nil)
 )
 
 // notImplemented is the error returned for commands OxiMail does not
@@ -416,6 +417,29 @@ func (s *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriteria,
 }
 
 func (s *session) Copy(numSet imap.NumSet, dest string) (*imap.CopyData, error) {
+	destMb, err := s.resolveCopyDest(dest)
+	if err != nil {
+		return nil, err
+	}
+	return s.mbox.copy(numSet, destMb)
+}
+
+// Move implements imapserver.SessionMove — RFC 6851 atomic MOVE. The
+// destination gets a fresh document and UID; the source mailbox sees
+// EXPUNGE for each moved sequence number, all in one command.
+func (s *session) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest string) error {
+	destMb, err := s.resolveCopyDest(dest)
+	if err != nil {
+		return err
+	}
+	return s.mbox.move(w, numSet, destMb)
+}
+
+// resolveCopyDest is the shared destination-mailbox lookup for COPY
+// and MOVE: same selected-state check, same TRYCREATE response when
+// the destination does not exist, same refusal when the destination
+// equals the source.
+func (s *session) resolveCopyDest(dest string) (*store.Mailbox, error) {
 	if s.mbox == nil {
 		return nil, notSelected()
 	}
@@ -436,7 +460,7 @@ func (s *session) Copy(numSet imap.NumSet, dest string) (*imap.CopyData, error) 
 			Text: "Source and destination mailboxes are identical",
 		}
 	}
-	return s.mbox.copy(numSet, destMb)
+	return destMb, nil
 }
 
 // Close releases the session. It is the connection-teardown hook, not

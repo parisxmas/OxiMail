@@ -439,6 +439,92 @@ func (m *selectedMailbox) copy(numSet imap.NumSet, dest *store.Mailbox) (*imap.C
 	}, nil
 }
 
+// move relocates every message in numSet into dest atomically (per
+// RFC 6851): the body blob stays put, the message document gets a new
+// mailbox_id and a fresh UID, and the snapshot drops the original
+// entry — so the client sees one COPYUID response followed by one
+// EXPUNGE per moved message.
+func (m *selectedMailbox) move(w *imapserver.MoveWriter, numSet imap.NumSet, dest *store.Mailbox) error {
+	type moved struct {
+		index   int // position in m.msgs at the time we acted on it
+		srcUID  uint32
+		destUID uint32
+	}
+
+	var (
+		movedMsgs []moved
+		moveErr   error
+	)
+	m.forEachWithIndex(numSet, func(idx int, msg *store.Message) {
+		if moveErr != nil {
+			return
+		}
+		newMsg, err := m.store.MoveMessage(msg.ID, dest.ID)
+		if err != nil {
+			moveErr = err
+			return
+		}
+		movedMsgs = append(movedMsgs, moved{index: idx, srcUID: msg.UID, destUID: newMsg.UID})
+	})
+	if moveErr != nil {
+		return moveErr
+	}
+
+	var sourceUIDs, destUIDs imap.UIDSet
+	for _, mv := range movedMsgs {
+		sourceUIDs.AddNum(imap.UID(mv.srcUID))
+		destUIDs.AddNum(imap.UID(mv.destUID))
+	}
+	if err := w.WriteCopyData(&imap.CopyData{
+		UIDValidity: dest.UIDValidity,
+		SourceUIDs:  sourceUIDs,
+		DestUIDs:    destUIDs,
+	}); err != nil {
+		return err
+	}
+
+	// Remove the moved messages from the snapshot, back-to-front so
+	// the higher sequence numbers stay valid as we drop the lower
+	// ones. Then emit one EXPUNGE per removed message.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := len(movedMsgs) - 1; i >= 0; i-- {
+		idx := movedMsgs[i].index
+		if idx < 0 || idx >= len(m.msgs) {
+			continue // snapshot shifted underneath us; skip rather than panic
+		}
+		seqNum := uint32(idx) + 1
+		m.tracker.QueueExpunge(seqNum)
+		m.msgs = append(m.msgs[:idx], m.msgs[idx+1:]...)
+		if err := w.WriteExpunge(seqNum); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// forEachWithIndex is forEach plus the slice index — move needs it so
+// it can drop the right entries from the snapshot.
+func (m *selectedMailbox) forEachWithIndex(numSet imap.NumSet, fn func(idx int, msg *store.Message)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	numSet = m.staticNumSetLocked(numSet)
+	for i := range m.msgs {
+		seqNum := uint32(i) + 1
+		var contains bool
+		switch ns := numSet.(type) {
+		case imap.SeqSet:
+			enc := m.session.EncodeSeqNum(seqNum)
+			contains = enc != 0 && ns.Contains(enc)
+		case imap.UIDSet:
+			contains = ns.Contains(imap.UID(m.msgs[i].UID))
+		}
+		if contains {
+			fn(i, &m.msgs[i])
+		}
+	}
+}
+
 // expunge removes every \Deleted message in scope (all of them, or just
 // those in uids for a UID EXPUNGE). The actual EXPUNGE responses are
 // flushed to the client by the framework's post-command poll.
