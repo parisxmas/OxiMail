@@ -6,11 +6,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/parisxmas/OxiMail/internal/config"
 	"github.com/parisxmas/OxiMail/internal/imap"
@@ -41,12 +44,17 @@ func main() {
 	observability.SetupLogging(cfg.LogFormat, cfg.LogLevel)
 	log.Printf("starting — hostname=%s oxidb=%s:%d", cfg.Hostname, cfg.OxiDBHost, cfg.OxiDBPort)
 
-	tlsConfig, err := cfg.TLSConfig()
+	tlsConfig, acmeManager, err := cfg.TLSConfig()
 	if err != nil {
 		log.Fatalf("tls: %v", err)
 	}
-	if tlsConfig == nil {
-		log.Print("TLS not configured (set OXIMAIL_TLS_CERT and OXIMAIL_TLS_KEY) — running without TLS")
+	switch {
+	case acmeManager != nil:
+		log.Printf("TLS via ACME — hosts=%v cache=%s challenge=%s", cfg.ACMEHosts, cfg.ACMECache, cfg.ACMEChallengeAddr)
+	case tlsConfig != nil:
+		log.Print("TLS configured (static cert)")
+	default:
+		log.Print("TLS not configured (set OXIMAIL_TLS_CERT/OXIMAIL_TLS_KEY or OXIMAIL_ACME_HOSTS) — running without TLS")
 	}
 
 	// Storage — everything sits on OxiDB.
@@ -76,6 +84,18 @@ func main() {
 			named{"imap-tls", imap.NewTLS(cfg.IMAPSAddr, st, tlsConfig)},
 		)
 	}
+	if acmeManager != nil {
+		// HTTP-01 validation needs a public :80 listener. autocert's
+		// handler answers /.well-known/acme-challenge/* and (when
+		// passed a non-nil fallback) redirects everything else.
+		components = append(components, named{
+			"acme-challenge",
+			&httpComponent{
+				addr:    cfg.ACMEChallengeAddr,
+				handler: acmeManager.HTTPHandler(http.HandlerFunc(redirectToHTTPS)),
+			},
+		})
+	}
 	components = append(components, named{"queue", queue.New(st, cfg.Hostname)})
 
 	// Run each component until the process is asked to stop.
@@ -103,4 +123,54 @@ func main() {
 	}
 	wg.Wait()
 	log.Print("stopped")
+}
+
+// httpComponent runs a plain http.Server as one of the lifecycle
+// components. It is used for the ACME HTTP-01 challenge listener; the
+// other servers manage their own listeners.
+type httpComponent struct {
+	addr    string
+	handler http.Handler
+
+	srv  *http.Server
+	once sync.Once
+}
+
+func (h *httpComponent) Start(ctx context.Context) error {
+	h.srv = &http.Server{
+		Addr:              h.addr,
+		Handler:           h.handler,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- h.srv.ListenAndServe() }()
+	log.Printf("acme-challenge: listening on %s", h.addr)
+	select {
+	case <-ctx.Done():
+		return h.Stop()
+	case err := <-errc:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
+}
+
+func (h *httpComponent) Stop() error {
+	h.once.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if h.srv != nil {
+			_ = h.srv.Shutdown(ctx)
+		}
+		log.Print("acme-challenge: stopped")
+	})
+	return nil
+}
+
+// redirectToHTTPS sends every plaintext request to its HTTPS sibling —
+// the fallback for the ACME challenge listener.
+func redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
+	target := "https://" + r.Host + r.URL.RequestURI()
+	http.Redirect(w, r, target, http.StatusMovedPermanently)
 }

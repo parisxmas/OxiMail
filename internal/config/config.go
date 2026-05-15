@@ -8,6 +8,10 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
+
+	"golang.org/x/crypto/acme"
+	"golang.org/x/crypto/acme/autocert"
 )
 
 // Config is the fully-resolved configuration for one server process.
@@ -45,9 +49,33 @@ type Config struct {
 
 	// TLSCert / TLSKey — PEM file paths for STARTTLS and implicit TLS.
 	// When unset, TLS is disabled: STARTTLS is not advertised and the
-	// implicit-TLS listeners are not started.
+	// implicit-TLS listeners are not started. Ignored when ACMEHosts
+	// is configured.
 	TLSCert string
 	TLSKey  string
+
+	// ACMEHosts is a comma-separated list of hostnames to obtain Let's
+	// Encrypt certificates for. When non-empty, the static TLSCert /
+	// TLSKey are ignored and TLSConfig instead returns an autocert-
+	// backed configuration. ACMEChallengeAddr must then be reachable
+	// on the public internet for HTTP-01 validation.
+	ACMEHosts []string
+	// ACMECache is the on-disk directory where autocert stores the
+	// fetched certificate, private key, and ACME account material so
+	// they survive a restart. Defaults to ./acme-cache.
+	ACMECache string
+	// ACMEEmail is the contact address for the ACME account. Optional;
+	// Let's Encrypt sends expiry warnings here.
+	ACMEEmail string
+	// ACMEDirectoryURL overrides the ACME endpoint. Useful for
+	// pointing at the Let's Encrypt staging environment during testing
+	// (`https://acme-staging-v02.api.letsencrypt.org/directory`); when
+	// empty, autocert uses the production directory.
+	ACMEDirectoryURL string
+	// ACMEChallengeAddr is the HTTP-01 listener address — Let's
+	// Encrypt's validator dials it on port 80 to fetch the challenge
+	// token. Defaults to ":80".
+	ACMEChallengeAddr string
 
 	// OxiDB — the backing store (collections + blob store + OxiMem).
 	OxiDBHost string
@@ -74,31 +102,77 @@ func Load() Config {
 		LogLevel:       env("OXIMAIL_LOG_LEVEL", "info"),
 		TLSCert:        env("OXIMAIL_TLS_CERT", ""),
 		TLSKey:         env("OXIMAIL_TLS_KEY", ""),
+		ACMEHosts:      splitCSV(env("OXIMAIL_ACME_HOSTS", "")),
+		ACMECache:      env("OXIMAIL_ACME_CACHE", "./acme-cache"),
+		ACMEEmail:      env("OXIMAIL_ACME_EMAIL", ""),
+		ACMEDirectoryURL: env("OXIMAIL_ACME_DIRECTORY_URL", ""),
+		ACMEChallengeAddr: env("OXIMAIL_ACME_CHALLENGE_ADDR", ":80"),
 		OxiDBHost:      env("OXIMAIL_OXIDB_HOST", "127.0.0.1"),
 		OxiDBPort:      envInt("OXIMAIL_OXIDB_PORT", 4444),
 		RspamdURL:      env("OXIMAIL_RSPAMD_URL", ""),
 	}
 }
 
-// TLSConfig builds the server TLS configuration from the configured
-// certificate and key. It returns (nil, nil) when neither is set — TLS
-// is simply disabled — and an error only when one is set without the
-// other, or the files will not load.
-func (c Config) TLSConfig() (*tls.Config, error) {
+// TLSConfig builds the server TLS configuration. There are three
+// modes:
+//
+//   - ACMEHosts non-empty: TLS comes from Let's Encrypt (or the
+//     configured ACME directory) via autocert. The returned *tls.Config
+//     carries a GetCertificate callback; renewals are automatic. The
+//     returned autocert.Manager owns the HTTP-01 challenge handler the
+//     caller must serve on ACMEChallengeAddr.
+//   - TLSCert + TLSKey set: TLS comes from those static PEM files.
+//   - Neither: TLS is disabled. STARTTLS is not advertised and the
+//     implicit-TLS listeners are not started.
+//
+// On error, both returned values are nil. On the static-cert and
+// disabled paths the autocert.Manager is also nil; callers can check
+// for nil to decide whether to start the challenge listener.
+func (c Config) TLSConfig() (*tls.Config, *autocert.Manager, error) {
+	if len(c.ACMEHosts) > 0 {
+		m := &autocert.Manager{
+			Cache:      autocert.DirCache(c.ACMECache),
+			Prompt:     autocert.AcceptTOS,
+			HostPolicy: autocert.HostWhitelist(c.ACMEHosts...),
+			Email:      c.ACMEEmail,
+		}
+		if c.ACMEDirectoryURL != "" {
+			m.Client = &acme.Client{DirectoryURL: c.ACMEDirectoryURL}
+		}
+		cfg := m.TLSConfig()
+		cfg.MinVersion = tls.VersionTLS12
+		return cfg, m, nil
+	}
 	if c.TLSCert == "" && c.TLSKey == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if c.TLSCert == "" || c.TLSKey == "" {
-		return nil, fmt.Errorf("config: OXIMAIL_TLS_CERT and OXIMAIL_TLS_KEY must be set together")
+		return nil, nil, fmt.Errorf("config: OXIMAIL_TLS_CERT and OXIMAIL_TLS_KEY must be set together")
 	}
 	cert, err := tls.LoadX509KeyPair(c.TLSCert, c.TLSKey)
 	if err != nil {
-		return nil, fmt.Errorf("config: load TLS keypair: %w", err)
+		return nil, nil, fmt.Errorf("config: load TLS keypair: %w", err)
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
-	}, nil
+	}, nil, nil
+}
+
+// splitCSV parses a comma-separated env value into a trimmed,
+// non-empty slice. An empty input yields a nil slice.
+func splitCSV(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func env(key, def string) string {
