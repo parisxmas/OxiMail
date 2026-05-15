@@ -14,6 +14,7 @@ package queue
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
@@ -181,18 +182,10 @@ func (q *Queue) deliverDomain(from, domain string, rcpts []string, raw []byte) (
 		return failuresFor(rcpts, fmt.Sprintf("could not resolve %s: %v", domain, err)), nil
 	}
 
-	var conn net.Conn
-	for _, target := range targets {
-		conn, err = net.DialTimeout("tcp", target, dialTimeout)
-		if err == nil {
-			break
-		}
+	c, dialErr := dialMX(targets, domain)
+	if c == nil {
+		return failuresFor(rcpts, fmt.Sprintf("could not connect to %s: %v", domain, dialErr)), nil
 	}
-	if conn == nil {
-		return failuresFor(rcpts, fmt.Sprintf("could not connect to %s: %v", domain, err)), nil
-	}
-
-	c := gosmtp.NewClient(conn)
 	defer c.Close()
 
 	if err := c.Hello(q.hostname); err != nil {
@@ -257,6 +250,39 @@ func failureRecipients(fs []rcptFailure) []string {
 		out[i] = f.recipient
 	}
 	return out
+}
+
+// dialMX tries each target in order, attempting opportunistic STARTTLS
+// first and falling back to cleartext if the remote does not speak it.
+// The remote's certificate is not verified — most MX hosts run with
+// self-signed certs, and STARTTLS still defeats passive eavesdropping.
+// Returns (nil, lastErr) if every target is unreachable.
+func dialMX(targets []string, domain string) (*gosmtp.Client, error) {
+	tlsConfig := &tls.Config{
+		ServerName:         domain,
+		InsecureSkipVerify: true,
+	}
+	var lastErr error
+	for _, target := range targets {
+		conn, err := net.DialTimeout("tcp", target, dialTimeout)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		// NewClientStartTLS does HELO → STARTTLS → re-HELO inside the
+		// library. It closes conn on error, so we have to re-dial for
+		// the cleartext fallback.
+		if c, err := gosmtp.NewClientStartTLS(conn, tlsConfig); err == nil {
+			return c, nil
+		}
+		conn, err = net.DialTimeout("tcp", target, dialTimeout)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return gosmtp.NewClient(conn), nil
+	}
+	return nil, lastErr
 }
 
 // writeData runs the SMTP DATA phase, writing the raw message.

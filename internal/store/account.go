@@ -328,42 +328,66 @@ func (s *Store) DeleteAlias(address string) error {
 	return nil
 }
 
-// ResolveRecipient maps an inbound RCPT address to the local account IDs
-// that should receive the mail: a direct account match yields that one
-// account; an alias yields the local accounts among its destinations.
+// maxAliasDepth caps alias-of-alias expansion. Five hops is far more
+// than any sane configuration needs and keeps a cycle from looping
+// forever even if the visited-set check missed it somehow.
+const maxAliasDepth = 5
+
+// ResolveRecipient maps an inbound RCPT address to the local account
+// IDs that should receive the mail: a direct account match yields that
+// one account; an alias yields the local accounts among its
+// destinations, recursing into aliased destinations up to a depth cap.
 // An empty result means the address is not deliverable to a local
 // mailbox here.
 //
 // TODO: alias destinations that are *remote* addresses should be handed
 // to the outbound queue for forwarding; for now only local destinations
-// are resolved, and alias-of-alias chains are not followed.
+// are resolved.
 func (s *Store) ResolveRecipient(address string) ([]uint64, error) {
-	address = strings.ToLower(address)
+	return s.resolveRecipient(strings.ToLower(address), map[string]bool{}, 0)
+}
+
+func (s *Store) resolveRecipient(address string, visited map[string]bool, depth int) ([]uint64, error) {
+	if depth > maxAliasDepth || visited[address] {
+		return nil, nil // hop limit or alias cycle — stop
+	}
+	visited[address] = true
 
 	if acc, err := s.GetAccount(address); err == nil {
 		return []uint64{acc.ID}, nil
-	} else if err != ErrNotFound {
+	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
 
 	al, err := s.GetAlias(address)
-	if err == ErrNotFound {
+	if errors.Is(err, ErrNotFound) {
 		return nil, nil // not deliverable here
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	var local []uint64
+	var ids []uint64
 	for _, dest := range al.Destinations {
-		acc, err := s.GetAccount(dest)
-		if err == ErrNotFound {
-			continue // remote destination — outbound forwarding, not handled yet
-		}
+		sub, err := s.resolveRecipient(strings.ToLower(dest), visited, depth+1)
 		if err != nil {
 			return nil, err
 		}
-		local = append(local, acc.ID)
+		for _, id := range sub {
+			if !containsID(ids, id) {
+				ids = append(ids, id)
+			}
+		}
 	}
-	return local, nil
+	return ids, nil
+}
+
+// containsID reports whether ids already includes id.
+func containsID(ids []uint64, id uint64) bool {
+	for _, x := range ids {
+		if x == id {
+			return true
+		}
+	}
+	return false
 }

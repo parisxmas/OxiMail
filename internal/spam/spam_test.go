@@ -83,6 +83,20 @@ func TestDNSBLChecker(t *testing.T) {
 	}
 }
 
+func TestReverseIP(t *testing.T) {
+	cases := map[string]string{
+		"1.2.3.4":    "4.3.2.1",
+		"127.0.0.1":  "1.0.0.127",
+		"2001:db8::1": "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2",
+		"not-an-ip":  "",
+	}
+	for in, want := range cases {
+		if got := reverseIP(in); got != want {
+			t.Errorf("reverseIP(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestDNSBLFailsOpen(t *testing.T) {
 	d := newDNSBLChecker([]string{"bl.example"})
 	d.lookup = func(string) ([]string, error) {

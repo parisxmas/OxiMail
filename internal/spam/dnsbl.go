@@ -3,6 +3,7 @@ package spam
 import (
 	"fmt"
 	"net"
+	"strings"
 )
 
 // dnsblChecker looks the connecting IP up in DNS blocklists. A listed IP
@@ -20,9 +21,9 @@ func newDNSBLChecker(zones []string) *dnsblChecker {
 
 // listed reports whether ip appears in any configured blocklist zone.
 func (d *dnsblChecker) listed(ip string) bool {
-	q := reverseIPv4(ip)
+	q := reverseIP(ip)
 	if q == "" {
-		return false // not a dotted-quad IPv4 address we can query
+		return false // not an address we can query
 	}
 	for _, zone := range d.zones {
 		addrs, err := d.lookup(q + "." + zone)
@@ -35,14 +36,26 @@ func (d *dnsblChecker) listed(ip string) bool {
 	return false
 }
 
-// reverseIPv4 turns "1.2.3.4" into "4.3.2.1" for a DNSBL query name. It
-// returns "" for anything that is not an IPv4 address.
-//
-// TODO: IPv6 DNSBL queries (the nibble-reversed ip6.arpa-style form).
-func reverseIPv4(ip string) string {
-	v4 := net.ParseIP(ip).To4()
-	if v4 == nil {
+// reverseIP turns an IPv4 or IPv6 address into the reversed form used
+// for a DNSBL query name: "1.2.3.4" → "4.3.2.1"; an IPv6 address is
+// nibble-reversed, 32 dot-separated hex digits. Returns "" for anything
+// unparseable.
+func reverseIP(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
 		return ""
 	}
-	return fmt.Sprintf("%d.%d.%d.%d", v4[3], v4[2], v4[1], v4[0])
+	if v4 := parsed.To4(); v4 != nil {
+		return fmt.Sprintf("%d.%d.%d.%d", v4[3], v4[2], v4[1], v4[0])
+	}
+	v6 := parsed.To16()
+	if v6 == nil {
+		return ""
+	}
+	nibbles := make([]string, 0, 32)
+	for i := len(v6) - 1; i >= 0; i-- {
+		nibbles = append(nibbles, fmt.Sprintf("%x", v6[i]&0x0f))
+		nibbles = append(nibbles, fmt.Sprintf("%x", v6[i]>>4))
+	}
+	return strings.Join(nibbles, ".")
 }
