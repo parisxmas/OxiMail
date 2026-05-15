@@ -84,6 +84,40 @@ func (s *Store) GetDomain(domain string) (*Domain, error) {
 	return &d, nil
 }
 
+// DeleteDomain removes a hosted domain. It refuses to delete a domain
+// that still has accounts in it — purge those first via DeleteAccount.
+func (s *Store) DeleteDomain(domain string) error {
+	domain = strings.ToLower(domain)
+	accounts, err := s.ListAccounts(domain)
+	if err != nil {
+		return fmt.Errorf("store: delete domain %q: %w", domain, err)
+	}
+	if len(accounts) > 0 {
+		return fmt.Errorf("store: delete domain %q: %d account(s) still in it", domain, len(accounts))
+	}
+	if _, err := s.db.Delete(CollDomains, map[string]any{"domain": domain}); err != nil {
+		return fmt.Errorf("store: delete domain %q: %w", domain, err)
+	}
+	return nil
+}
+
+// SetAccountPassword updates an account's stored password hash. The
+// caller is responsible for hashing the plaintext (see HashPassword).
+func (s *Store) SetAccountPassword(accountID uint64, passwordHash string) error {
+	doc, err := s.db.FindAndModify(
+		CollAccounts,
+		map[string]any{"_id": accountID},
+		map[string]any{"$set": map[string]any{"password_hash": passwordHash}},
+	)
+	if err != nil {
+		return fmt.Errorf("store: set password for account %d: %w", accountID, err)
+	}
+	if doc == nil {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ListDomains returns every hosted domain.
 func (s *Store) ListDomains() ([]Domain, error) {
 	rows, err := s.db.Find(CollDomains, map[string]any{}, nil)

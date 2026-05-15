@@ -143,4 +143,44 @@ func TestCLI(t *testing.T) {
 			t.Errorf("domain dkim on a missing domain succeeded: output %q", out)
 		}
 	})
+
+	t.Run("account passwd updates the password", func(t *testing.T) {
+		if _, code := cli("first\n", "account", "add", "passwd-user@example.test"); code != 0 {
+			t.Fatal("setup: account add failed")
+		}
+		// The original password works.
+		if _, err := st.Authenticate("passwd-user@example.test", "first"); err != nil {
+			t.Fatalf("setup: authenticate with original password: %v", err)
+		}
+		// Change it.
+		if out, code := cli("second\n", "account", "passwd", "passwd-user@example.test"); code != 0 {
+			t.Fatalf("account passwd: code %d, output %q", code, out)
+		}
+		// Old password no longer works; new one does.
+		if _, err := st.Authenticate("passwd-user@example.test", "first"); err == nil {
+			t.Error("old password still works after passwd")
+		}
+		if _, err := st.Authenticate("passwd-user@example.test", "second"); err != nil {
+			t.Errorf("new password does not work: %v", err)
+		}
+	})
+
+	t.Run("domain delete refuses while accounts remain", func(t *testing.T) {
+		// example.test has accounts created earlier in this test.
+		if out, code := cli("", "domain", "delete", "example.test"); code == 0 {
+			t.Errorf("domain delete with accounts succeeded: %q", out)
+		}
+	})
+
+	t.Run("domain delete works after the accounts are gone", func(t *testing.T) {
+		if _, code := cli("", "domain", "add", "ephemeral.test"); code != 0 {
+			t.Fatal("setup: domain add failed")
+		}
+		if out, code := cli("", "domain", "delete", "ephemeral.test"); code != 0 {
+			t.Fatalf("domain delete: code %d, output %q", code, out)
+		}
+		if _, err := st.GetDomain("ephemeral.test"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("domain still present after delete: err = %v", err)
+		}
+	})
 }

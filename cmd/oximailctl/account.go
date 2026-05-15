@@ -19,8 +19,10 @@ func (c *cmdContext) account(args []string) int {
 		return c.accountList(args[1:])
 	case "delete":
 		return c.accountDelete(args[1:])
+	case "passwd":
+		return c.accountPasswd(args[1:])
 	default:
-		return c.misuse("oximailctl account <add|list|delete> ...")
+		return c.misuse("oximailctl account <add|list|delete|passwd> ...")
 	}
 }
 
@@ -91,5 +93,33 @@ func (c *cmdContext) accountDelete(args []string) int {
 		return c.fail("delete account: %v", err)
 	}
 	fmt.Fprintf(c.stdout, "deleted account %s and all of its mail\n", acc.Address)
+	return 0
+}
+
+// accountPasswd updates an account's password. The new password is read
+// from stdin — same prompt and constraints as account add.
+func (c *cmdContext) accountPasswd(args []string) int {
+	if len(args) != 1 {
+		return c.misuse("oximailctl account passwd <address>")
+	}
+	acc, err := c.store.GetAccount(args[0])
+	if errors.Is(err, store.ErrNotFound) {
+		return c.fail("no such account %q", args[0])
+	}
+	if err != nil {
+		return c.fail("%v", err)
+	}
+	password, err := c.readPassword()
+	if err != nil {
+		return c.fail("%v", err)
+	}
+	hash, err := store.HashPassword(password)
+	if err != nil {
+		return c.fail("%v", err)
+	}
+	if err := c.store.SetAccountPassword(acc.ID, hash); err != nil {
+		return c.fail("set password: %v", err)
+	}
+	fmt.Fprintf(c.stdout, "updated password for %s\n", acc.Address)
 	return 0
 }

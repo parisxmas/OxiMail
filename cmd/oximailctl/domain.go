@@ -15,17 +15,19 @@ import (
 
 func (c *cmdContext) domain(args []string) int {
 	if len(args) == 0 {
-		return c.misuse("oximailctl domain <add|list|dkim> ...")
+		return c.misuse("oximailctl domain <add|list|delete|dkim> ...")
 	}
 	switch args[0] {
 	case "add":
 		return c.domainAdd(args[1:])
 	case "list":
 		return c.domainList(args[1:])
+	case "delete":
+		return c.domainDelete(args[1:])
 	case "dkim":
 		return c.domainDKIM(args[1:])
 	default:
-		return c.misuse("oximailctl domain <add|list|dkim> ...")
+		return c.misuse("oximailctl domain <add|list|delete|dkim> ...")
 	}
 }
 
@@ -56,6 +58,24 @@ func (c *cmdContext) domainList(args []string) int {
 		}
 		fmt.Fprintf(c.stdout, "%s\tactive=%t\tdkim=%s\n", d.Domain, d.Active, dkim)
 	}
+	return 0
+}
+
+// domainDelete removes a hosted domain. The store refuses to delete a
+// domain that still has accounts in it.
+func (c *cmdContext) domainDelete(args []string) int {
+	if len(args) != 1 {
+		return c.misuse("oximailctl domain delete <domain>")
+	}
+	if _, err := c.store.GetDomain(args[0]); errors.Is(err, store.ErrNotFound) {
+		return c.fail("no such domain %q", args[0])
+	} else if err != nil {
+		return c.fail("%v", err)
+	}
+	if err := c.store.DeleteDomain(args[0]); err != nil {
+		return c.fail("%v", err)
+	}
+	fmt.Fprintf(c.stdout, "deleted domain %s\n", args[0])
 	return 0
 }
 

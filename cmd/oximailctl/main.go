@@ -6,10 +6,12 @@
 //
 //	oximailctl domain  add <domain>
 //	oximailctl domain  list
+//	oximailctl domain  delete <domain>               refuses if any accounts remain
 //	oximailctl domain  dkim [-selector S] <domain>   generate a signing key
 //	oximailctl account add [-quota N] <address>      password read from stdin
 //	oximailctl account list [-domain <domain>]
 //	oximailctl account delete <address>
+//	oximailctl account passwd <address>              new password read from stdin
 //	oximailctl alias   add <address> <dest>[,<dest>...]
 //	oximailctl alias   list
 //	oximailctl alias   delete <address>
@@ -112,9 +114,12 @@ func usage(w io.Writer) {
 usage:
   oximailctl domain  add <domain>
   oximailctl domain  list
+  oximailctl domain  delete <domain>
+  oximailctl domain  dkim [-selector S] <domain>
   oximailctl account add [-quota N] <address>      password read from stdin
   oximailctl account list [-domain <domain>]
   oximailctl account delete <address>
+  oximailctl account passwd <address>              new password read from stdin
   oximailctl alias   add <address> <dest>[,<dest>...]
   oximailctl alias   list
   oximailctl alias   delete <address>
