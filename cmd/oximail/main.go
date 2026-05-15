@@ -44,7 +44,7 @@ func main() {
 	observability.SetupLogging(cfg.LogFormat, cfg.LogLevel)
 	log.Printf("starting — hostname=%s oxidb=%s:%d", cfg.Hostname, cfg.OxiDBHost, cfg.OxiDBPort)
 
-	tlsConfig, acmeManager, err := cfg.TLSConfig()
+	tlsConfig, acmeManager, tlsReloader, err := cfg.TLSConfig()
 	if err != nil {
 		log.Fatalf("tls: %v", err)
 	}
@@ -52,7 +52,7 @@ func main() {
 	case acmeManager != nil:
 		log.Printf("TLS via ACME — hosts=%v cache=%s challenge=%s", cfg.ACMEHosts, cfg.ACMECache, cfg.ACMEChallengeAddr)
 	case tlsConfig != nil:
-		log.Print("TLS configured (static cert)")
+		log.Print("TLS configured (static cert) — SIGHUP reloads the PEM files on disk")
 	default:
 		log.Print("TLS not configured (set OXIMAIL_TLS_CERT/OXIMAIL_TLS_KEY or OXIMAIL_ACME_HOSTS) — running without TLS")
 	}
@@ -114,6 +114,29 @@ func main() {
 	// Run each component until the process is asked to stop.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// SIGHUP reloads what we can without a restart. Today: re-read the
+	// static TLS cert from disk so certbot renew (or any out-of-band
+	// rotation) takes effect on the next handshake. ACME mode renews
+	// itself, so SIGHUP is a no-op there.
+	if tlsReloader != nil {
+		hup := make(chan os.Signal, 1)
+		signal.Notify(hup, syscall.SIGHUP)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-hup:
+					if err := tlsReloader.Reload(); err != nil {
+						log.Printf("tls: reload failed (keeping previous cert): %v", err)
+					} else {
+						log.Print("tls: reloaded certificate from disk")
+					}
+				}
+			}
+		}()
+	}
 
 	var wg sync.WaitGroup
 	run := func(name string, start func(context.Context) error) {

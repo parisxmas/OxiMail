@@ -138,13 +138,17 @@ func Load() Config {
 //     returned autocert.Manager owns the HTTP-01 challenge handler the
 //     caller must serve on ACMEChallengeAddr.
 //   - TLSCert + TLSKey set: TLS comes from those static PEM files.
+//     The returned *TLSReloader can be used to hot-reload the cert on
+//     SIGHUP (or after `certbot renew`) without restarting the
+//     process — listeners obtain certs through GetCertificate, so a
+//     reload takes effect on the next handshake.
 //   - Neither: TLS is disabled. STARTTLS is not advertised and the
 //     implicit-TLS listeners are not started.
 //
-// On error, both returned values are nil. On the static-cert and
-// disabled paths the autocert.Manager is also nil; callers can check
-// for nil to decide whether to start the challenge listener.
-func (c Config) TLSConfig() (*tls.Config, *autocert.Manager, error) {
+// On error, all three returned values are nil. ACME mode and the
+// disabled mode return a nil *TLSReloader; static-cert mode returns a
+// nil *autocert.Manager.
+func (c Config) TLSConfig() (*tls.Config, *autocert.Manager, *TLSReloader, error) {
 	if len(c.ACMEHosts) > 0 {
 		m := &autocert.Manager{
 			Cache:      autocert.DirCache(c.ACMECache),
@@ -157,22 +161,22 @@ func (c Config) TLSConfig() (*tls.Config, *autocert.Manager, error) {
 		}
 		cfg := m.TLSConfig()
 		cfg.MinVersion = tls.VersionTLS12
-		return cfg, m, nil
+		return cfg, m, nil, nil
 	}
 	if c.TLSCert == "" && c.TLSKey == "" {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	if c.TLSCert == "" || c.TLSKey == "" {
-		return nil, nil, fmt.Errorf("config: OXIMAIL_TLS_CERT and OXIMAIL_TLS_KEY must be set together")
+		return nil, nil, nil, fmt.Errorf("config: OXIMAIL_TLS_CERT and OXIMAIL_TLS_KEY must be set together")
 	}
-	cert, err := tls.LoadX509KeyPair(c.TLSCert, c.TLSKey)
+	reloader, err := NewTLSReloader(c.TLSCert, c.TLSKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("config: load TLS keypair: %w", err)
+		return nil, nil, nil, fmt.Errorf("config: load TLS keypair: %w", err)
 	}
 	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-	}, nil, nil
+		GetCertificate: reloader.GetCertificate,
+		MinVersion:     tls.VersionTLS12,
+	}, nil, reloader, nil
 }
 
 // SRSSecretBytes returns the SRS HMAC key as raw bytes, or nil + nil
