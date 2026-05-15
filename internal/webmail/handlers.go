@@ -85,14 +85,35 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request, acc 
 
 	// store.ListMessages is UID-ascending; a mailbox view wants newest
 	// first.
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	limit := parseLimit(r)
 	out := make([]messageSummary, 0, len(msgs))
 	for i := len(msgs) - 1; i >= 0; i-- {
-		out = append(out, summarize(&msgs[i]))
-	}
-	if limit := parseLimit(r); limit > 0 && limit < len(out) {
-		out = out[:limit]
+		m := &msgs[i]
+		if query != "" && !s.matchesQuery(m, query) {
+			continue
+		}
+		out = append(out, summarize(m))
+		if limit > 0 && len(out) >= limit {
+			break
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// matchesQuery reports whether m's metadata or body contains query.
+// Subject and From are cheap (in memory); the body is fetched only when
+// the metadata didn't already match, so a typical search stays fast.
+func (s *Server) matchesQuery(m *store.Message, query string) bool {
+	if strings.Contains(strings.ToLower(m.Subject), query) ||
+		strings.Contains(strings.ToLower(m.FromAddr), query) {
+		return true
+	}
+	raw, err := s.store.FetchBody(m)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(renderText(raw)), query)
 }
 
 // messageDetail is the GET /api/messages/{id} response — metadata plus
@@ -220,12 +241,50 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, acc *store
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleAttachment streams the n-th attachment of a message back to
+// the client. n is 0-based and matches the order in which the parsed
+// message exposes attachments via GET /api/messages/{id}.
+func (s *Server) handleAttachment(w http.ResponseWriter, r *http.Request, acc *store.Account) {
+	m, ok := s.loadOwnedMessage(w, r, acc)
+	if !ok {
+		return
+	}
+	idx, err := strconv.Atoi(r.PathValue("n"))
+	if err != nil || idx < 0 {
+		writeError(w, http.StatusBadRequest, "invalid attachment index")
+		return
+	}
+	raw, err := s.store.FetchBody(m)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load message body")
+		return
+	}
+	content, filename, contentType, ok := extractAttachment(raw, idx)
+	if !ok {
+		writeError(w, http.StatusNotFound, "no such attachment")
+		return
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	if filename == "" {
+		filename = "attachment"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, filename))
+	_, _ = w.Write(content)
+}
+
 // sendRequest is the body of POST /api/messages.
 type sendRequest struct {
 	To      []string `json:"to"`
 	Cc      []string `json:"cc"`
 	Subject string   `json:"subject"`
 	Text    string   `json:"text"`
+	// Optional HTML body. When non-empty, the outbound message is
+	// multipart/alternative carrying both Text and HTML.
+	HTML string `json:"html"`
 }
 
 // sendResponse reports how a sent message was dispatched.
@@ -251,7 +310,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, acc *store.A
 
 	messageID := randomID() + "@" + addressDomain(acc.Address)
 	in := store.IncomingMessage{
-		Raw:       buildTextMessage(acc.Address, req.To, req.Cc, req.Subject, req.Text, messageID),
+		Raw:       buildMessage(acc.Address, req.To, req.Cc, req.Subject, req.Text, req.HTML, messageID),
 		Subject:   req.Subject,
 		FromAddr:  acc.Address,
 		MessageID: messageID,

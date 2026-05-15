@@ -75,6 +75,73 @@ func renderBody(raw []byte) messageBody {
 	return body
 }
 
+// extractAttachment re-parses raw, walks to the idx-th attachment, and
+// returns its bytes, filename, and content type. ok is false when the
+// message will not parse or has fewer than idx+1 attachments.
+func extractAttachment(raw []byte, idx int) (content []byte, filename, contentType string, ok bool) {
+	mr, err := mail.CreateReader(bytes.NewReader(raw))
+	if err != nil {
+		return nil, "", "", false
+	}
+	n := 0
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			return nil, "", "", false
+		}
+		if err != nil {
+			return nil, "", "", false
+		}
+		h, isAttachment := part.Header.(*mail.AttachmentHeader)
+		if !isAttachment {
+			continue
+		}
+		if n != idx {
+			n++
+			continue
+		}
+		body, err := io.ReadAll(part.Body)
+		if err != nil {
+			return nil, "", "", false
+		}
+		filename, _ = h.Filename()
+		contentType, _, _ = h.ContentType()
+		return body, filename, contentType, true
+	}
+}
+
+// renderText returns just the text representation of a message — for
+// substring search over the body. HTML is stripped to its inner text
+// in the crudest possible way: angle-bracketed tags removed.
+func renderText(raw []byte) string {
+	body := renderBody(raw)
+	if body.Text != "" {
+		return body.Text
+	}
+	// No text part, just HTML — strip tags so a search for "hello" hits
+	// "<p>hello</p>".
+	return stripTags(body.HTML)
+}
+
+// stripTags removes everything between '<' and '>'. Good enough for
+// substring search; not safe for HTML rendering.
+func stripTags(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	skip := false
+	for _, r := range s {
+		switch {
+		case r == '<':
+			skip = true
+		case r == '>':
+			skip = false
+		case !skip:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // addressStrings parses a header field as an address list and returns
 // the addresses formatted as strings; a missing or malformed field
 // yields nil.

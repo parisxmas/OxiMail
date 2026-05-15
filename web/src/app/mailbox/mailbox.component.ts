@@ -40,7 +40,16 @@ import {
 
       <!-- Message list -->
       <section class="list">
-        <header>{{ selected() }}</header>
+        <header>
+          <span>{{ selected() }}</span>
+          <input
+            class="search"
+            type="search"
+            placeholder="Search…"
+            [value]="query()"
+            (input)="onSearchInput($event)"
+          />
+        </header>
         @if (loadingList()) {
           <p class="hint">Loading…</p>
         } @else if (messages().length === 0) {
@@ -101,9 +110,14 @@ import {
             <div class="attachments">
               <strong>Attachments</strong>
               @for (a of msg.attachments; track $index) {
-                <span class="chip">
+                <button
+                  type="button"
+                  class="chip"
+                  (click)="download(msg, $index, a.filename)"
+                  [disabled]="downloading() === $index"
+                >
                   {{ a.filename || '(unnamed)' }} · {{ a.size }} bytes
-                </span>
+                </button>
               }
             </div>
           }
@@ -188,6 +202,15 @@ import {
       padding: 12px;
       border-bottom: 1px solid var(--border);
       font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .search {
+      flex: 1;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: normal;
     }
     .row {
       display: grid;
@@ -295,6 +318,11 @@ export class MailboxComponent implements OnInit {
   readonly openMessage = signal<MessageDetail | null>(null);
   readonly composing = signal(false);
   readonly loadingList = signal(false);
+  readonly query = signal<string>('');
+  // index of the attachment currently being downloaded, or -1 for none.
+  readonly downloading = signal<number>(-1);
+  // search-input debounce timer; cleared on every keystroke.
+  private searchTimer: ReturnType<typeof setTimeout> | null = null;
 
   ngOnInit(): void {
     this.refreshMailboxes();
@@ -307,7 +335,43 @@ export class MailboxComponent implements OnInit {
     }
     this.selected.set(name);
     this.openMessage.set(null);
+    this.query.set('');
     this.loadMessages();
+  }
+
+  // onSearchInput debounces keystrokes by 250 ms before re-querying the
+  // server — a body search costs a round-trip per match.
+  onSearchInput(event: Event): void {
+    const value = (event.target as HTMLInputElement).value;
+    this.query.set(value);
+    if (this.searchTimer !== null) {
+      clearTimeout(this.searchTimer);
+    }
+    this.searchTimer = setTimeout(() => {
+      this.searchTimer = null;
+      this.loadMessages();
+    }, 250);
+  }
+
+  // download fetches one attachment as a blob, then nudges the browser
+  // to save it under the original filename.
+  download(msg: MessageDetail, index: number, filename: string): void {
+    if (this.downloading() === index) {
+      return;
+    }
+    this.downloading.set(index);
+    this.api.attachment(msg.id, index).subscribe({
+      next: (blob: Blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename || 'attachment';
+        a.click();
+        URL.revokeObjectURL(url);
+        this.downloading.set(-1);
+      },
+      error: () => this.downloading.set(-1),
+    });
   }
 
   open(id: number): void {
@@ -372,7 +436,7 @@ export class MailboxComponent implements OnInit {
 
   private loadMessages(): void {
     this.loadingList.set(true);
-    this.api.messages(this.selected()).subscribe({
+    this.api.messages(this.selected(), this.query()).subscribe({
       next: (msgs) => {
         this.messages.set(msgs);
         this.loadingList.set(false);

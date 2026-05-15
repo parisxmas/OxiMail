@@ -54,17 +54,34 @@ export class ApiService {
     return this.http.get<Mailbox[]>('/api/mailboxes');
   }
 
-  messages(mailbox: string) {
-    return this.http.get<MessageSummary[]>(
-      `/api/mailboxes/${encodeURIComponent(mailbox)}/messages`,
-    );
+  messages(mailbox: string, query = '') {
+    let url = `/api/mailboxes/${encodeURIComponent(mailbox)}/messages`;
+    if (query) {
+      url += `?q=${encodeURIComponent(query)}`;
+    }
+    return this.http.get<MessageSummary[]>(url);
   }
 
   message(id: number) {
     return this.http.get<MessageDetail>(`/api/messages/${id}`);
   }
 
-  send(body: { to: string[]; cc: string[]; subject: string; text: string }) {
+  // attachment fetches an attachment as a Blob — the bearer-token auth
+  // interceptor handles authorization; the caller turns it into an
+  // object URL or a download.
+  attachment(id: number, index: number) {
+    return this.http.get(`/api/messages/${id}/attachments/${index}`, {
+      responseType: 'blob',
+    });
+  }
+
+  send(body: {
+    to: string[];
+    cc: string[];
+    subject: string;
+    text: string;
+    html?: string;
+  }) {
     return this.http.post<SendResult>('/api/messages', body);
   }
 

@@ -2,9 +2,10 @@
 // clients. It is backed directly by the store — it does not go through
 // IMAP — and authenticates against the same account credentials.
 //
-// This is the read-side scaffold: login, mailbox listing, message
-// listing, and fetching one parsed message. Sending, search, flag
-// changes, move / delete, and attachment download are follow-ups.
+// Endpoints cover login, mailbox listing, message listing (with an
+// optional ?q= substring search), fetching one parsed message,
+// downloading an attachment, sending (text or multipart/alternative
+// HTML), flag changes, move, and delete.
 //
 // TODO: HttpOnly session cookies + CSRF protection for browser
 // frontends — today auth is a bearer token, which is simplest for an
@@ -53,6 +54,7 @@ func New(addr, staticDir string, st *store.Store, tlsConfig *tls.Config) *Server
 	mux.HandleFunc("GET /api/mailboxes", s.auth(s.handleMailboxes))
 	mux.HandleFunc("GET /api/mailboxes/{mailbox}/messages", s.auth(s.handleListMessages))
 	mux.HandleFunc("GET /api/messages/{id}", s.auth(s.handleGetMessage))
+	mux.HandleFunc("GET /api/messages/{id}/attachments/{n}", s.auth(s.handleAttachment))
 	mux.HandleFunc("POST /api/messages", s.auth(s.handleSend))
 	mux.HandleFunc("PATCH /api/messages/{id}/flags", s.auth(s.handleFlags))
 	mux.HandleFunc("POST /api/messages/{id}/move", s.auth(s.handleMove))

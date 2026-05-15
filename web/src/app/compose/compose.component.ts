@@ -42,12 +42,43 @@ import { ApiService } from '../api.service';
         <input name="subject" type="text" [(ngModel)]="subject" />
       </label>
 
-      <textarea
-        name="text"
-        rows="12"
-        placeholder="Write your message…"
-        [(ngModel)]="text"
-      ></textarea>
+      <div class="format-toggle">
+        <button
+          type="button"
+          class="toggle"
+          [class.active]="!htmlMode()"
+          (click)="htmlMode.set(false)"
+        >
+          Plain
+        </button>
+        <button
+          type="button"
+          class="toggle"
+          [class.active]="htmlMode()"
+          (click)="htmlMode.set(true)"
+        >
+          HTML
+        </button>
+      </div>
+
+      @if (!htmlMode()) {
+        <textarea
+          name="text"
+          rows="12"
+          placeholder="Write your message…"
+          [(ngModel)]="text"
+        ></textarea>
+      } @else {
+        <textarea
+          name="html"
+          rows="12"
+          placeholder="<p>Write HTML here…</p>"
+          [(ngModel)]="html"
+        ></textarea>
+        <p class="hint">
+          A plain-text fallback is generated for clients that cannot render HTML.
+        </p>
+      }
 
       @if (error()) {
         <p class="error">{{ error() }}</p>
@@ -110,6 +141,23 @@ import { ApiService } from '../api.service';
     textarea {
       resize: vertical;
     }
+    .format-toggle {
+      display: flex;
+      gap: 4px;
+    }
+    .toggle {
+      padding: 3px 10px;
+      font-size: 12px;
+    }
+    .toggle.active {
+      background: var(--bg-sunken);
+      font-weight: 600;
+    }
+    .hint {
+      margin: 0;
+      color: var(--text-muted);
+      font-size: 11px;
+    }
     .error {
       margin: 0;
       color: var(--danger);
@@ -134,6 +182,8 @@ export class ComposeComponent {
   cc = '';
   subject = '';
   text = '';
+  html = '';
+  readonly htmlMode = signal(false);
   readonly error = signal('');
   readonly busy = signal(false);
 
@@ -152,8 +202,12 @@ export class ComposeComponent {
     }
     this.busy.set(true);
     this.error.set('');
+    // When sending HTML, generate a crude plain-text fallback by
+    // stripping tags. The server then builds multipart/alternative.
+    const html = this.htmlMode() ? this.html : '';
+    const text = this.htmlMode() ? stripTags(this.html) : this.text;
     this.api
-      .send({ to, cc: splitAddresses(this.cc), subject: this.subject, text: this.text })
+      .send({ to, cc: splitAddresses(this.cc), subject: this.subject, text, html })
       .subscribe({
         next: () => this.sent.emit(),
         error: () => {
@@ -171,4 +225,11 @@ function splitAddresses(raw: string): string[] {
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+}
+
+// stripTags is the same trick the server uses for body search: drop
+// everything between '<' and '>'. Good enough as a fallback for clients
+// that show only the text part.
+function stripTags(s: string): string {
+  return s.replace(/<[^>]*>/g, '');
 }

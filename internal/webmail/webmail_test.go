@@ -53,9 +53,19 @@ func TestWebmail(t *testing.T) {
 		"To: user@oximail.test\r\n" +
 		"Subject: Hello webmail\r\n" +
 		"Message-Id: <wm-1@elsewhere.test>\r\n" +
-		"Content-Type: text/plain\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/mixed; boundary=\"BOUND\"\r\n" +
 		"\r\n" +
-		"the plain text body\r\n")
+		"--BOUND\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n" +
+		"\r\n" +
+		"the plain text body, mentions watermelons\r\n" +
+		"--BOUND\r\n" +
+		"Content-Type: application/octet-stream\r\n" +
+		"Content-Disposition: attachment; filename=\"notes.bin\"\r\n" +
+		"\r\n" +
+		"\x00\x01\x02\x03ATTACH\r\n" +
+		"--BOUND--\r\n")
 	seeded, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
 		Raw: rawMsg, Subject: "Hello webmail", MessageID: "wm-1@elsewhere.test",
 		FromAddr: "sender@elsewhere.test",
@@ -177,6 +187,66 @@ func TestWebmail(t *testing.T) {
 		}
 	})
 
+	t.Run("list filters by subject substring", func(t *testing.T) {
+		var out []struct{ ID uint64 }
+		if status := getJSON(t, base+"/api/mailboxes/INBOX/messages?q=webmail", token, &out); status != http.StatusOK {
+			t.Fatalf("status = %d, want 200", status)
+		}
+		if len(out) != 1 {
+			t.Fatalf("got %d matches for q=webmail, want 1", len(out))
+		}
+		var miss []struct{ ID uint64 }
+		if status := getJSON(t, base+"/api/mailboxes/INBOX/messages?q=elephants", token, &miss); status != http.StatusOK || len(miss) != 0 {
+			t.Fatalf("q=elephants: status=%d count=%d, want 200/0", status, len(miss))
+		}
+	})
+
+	t.Run("list filters by body substring", func(t *testing.T) {
+		var out []struct{ ID uint64 }
+		// "watermelons" appears in the body but not the subject or sender.
+		if status := getJSON(t, base+"/api/mailboxes/INBOX/messages?q=watermelons", token, &out); status != http.StatusOK {
+			t.Fatalf("status = %d, want 200", status)
+		}
+		if len(out) != 1 {
+			t.Fatalf("got %d matches for q=watermelons, want 1 (body search)", len(out))
+		}
+	})
+
+	t.Run("download an attachment", func(t *testing.T) {
+		// The seeded message has one attachment at index 0.
+		url := fmt.Sprintf("%s/api/messages/%d/attachments/0", base, seeded.ID)
+		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("download: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != "application/octet-stream" {
+			t.Errorf("Content-Type = %q, want application/octet-stream", ct)
+		}
+		if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, `filename="notes.bin"`) {
+			t.Errorf("Content-Disposition = %q, want it to name notes.bin", cd)
+		}
+		var body bytes.Buffer
+		if _, err := body.ReadFrom(resp.Body); err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if !bytes.Contains(body.Bytes(), []byte("ATTACH")) {
+			t.Errorf("attachment body missing payload: %q", body.Bytes())
+		}
+	})
+
+	t.Run("download an out-of-range attachment is a 404", func(t *testing.T) {
+		url := fmt.Sprintf("%s/api/messages/%d/attachments/99", base, seeded.ID)
+		if status := get(t, url, token); status != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", status)
+		}
+	})
+
 	// --- mutations (these run after the read subtests, in order) ---
 
 	t.Run("send a message to a local recipient", func(t *testing.T) {
@@ -211,6 +281,50 @@ func TestWebmail(t *testing.T) {
 		}
 		if sentMsgs, _ := st.ListMessages(sent.ID); len(sentMsgs) != 1 {
 			t.Fatalf("Sent has %d messages, want 1", len(sentMsgs))
+		}
+	})
+
+	t.Run("send a message with an HTML body", func(t *testing.T) {
+		body := mustJSON(map[string]any{
+			"to":      []string{"other@oximail.test"},
+			"subject": "Rich email",
+			"text":    "fallback plain text",
+			"html":    "<p>fallback <b>plain</b> text</p>",
+		})
+		var out struct{ Delivered, Queued int }
+		if status := postJSON(t, base+"/api/messages", token, body, &out); status != http.StatusOK {
+			t.Fatalf("status = %d, want 200", status)
+		}
+		if out.Delivered != 1 {
+			t.Fatalf("delivered = %d, want 1", out.Delivered)
+		}
+		// The recipient's INBOX has the message and its raw form is
+		// multipart/alternative carrying both representations.
+		otherInbox, _ := st.GetMailboxByName(other.ID, "INBOX")
+		recvd, _ := st.ListMessages(otherInbox.ID)
+		var rich *store.Message
+		for i := range recvd {
+			if recvd[i].Subject == "Rich email" {
+				rich = &recvd[i]
+				break
+			}
+		}
+		if rich == nil {
+			t.Fatal("recipient did not receive the HTML message")
+		}
+		raw, err := st.FetchBody(rich)
+		if err != nil {
+			t.Fatalf("fetch HTML body: %v", err)
+		}
+		s := string(raw)
+		if !strings.Contains(s, "multipart/alternative") {
+			t.Error("composed message is not multipart/alternative")
+		}
+		if !strings.Contains(s, "text/plain") || !strings.Contains(s, "text/html") {
+			t.Error("composed message is missing one of its parts")
+		}
+		if !strings.Contains(s, "<p>fallback <b>plain</b> text</p>") {
+			t.Error("HTML body not present in the raw message")
 		}
 	})
 
