@@ -2,18 +2,23 @@ package imap
 
 import (
 	"bytes"
+	"log"
 	"sort"
+	"sync"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 
+	"github.com/parisxmas/OxiMail/internal/notifier"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
 // selectedMailbox is one session's view of a SELECTed mailbox: a
 // snapshot of the message metadata taken at SELECT time, plus the
 // go-imap trackers that turn the session's own mutations (STORE,
-// EXPUNGE, APPEND) into the right unilateral responses.
+// EXPUNGE, APPEND) into the right unilateral responses, plus a
+// notifier subscription that turns *other* connections' arrivals into
+// an unsolicited EXISTS — which is what makes IDLE useful.
 //
 // Message bodies are not in the snapshot — they are read from the blob
 // store lazily, only when a FETCH asks for them.
@@ -22,15 +27,21 @@ type selectedMailbox struct {
 
 	dbID        uint64
 	name        string
-	uidNext     uint32
 	uidValidity uint32
 
 	tracker *imapserver.MailboxTracker
 	session *imapserver.SessionTracker
 
+	// mu guards msgs and uidNext. The session's own command goroutine
+	// and the background refresh goroutine both touch them.
+	mu      sync.Mutex
+	uidNext uint32
 	// msgs is the snapshot, ordered by ascending UID — so the slice
 	// index + 1 is the IMAP sequence number.
 	msgs []store.Message
+
+	sub  *notifier.Subscription
+	done chan struct{}
 }
 
 func newSelectedMailbox(st *store.Store, mb *store.Mailbox) (*selectedMailbox, error) {
@@ -39,7 +50,7 @@ func newSelectedMailbox(st *store.Store, mb *store.Mailbox) (*selectedMailbox, e
 		return nil, err
 	}
 	tracker := imapserver.NewMailboxTracker(uint32(len(msgs)))
-	return &selectedMailbox{
+	m := &selectedMailbox{
 		store:       st,
 		dbID:        mb.ID,
 		name:        mb.Name,
@@ -48,16 +59,79 @@ func newSelectedMailbox(st *store.Store, mb *store.Mailbox) (*selectedMailbox, e
 		tracker:     tracker,
 		session:     tracker.NewSession(),
 		msgs:        msgs,
-	}, nil
+		sub:         notifier.Default.Subscribe(mb.ID),
+		done:        make(chan struct{}),
+	}
+	go m.watch()
+	return m, nil
 }
 
-// Close releases the session tracker.
+// Close releases the session tracker and unsubscribes from the hub.
 func (m *selectedMailbox) Close() {
+	close(m.done)
+	m.sub.Close()
 	m.session.Close()
 }
 
+// watch wakes on every cross-connection mailbox change, re-lists the
+// mailbox, folds any new arrivals into the snapshot, and queues an
+// EXISTS so the next Poll/Idle pushes it to the client.
+//
+// It only handles new arrivals (the IDLE win that matters most). An
+// EXPUNGE or a flag change made by another connection is not
+// broadcast — discovering those still requires a fresh SELECT.
+func (m *selectedMailbox) watch() {
+	for {
+		select {
+		case <-m.done:
+			return
+		case <-m.sub.C():
+			m.refresh()
+		}
+	}
+}
+
+// refresh re-lists the mailbox and appends any messages whose UID is
+// at or above our current uidNext. Lower UIDs are ignored — they would
+// mean an EXPUNGE happened elsewhere, which this iteration does not
+// propagate. A re-arriving UID we already have is also ignored.
+func (m *selectedMailbox) refresh() {
+	latest, err := m.store.ListMessages(m.dbID)
+	if err != nil {
+		log.Printf("imap: refresh mailbox %d: %v", m.dbID, err)
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range latest {
+		if latest[i].UID < m.uidNext {
+			continue
+		}
+		if containsUID(m.msgs, latest[i].UID) {
+			continue
+		}
+		m.msgs = append(m.msgs, latest[i])
+		if latest[i].UID+1 > m.uidNext {
+			m.uidNext = latest[i].UID + 1
+		}
+	}
+	m.tracker.QueueNumMessages(uint32(len(m.msgs)))
+}
+
+// containsUID reports whether any message in msgs has uid.
+func containsUID(msgs []store.Message, uid uint32) bool {
+	for i := range msgs {
+		if msgs[i].UID == uid {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *selectedMailbox) selectData() *imap.SelectData {
-	flags := m.flags()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	flags := m.flagsLocked()
 	permanent := append(append([]imap.Flag(nil), flags...), imap.FlagWildcard)
 	return &imap.SelectData{
 		Flags:             flags,
@@ -65,13 +139,14 @@ func (m *selectedMailbox) selectData() *imap.SelectData {
 		NumMessages:       uint32(len(m.msgs)),
 		UIDNext:           imap.UID(m.uidNext),
 		UIDValidity:       m.uidValidity,
-		FirstUnseenSeqNum: m.firstUnseenSeqNum(),
+		FirstUnseenSeqNum: m.firstUnseenSeqNumLocked(),
 	}
 }
 
-// flags is the set of flags present on the snapshot's messages, plus the
-// standard system flags — always advertised so clients can set them.
-func (m *selectedMailbox) flags() []imap.Flag {
+// flagsLocked is the set of flags present on the snapshot's messages,
+// plus the standard system flags — always advertised so clients can
+// set them. The caller must hold m.mu.
+func (m *selectedMailbox) flagsLocked() []imap.Flag {
 	set := map[imap.Flag]struct{}{
 		imap.FlagSeen:     {},
 		imap.FlagAnswered: {},
@@ -92,7 +167,9 @@ func (m *selectedMailbox) flags() []imap.Flag {
 	return out
 }
 
-func (m *selectedMailbox) firstUnseenSeqNum() uint32 {
+// firstUnseenSeqNumLocked returns the sequence number of the first
+// \Unseen message, or 0 if there is none. The caller must hold m.mu.
+func (m *selectedMailbox) firstUnseenSeqNumLocked() uint32 {
 	for i := range m.msgs {
 		if !hasFlag(m.msgs[i].Flags, string(imap.FlagSeen)) {
 			return uint32(i) + 1
@@ -104,6 +181,11 @@ func (m *selectedMailbox) firstUnseenSeqNum() uint32 {
 // add folds a freshly appended message into the snapshot and tells the
 // tracker the message count grew.
 func (m *selectedMailbox) add(msg *store.Message) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if containsUID(m.msgs, msg.UID) {
+		return // already folded in by a notifier refresh
+	}
 	m.msgs = append(m.msgs, *msg)
 	if msg.UID+1 > m.uidNext {
 		m.uidNext = msg.UID + 1
@@ -111,11 +193,26 @@ func (m *selectedMailbox) add(msg *store.Message) {
 	m.tracker.QueueNumMessages(uint32(len(m.msgs)))
 }
 
+// snapshot returns a shallow copy of the message slice. Callers iterate
+// the copy without holding m.mu so that streaming work (FETCH bodies)
+// does not block notifier refreshes.
+func (m *selectedMailbox) snapshot() []store.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]store.Message, len(m.msgs))
+	copy(out, m.msgs)
+	return out
+}
+
 // forEach calls fn for every snapshot message in numSet, in sequence
 // order. It handles both sequence-number and UID sets and the "*"
-// wildcard.
+// wildcard. m.mu is held for the entire walk so the watch goroutine
+// cannot grow the slice underneath; if the callback does external I/O
+// (e.g. fetching a body) that I/O happens with the lock held.
 func (m *selectedMailbox) forEach(numSet imap.NumSet, fn func(seqNum uint32, msg *store.Message)) {
-	numSet = m.staticNumSet(numSet)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	numSet = m.staticNumSetLocked(numSet)
 	for i := range m.msgs {
 		seqNum := uint32(i) + 1
 		var contains bool
@@ -132,9 +229,10 @@ func (m *selectedMailbox) forEach(numSet imap.NumSet, fn func(seqNum uint32, msg
 	}
 }
 
-// staticNumSet resolves the dynamic "*" marker (the highest sequence
-// number, or the highest UID) to a concrete number so Contains works.
-func (m *selectedMailbox) staticNumSet(numSet imap.NumSet) imap.NumSet {
+// staticNumSetLocked resolves the dynamic "*" marker (the highest
+// sequence number, or the highest UID) to a concrete number so
+// Contains works. The caller must hold m.mu.
+func (m *selectedMailbox) staticNumSetLocked(numSet imap.NumSet) imap.NumSet {
 	switch ns := numSet.(type) {
 	case imap.SeqSet:
 		max := uint32(len(m.msgs))
@@ -345,6 +443,8 @@ func (m *selectedMailbox) copy(numSet imap.NumSet, dest *store.Mailbox) (*imap.C
 // those in uids for a UID EXPUNGE). The actual EXPUNGE responses are
 // flushed to the client by the framework's post-command poll.
 func (m *selectedMailbox) expunge(_ *imapserver.ExpungeWriter, uids *imap.UIDSet) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	// Walk back to front so each removal leaves the lower sequence
 	// numbers — and lower slice indices — untouched.
 	for i := len(m.msgs) - 1; i >= 0; i-- {

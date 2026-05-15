@@ -22,7 +22,9 @@ import (
 // TODO: back BODY / TEXT search with OxiDB's full-text index instead of
 // fetching and scanning every body.
 func (m *selectedMailbox) search(kind imapserver.NumKind, criteria *imap.SearchCriteria) *imap.SearchData {
-	m.resolveCriteria(criteria)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resolveCriteriaLocked(criteria)
 
 	var (
 		data   imap.SearchData
@@ -66,25 +68,26 @@ func (m *selectedMailbox) search(kind imapserver.NumKind, criteria *imap.SearchC
 	return &data
 }
 
-// resolveCriteria rewrites the "*" wildcard (and "n:*" ranges) in every
-// sequence-number and UID set the criteria carries, recursively.
-func (m *selectedMailbox) resolveCriteria(c *imap.SearchCriteria) {
+// resolveCriteriaLocked rewrites the "*" wildcard (and "n:*" ranges)
+// in every sequence-number and UID set the criteria carries,
+// recursively. The caller must hold m.mu.
+func (m *selectedMailbox) resolveCriteriaLocked(c *imap.SearchCriteria) {
 	for i := range c.SeqNum {
-		if set, ok := m.staticNumSet(c.SeqNum[i]).(imap.SeqSet); ok {
+		if set, ok := m.staticNumSetLocked(c.SeqNum[i]).(imap.SeqSet); ok {
 			c.SeqNum[i] = set
 		}
 	}
 	for i := range c.UID {
-		if set, ok := m.staticNumSet(c.UID[i]).(imap.UIDSet); ok {
+		if set, ok := m.staticNumSetLocked(c.UID[i]).(imap.UIDSet); ok {
 			c.UID[i] = set
 		}
 	}
 	for i := range c.Not {
-		m.resolveCriteria(&c.Not[i])
+		m.resolveCriteriaLocked(&c.Not[i])
 	}
 	for i := range c.Or {
-		m.resolveCriteria(&c.Or[i][0])
-		m.resolveCriteria(&c.Or[i][1])
+		m.resolveCriteriaLocked(&c.Or[i][0])
+		m.resolveCriteriaLocked(&c.Or[i][1])
 	}
 }
 

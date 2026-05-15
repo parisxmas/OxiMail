@@ -555,6 +555,110 @@ func TestIMAPSearch(t *testing.T) {
 	})
 }
 
+// TestIMAPIdle covers cross-connection IDLE: a client IDLE'ing on INBOX
+// receives an unsolicited EXISTS when *another* writer — here, a direct
+// store.AppendMessage — drops a message into the same mailbox. The wire
+// for that wake-up is the notifier hub the store fires on AppendMessage
+// and the selectedMailbox's watch goroutine subscribes to.
+func TestIMAPIdle(t *testing.T) {
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	hash, err := store.HashPassword(testPassword)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	acc, err := st.CreateAccount(testAddr, hash, 0)
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if err := st.EnsureDefaultMailboxes(acc.ID); err != nil {
+		t.Fatalf("ensure mailboxes: %v", err)
+	}
+	inbox, err := st.GetMailboxByName(acc.ID, "INBOX")
+	if err != nil {
+		t.Fatalf("get INBOX: %v", err)
+	}
+
+	addr := startIMAP(t, st, nil, false)
+
+	// The notify channel collects EXISTS counts pushed during IDLE.
+	notify := make(chan uint32, 4)
+	opts := &imapclient.Options{
+		UnilateralDataHandler: &imapclient.UnilateralDataHandler{
+			Mailbox: func(data *imapclient.UnilateralDataMailbox) {
+				if data.NumMessages != nil {
+					select {
+					case notify <- *data.NumMessages:
+					default:
+					}
+				}
+			},
+		},
+	}
+	c, err := imapclient.DialInsecure(addr, opts)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	if err := c.Login(testAddr, testPassword).Wait(); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+		t.Fatalf("select INBOX: %v", err)
+	}
+
+	idle, err := c.Idle()
+	if err != nil {
+		t.Fatalf("start IDLE: %v", err)
+	}
+
+	// A separate writer drops a message into the same mailbox. The
+	// notifier should wake the IMAP session's watch goroutine, refresh
+	// the snapshot, and queue an EXISTS — which IDLE pushes to us.
+	raw := []byte("From: ping@elsewhere.test\r\nTo: " + testAddr + "\r\n" +
+		"Subject: IDLE wakeup\r\n\r\nhi\r\n")
+	if _, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+		Raw: raw, Subject: "IDLE wakeup", FromAddr: "ping@elsewhere.test",
+	}); err != nil {
+		t.Fatalf("append via store: %v", err)
+	}
+
+	select {
+	case n := <-notify:
+		if n != 1 {
+			t.Fatalf("EXISTS reported %d messages, want 1", n)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("IDLE did not emit an EXISTS for the new message within 3s")
+	}
+
+	if err := idle.Close(); err != nil {
+		t.Fatalf("stop IDLE: %v", err)
+	}
+	if err := idle.Wait(); err != nil {
+		t.Fatalf("wait IDLE: %v", err)
+	}
+
+	// And the new message is visible to a subsequent FETCH on this
+	// session — i.e. the snapshot really did absorb it.
+	msgs, err := c.Fetch(goimap.SeqSetNum(1), &goimap.FetchOptions{Envelope: true}).Collect()
+	if err != nil {
+		t.Fatalf("fetch new message: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Envelope == nil || msgs[0].Envelope.Subject != "IDLE wakeup" {
+		t.Fatalf("fetch after IDLE = %+v, want one message with subject \"IDLE wakeup\"", msgs)
+	}
+}
+
 // startIMAP launches the IMAP server on a free port, wired to st, and
 // returns its address. A non-nil tlsConfig enables STARTTLS; implicit
 // additionally serves implicit TLS (IMAPS). It is shut down when the

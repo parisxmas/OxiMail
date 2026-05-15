@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sort"
 	"time"
+
+	"github.com/parisxmas/OxiMail/internal/notifier"
 )
 
 // Message is one stored message. The RFC 5322 body lives in the blob
@@ -120,6 +122,9 @@ func (s *Store) AppendMessage(mailboxID uint64, in IncomingMessage) (*Message, e
 		map[string]any{"_id": mb.AccountID},
 		map[string]any{"$inc": map[string]any{"used_bytes": msg.SizeBytes}},
 	)
+	// Wake any IMAP sessions IDLE'ing on this mailbox so they emit an
+	// unsolicited EXISTS for the new arrival.
+	notifier.Default.Notify(mailboxID)
 	return msg, nil
 }
 
@@ -265,6 +270,10 @@ func (s *Store) MoveMessage(messageID, destMailboxID uint64) (*Message, error) {
 	if doc == nil {
 		return nil, ErrNotFound
 	}
+	// Notify both ends: the destination gained a message, the source
+	// lost one.
+	notifier.Default.Notify(destMailboxID)
+	notifier.Default.Notify(msg.MailboxID)
 	msg.MailboxID = destMailboxID
 	msg.UID = uid
 	return msg, nil
@@ -336,6 +345,7 @@ func (s *Store) CopyMessage(messageID, destMailboxID uint64) (*Message, error) {
 		_ = s.db.DeleteObject(BlobBucket, key)
 		return nil, err
 	}
+	notifier.Default.Notify(destMailboxID)
 	return dst, nil
 }
 
@@ -359,5 +369,6 @@ func (s *Store) DeleteMessage(id uint64) error {
 		map[string]any{"_id": msg.AccountID},
 		map[string]any{"$inc": map[string]any{"used_bytes": -msg.SizeBytes}},
 	)
+	notifier.Default.Notify(msg.MailboxID)
 	return nil
 }
