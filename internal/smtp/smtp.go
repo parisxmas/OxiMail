@@ -29,6 +29,7 @@ import (
 
 	"github.com/parisxmas/OxiMail/internal/observability"
 	"github.com/parisxmas/OxiMail/internal/spam"
+	"github.com/parisxmas/OxiMail/internal/srs"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
@@ -72,13 +73,35 @@ func newServer(addr, hostname string, be gosmtp.Backend, tlsConfig *tls.Config) 
 	return srv
 }
 
+// ForwarderConfig carries the operator-tunable knobs for SRS-based
+// alias forwarding. A zero value disables forwarding: aliases that
+// resolve to remote addresses are not relayed and the MX behaves as
+// before (local-only delivery).
+type ForwarderConfig struct {
+	// SRSSecret signs and verifies the rewritten sender. It must be at
+	// least 16 bytes long and stable across restarts — losing it
+	// invalidates every outstanding bounce address.
+	SRSSecret []byte
+	// SRSMaxAge is how long an SRS-encoded bounce address stays
+	// valid. Zero means "no age check"; default 21 days is sensible.
+	SRSMaxAge time.Duration
+	// ForwarderDomain is the domain that hosts the rewritten sender —
+	// usually the MX's own hostname. Bounces come back here.
+	ForwarderDomain string
+}
+
 // New builds the inbound SMTP (MX) server bound to `addr`, announcing
 // `hostname` in its greeting. A non-nil tlsConfig advertises STARTTLS.
-func New(addr, hostname string, st *store.Store, sp *spam.Pipeline, tlsConfig *tls.Config) *Server {
+// `fwd` enables SRS-based alias forwarding to remote addresses; pass
+// the zero value to disable it.
+func New(addr, hostname string, st *store.Store, sp *spam.Pipeline, tlsConfig *tls.Config, fwd ForwarderConfig) *Server {
+	if fwd.ForwarderDomain == "" {
+		fwd.ForwarderDomain = hostname
+	}
 	return &Server{
 		name: "smtp",
 		addr: addr,
-		srv:  newServer(addr, hostname, &backend{store: st, spam: sp}, tlsConfig),
+		srv:  newServer(addr, hostname, &backend{store: st, spam: sp, fwd: fwd}, tlsConfig),
 	}
 }
 
@@ -128,6 +151,7 @@ func (s *Server) Stop() error {
 type backend struct {
 	store *store.Store
 	spam  *spam.Pipeline
+	fwd   ForwarderConfig
 }
 
 func (b *backend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
@@ -160,9 +184,10 @@ type session struct {
 
 	// Envelope state for the message currently being received; cleared
 	// by Reset (which go-smtp calls after each delivered message).
-	from      string
-	rcptAddrs []string        // envelope recipients, as given, for the spam pipeline
-	rcptAccts map[uint64]bool // resolved local account IDs, deduplicated across recipients
+	from       string
+	rcptAddrs  []string        // envelope recipients, as given, for the spam pipeline
+	rcptAccts  map[uint64]bool // resolved local account IDs, deduplicated across recipients
+	rcptRemote []string        // alias forwarding: remote addresses to relay to
 }
 
 // Mail records the envelope sender (MAIL FROM). An empty sender is the
@@ -172,11 +197,21 @@ func (s *session) Mail(from string, _ *gosmtp.MailOptions) error {
 	return nil
 }
 
-// Rcpt resolves an envelope recipient (RCPT TO) to local accounts. The
-// inbound MX does not relay: an address that is not a local mailbox (or
-// an alias to one) is rejected.
+// Rcpt resolves an envelope recipient (RCPT TO). Three paths:
+//
+//  1. The address is an SRS-rewritten bounce target: decode it,
+//     dispatch as if the original sender had been written into RCPT.
+//     This is how alias-forwarding bounces find their way home.
+//  2. The address is a local mailbox or alias: file copies for the
+//     local accounts at DATA, and (for aliases with remote
+//     destinations) queue forwards with an SRS-rewritten sender.
+//  3. Neither: reject with 550. The inbound MX does not relay open
+//     mail.
 func (s *session) Rcpt(to string, _ *gosmtp.RcptOptions) error {
-	accts, err := s.backend.store.ResolveRecipient(to)
+	if decoded, ok := s.decodeIfSRS(to); ok {
+		to = decoded
+	}
+	dests, err := s.backend.store.ResolveDestinations(to)
 	if err != nil {
 		log.Printf("smtp: resolve recipient %q: %v", to, err)
 		return &gosmtp.SMTPError{
@@ -185,21 +220,75 @@ func (s *session) Rcpt(to string, _ *gosmtp.RcptOptions) error {
 			Message:      "Temporary local problem, please try again later",
 		}
 	}
-	if len(accts) == 0 {
+	if dests.Empty() {
 		return &gosmtp.SMTPError{
 			Code:         550,
 			EnhancedCode: gosmtp.EnhancedCode{5, 1, 1},
 			Message:      "No such user here",
 		}
 	}
+	// An alias points off-server but the operator has not enabled SRS:
+	// refuse rather than emit mail without a verifiable envelope sender
+	// (it would fail SPF / DMARC at the next hop). A purely-local
+	// alias is still allowed.
+	if len(dests.RemoteAddrs) > 0 && !s.forwardingEnabled() {
+		return &gosmtp.SMTPError{
+			Code:         550,
+			EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
+			Message:      "Alias forwarding to remote addresses is not configured",
+		}
+	}
 	if s.rcptAccts == nil {
 		s.rcptAccts = make(map[uint64]bool)
 	}
-	for _, id := range accts {
+	for _, id := range dests.LocalAccounts {
 		s.rcptAccts[id] = true
+	}
+	for _, addr := range dests.RemoteAddrs {
+		if !containsString(s.rcptRemote, addr) {
+			s.rcptRemote = append(s.rcptRemote, addr)
+		}
 	}
 	s.rcptAddrs = append(s.rcptAddrs, to)
 	return nil
+}
+
+// decodeIfSRS turns an SRS-rewritten RCPT TO back into the original
+// sender. Returns the original address and true on a successful decode;
+// returns (to, false) if the address is not an SRS address or SRS is
+// not configured, and logs / returns (to, false) on a tampered or
+// expired SRS address (the caller falls back to the usual rejection
+// path).
+func (s *session) decodeIfSRS(to string) (string, bool) {
+	if !s.forwardingEnabled() {
+		return to, false
+	}
+	fwd := s.backend.fwd
+	if !srs.Is(to) {
+		return to, false
+	}
+	orig, err := srs.Decode(fwd.SRSSecret, to, fwd.SRSMaxAge)
+	if err != nil {
+		log.Printf("smtp: decode SRS %q: %v", to, err)
+		return to, false
+	}
+	return orig, true
+}
+
+// forwardingEnabled reports whether SRS-based alias forwarding is
+// configured on this server.
+func (s *session) forwardingEnabled() bool {
+	return len(s.backend.fwd.SRSSecret) >= 16 && s.backend.fwd.ForwarderDomain != ""
+}
+
+// containsString reports whether s contains v.
+func containsString(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // Data receives the message body, runs the spam pipeline, and on an
@@ -267,8 +356,36 @@ func (s *session) Data(r io.Reader) error {
 		}
 	}
 
-	log.Printf("smtp: accepted message from <%s> (%d bytes) for %d recipient(s)",
-		s.from, len(raw), len(s.rcptAccts))
+	// Alias forwarding: relay to the remote alias destinations with an
+	// SRS-rewritten envelope sender so SPF / DMARC line up at the next
+	// hop. An empty envelope sender (a bounce) is not rewritten — it
+	// stays empty so the receiving MX knows not to bounce it again.
+	if len(s.rcptRemote) > 0 {
+		sender := s.from
+		if sender != "" {
+			rewritten, err := srs.Encode(s.backend.fwd.SRSSecret, sender, s.backend.fwd.ForwarderDomain)
+			if err != nil {
+				log.Printf("smtp: SRS rewrite of %q: %v", sender, err)
+				return &gosmtp.SMTPError{
+					Code:         451,
+					EnhancedCode: gosmtp.EnhancedCode{4, 3, 0},
+					Message:      "Could not rewrite envelope sender for forwarding",
+				}
+			}
+			sender = rewritten
+		}
+		if _, err := s.backend.store.Enqueue(sender, s.rcptRemote, raw); err != nil {
+			log.Printf("smtp: enqueue forward to %v: %v", s.rcptRemote, err)
+			return &gosmtp.SMTPError{
+				Code:         451,
+				EnhancedCode: gosmtp.EnhancedCode{4, 3, 0},
+				Message:      "Temporary forwarding failure, please try again later",
+			}
+		}
+	}
+
+	log.Printf("smtp: accepted message from <%s> (%d bytes) — %d local, %d forwarded",
+		s.from, len(raw), len(s.rcptAccts), len(s.rcptRemote))
 	return nil
 }
 
@@ -277,6 +394,7 @@ func (s *session) Reset() {
 	s.from = ""
 	s.rcptAddrs = nil
 	s.rcptAccts = nil
+	s.rcptRemote = nil
 }
 
 // Logout releases the session. There is nothing connection-scoped to

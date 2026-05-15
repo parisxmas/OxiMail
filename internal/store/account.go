@@ -367,59 +367,97 @@ func (s *Store) DeleteAlias(address string) error {
 // forever even if the visited-set check missed it somehow.
 const maxAliasDepth = 5
 
-// ResolveRecipient maps an inbound RCPT address to the local account
-// IDs that should receive the mail: a direct account match yields that
-// one account; an alias yields the local accounts among its
-// destinations, recursing into aliased destinations up to a depth cap.
-// An empty result means the address is not deliverable to a local
-// mailbox here.
-//
-// TODO: alias destinations that are *remote* addresses should be handed
-// to the outbound queue for forwarding; for now only local destinations
-// are resolved.
-func (s *Store) ResolveRecipient(address string) ([]uint64, error) {
-	return s.resolveRecipient(strings.ToLower(address), map[string]bool{}, 0)
+// Destinations is the result of resolving one inbound recipient: zero
+// or more local account ids, plus zero or more remote addresses
+// reached via alias chains. The caller is expected to deliver to the
+// local accounts and forward (over the outbound queue) to the remote
+// addresses.
+type Destinations struct {
+	LocalAccounts []uint64
+	RemoteAddrs   []string
 }
 
-func (s *Store) resolveRecipient(address string, visited map[string]bool, depth int) ([]uint64, error) {
+// Empty reports whether the address is not deliverable anywhere.
+func (d Destinations) Empty() bool {
+	return len(d.LocalAccounts) == 0 && len(d.RemoteAddrs) == 0
+}
+
+// ResolveDestinations maps an inbound RCPT address to its delivery
+// destinations: local account ids (direct matches and the local
+// accounts reached via alias chains) plus remote addresses (alias
+// destinations that point outside this server). Recursion is depth-
+// and cycle-guarded; an empty result means the address is not hosted
+// here.
+func (s *Store) ResolveDestinations(address string) (Destinations, error) {
+	var d Destinations
+	if err := s.resolveDestinations(strings.ToLower(address), map[string]bool{}, 0, &d); err != nil {
+		return Destinations{}, err
+	}
+	return d, nil
+}
+
+// ResolveRecipient is the legacy wrapper that returns only the local
+// account ids. New code should prefer ResolveDestinations so it can
+// also forward to remote alias destinations.
+func (s *Store) ResolveRecipient(address string) ([]uint64, error) {
+	d, err := s.ResolveDestinations(address)
+	if err != nil {
+		return nil, err
+	}
+	return d.LocalAccounts, nil
+}
+
+func (s *Store) resolveDestinations(address string, visited map[string]bool, depth int, out *Destinations) error {
 	if depth > maxAliasDepth || visited[address] {
-		return nil, nil // hop limit or alias cycle — stop
+		return nil // hop limit or alias cycle — stop
 	}
 	visited[address] = true
 
 	if acc, err := s.GetAccount(address); err == nil {
-		return []uint64{acc.ID}, nil
+		if !containsID(out.LocalAccounts, acc.ID) {
+			out.LocalAccounts = append(out.LocalAccounts, acc.ID)
+		}
+		return nil
 	} else if !errors.Is(err, ErrNotFound) {
-		return nil, err
+		return err
 	}
 
 	al, err := s.GetAlias(address)
 	if errors.Is(err, ErrNotFound) {
-		return nil, nil // not deliverable here
+		// Not a local account and not a hosted alias — at depth 0 it
+		// means "not deliverable here"; deeper, it means the alias
+		// chain pointed at a remote address.
+		if depth > 0 && !containsAddr(out.RemoteAddrs, address) {
+			out.RemoteAddrs = append(out.RemoteAddrs, address)
+		}
+		return nil
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	var ids []uint64
 	for _, dest := range al.Destinations {
-		sub, err := s.resolveRecipient(strings.ToLower(dest), visited, depth+1)
-		if err != nil {
-			return nil, err
-		}
-		for _, id := range sub {
-			if !containsID(ids, id) {
-				ids = append(ids, id)
-			}
+		if err := s.resolveDestinations(strings.ToLower(dest), visited, depth+1, out); err != nil {
+			return err
 		}
 	}
-	return ids, nil
+	return nil
 }
 
 // containsID reports whether ids already includes id.
 func containsID(ids []uint64, id uint64) bool {
 	for _, x := range ids {
 		if x == id {
+			return true
+		}
+	}
+	return false
+}
+
+// containsAddr reports whether addrs already includes addr.
+func containsAddr(addrs []string, addr string) bool {
+	for _, x := range addrs {
+		if x == addr {
 			return true
 		}
 	}

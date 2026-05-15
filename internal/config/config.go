@@ -5,10 +5,12 @@ package config
 
 import (
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
@@ -83,6 +85,18 @@ type Config struct {
 
 	// RspamdURL — content spam scanning over HTTP. Empty disables it.
 	RspamdURL string
+
+	// SRSSecret is the hex-encoded HMAC key used to sign rewritten
+	// envelope senders for alias forwarding to remote addresses. When
+	// unset, aliases that point off-server are not relayed (the MX
+	// returns 550 for them). Must be at least 16 raw bytes (32 hex
+	// characters); regenerating it invalidates every outstanding
+	// bounce address.
+	SRSSecret string
+	// SRSMaxAge is how long an SRS-rewritten address stays valid for
+	// inbound bounce delivery. Default 21 days; set to 0 to skip the
+	// age check entirely.
+	SRSMaxAge time.Duration
 }
 
 // Load reads the configuration from OXIMAIL_* environment variables,
@@ -110,6 +124,8 @@ func Load() Config {
 		OxiDBHost:      env("OXIMAIL_OXIDB_HOST", "127.0.0.1"),
 		OxiDBPort:      envInt("OXIMAIL_OXIDB_PORT", 4444),
 		RspamdURL:      env("OXIMAIL_RSPAMD_URL", ""),
+		SRSSecret:      env("OXIMAIL_SRS_SECRET", ""),
+		SRSMaxAge:      envDuration("OXIMAIL_SRS_MAX_AGE", 21*24*time.Hour),
 	}
 }
 
@@ -157,6 +173,35 @@ func (c Config) TLSConfig() (*tls.Config, *autocert.Manager, error) {
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
 	}, nil, nil
+}
+
+// SRSSecretBytes returns the SRS HMAC key as raw bytes, or nil + nil
+// when no secret is configured. A configured-but-malformed secret
+// (non-hex or < 16 bytes) is an error so the operator is told
+// loudly.
+func (c Config) SRSSecretBytes() ([]byte, error) {
+	if c.SRSSecret == "" {
+		return nil, nil
+	}
+	b, err := hex.DecodeString(c.SRSSecret)
+	if err != nil {
+		return nil, fmt.Errorf("config: OXIMAIL_SRS_SECRET is not valid hex: %w", err)
+	}
+	if len(b) < 16 {
+		return nil, fmt.Errorf("config: OXIMAIL_SRS_SECRET must be at least 16 bytes (32 hex chars); got %d", len(b))
+	}
+	return b, nil
+}
+
+// envDuration reads a time.Duration env var, applying def when unset
+// or malformed.
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
 }
 
 // splitCSV parses a comma-separated env value into a trimmed,

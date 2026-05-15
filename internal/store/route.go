@@ -21,20 +21,24 @@ func (s *Store) Route(from string, recipients []string, in IncomingMessage) (Rou
 	var remote []string
 
 	for _, rcpt := range recipients {
-		accts, err := s.ResolveRecipient(rcpt)
+		dests, err := s.ResolveDestinations(rcpt)
 		if err != nil {
 			return routed, fmt.Errorf("store: route to %q: %w", rcpt, err)
 		}
-		if len(accts) == 0 {
+		if dests.Empty() {
 			remote = append(remote, rcpt) // not a local mailbox — relay it
 			continue
 		}
-		for _, id := range accts {
+		for _, id := range dests.LocalAccounts {
 			if _, err := s.Deliver(id, in); err != nil {
 				return routed, fmt.Errorf("store: route: deliver to account %d: %w", id, err)
 			}
 			routed.LocalCount++
 		}
+		// Alias destinations that point outside this server: relay
+		// them too. The submission caller may add explicit remotes
+		// below; we de-dupe at enqueue time via the address list.
+		remote = append(remote, dests.RemoteAddrs...)
 	}
 
 	if len(remote) > 0 {

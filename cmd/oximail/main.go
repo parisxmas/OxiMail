@@ -67,13 +67,26 @@ func main() {
 		log.Fatalf("schema: %v", err)
 	}
 
+	srsSecret, err := cfg.SRSSecretBytes()
+	if err != nil {
+		log.Fatalf("srs: %v", err)
+	}
+	fwd := smtp.ForwarderConfig{
+		SRSSecret:       srsSecret,
+		SRSMaxAge:       cfg.SRSMaxAge,
+		ForwarderDomain: cfg.Hostname,
+	}
+	if len(srsSecret) == 0 {
+		log.Print("SRS not configured (set OXIMAIL_SRS_SECRET) — alias forwarding to remote addresses is disabled")
+	}
+
 	// Components, in start order. The implicit-TLS surfaces are only
 	// brought up when a certificate is configured.
 	pipeline := spam.New(cfg.RspamdURL)
 	components := []named{
 		{"observability", observability.New(cfg.MetricsAddr, st)},
 		{"spam", pipeline},
-		{"smtp", smtp.New(cfg.SMTPAddr, cfg.Hostname, st, pipeline, tlsConfig)},
+		{"smtp", smtp.New(cfg.SMTPAddr, cfg.Hostname, st, pipeline, tlsConfig, fwd)},
 		{"submission", smtp.NewSubmission(cfg.SubmissionAddr, cfg.Hostname, st, tlsConfig)},
 		{"imap", imap.New(cfg.IMAPAddr, st, tlsConfig)},
 		{"webmail", webmail.New(cfg.WebmailAddr, cfg.WebmailStatic, st, tlsConfig)},
