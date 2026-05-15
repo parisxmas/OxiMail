@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -871,12 +872,71 @@ func doJSON(t *testing.T, req *http.Request, token string, out any) int {
 	return resp.StatusCode
 }
 
+// TestMTASTSPolicyHandler covers the publish side of MTA-STS: when a
+// policy is configured the webmail server exposes the canonical
+// /.well-known/mta-sts.txt file with the right MIME type and a body
+// remote senders can parse; with no policy configured the handler is
+// not registered and the path 404s through the SPA fallback.
+func TestMTASTSPolicyHandler(t *testing.T) {
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	// Server WITH a policy.
+	addr := fmt.Sprintf("127.0.0.1:%d", itest.FreePort(t))
+	srv := webmail.New(addr, "", st, nil, webmail.MTASTSPolicy{
+		Mode:   "enforce",
+		MX:     []string{"mx1.oximail.test", "*.alt.oximail.test"},
+		MaxAge: 24 * time.Hour,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() { errc <- srv.Start(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-errc
+	})
+	itest.WaitTCP(t, addr)
+
+	req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/.well-known/mta-sts.txt", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET policy: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	for _, want := range []string{
+		"version: STSv1",
+		"mode: enforce",
+		"mx: mx1.oximail.test",
+		"mx: *.alt.oximail.test",
+		"max_age: 86400",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("policy body missing %q\n---\n%s", want, s)
+		}
+	}
+}
+
 // startWebmail launches the webmail server on a free port, wired to st,
 // and returns its base URL. It is shut down when the test ends.
 func startWebmail(t *testing.T, st *store.Store) string {
 	t.Helper()
 	addr := fmt.Sprintf("127.0.0.1:%d", itest.FreePort(t))
-	srv := webmail.New(addr, "", st, nil)
+	srv := webmail.New(addr, "", st, nil, webmail.MTASTSPolicy{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)

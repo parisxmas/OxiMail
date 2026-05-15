@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -46,6 +47,7 @@ type Server struct {
 	store    *store.Store
 	sessions *sessionStore
 	limiter  *ratelimit.Limiter
+	mtasts   MTASTSPolicy
 	// secure reports whether this server is serving HTTPS. It controls
 	// the Secure flag on session and CSRF cookies — a Secure cookie
 	// would never travel over a development plaintext listener and the
@@ -54,16 +56,26 @@ type Server struct {
 	stop   sync.Once
 }
 
+// MTASTSPolicy is the operator-published MTA-STS policy (RFC 8461)
+// served at /.well-known/mta-sts.txt. A zero value disables publishing.
+type MTASTSPolicy struct {
+	Mode   string        // "enforce", "testing", "none"
+	MX     []string      // hostname patterns
+	MaxAge time.Duration // policy lifetime
+}
+
 // New builds the webmail server bound to `addr`. A non-nil tlsConfig
 // makes it serve HTTPS. If staticDir is non-empty and exists, the built
 // frontend SPA is served from it; otherwise only the API is served.
-func New(addr, staticDir string, st *store.Store, tlsConfig *tls.Config) *Server {
+// mtasts, when non-zero, enables the /.well-known/mta-sts.txt handler.
+func New(addr, staticDir string, st *store.Store, tlsConfig *tls.Config, mtasts MTASTSPolicy) *Server {
 	s := &Server{
 		addr:     addr,
 		store:    st,
 		sessions: newSessionStore(),
 		limiter:  ratelimit.NewDefault(),
 		secure:   tlsConfig != nil,
+		mtasts:   mtasts,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", s.handleLogin)
@@ -87,6 +99,14 @@ func New(addr, staticDir string, st *store.Store, tlsConfig *tls.Config) *Server
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "no such endpoint")
 	})
+
+	// MTA-STS policy publication (RFC 8461). The path is fixed; the
+	// content is gated by the operator-provided MTASTSPolicy. Per the
+	// spec it should be served on https://mta-sts.<domain>/, which
+	// operators arrange via DNS + (typically) the same TLS cert.
+	if s.mtasts.Mode != "" {
+		mux.HandleFunc("GET /.well-known/mta-sts.txt", s.handleMTASTSPolicy)
+	}
 
 	// Serve the frontend SPA, if it has been built.
 	if staticDir != "" {
@@ -168,6 +188,23 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 func decodeJSON(r *http.Request, v any) error {
 	defer r.Body.Close()
 	return json.NewDecoder(r.Body).Decode(v)
+}
+
+// handleMTASTSPolicy renders the operator's MTA-STS policy as the
+// plain-text policy file RFC 8461 expects.
+func (s *Server) handleMTASTSPolicy(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "max-age=3600")
+	maxAge := int(s.mtasts.MaxAge.Seconds())
+	if maxAge <= 0 {
+		maxAge = 86400
+	}
+	body := "version: STSv1\nmode: " + s.mtasts.Mode + "\n"
+	for _, mx := range s.mtasts.MX {
+		body += "mx: " + mx + "\n"
+	}
+	body += "max_age: " + strconv.Itoa(maxAge) + "\n"
+	_, _ = w.Write([]byte(body))
 }
 
 // clientIP returns the IP portion of r.RemoteAddr. X-Forwarded-For is

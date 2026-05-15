@@ -9,7 +9,12 @@
 // A permanent failure — or a recipient still failing after the last
 // retry — produces a bounce (a DSN) back to the original sender.
 //
-// TODO: opportunistic STARTTLS when delivering to remote MX hosts.
+// TLS: every dial attempts STARTTLS first and falls back to cleartext
+// only if the remote refuses it. When the recipient domain publishes
+// an MTA-STS policy (RFC 8461) in enforce mode, the dial additionally
+// validates the certificate against the system trust store and
+// requires the MX hostname to match the policy's mx patterns — a
+// failure aborts delivery rather than silently downgrading.
 package queue
 
 import (
@@ -24,6 +29,7 @@ import (
 
 	gosmtp "github.com/emersion/go-smtp"
 
+	"github.com/parisxmas/OxiMail/internal/mtasts"
 	"github.com/parisxmas/OxiMail/internal/observability"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
@@ -54,12 +60,18 @@ type Queue struct {
 	store    *store.Store
 	hostname string // announced in EHLO to remote servers
 	resolve  resolver
+	mtasts   *mtasts.Cache
 }
 
 // New builds the outbound queue worker. `hostname` is announced in EHLO
 // when connecting to remote mail servers.
 func New(st *store.Store, hostname string) *Queue {
-	return &Queue{store: st, hostname: hostname, resolve: lookupMX}
+	return &Queue{
+		store:    st,
+		hostname: hostname,
+		resolve:  lookupMX,
+		mtasts:   mtasts.NewCache(),
+	}
 }
 
 // Start runs the delivery loop until `ctx` is cancelled, then returns.
@@ -182,9 +194,26 @@ func (q *Queue) deliverDomain(from, domain string, rcpts []string, raw []byte) (
 		return failuresFor(rcpts, fmt.Sprintf("could not resolve %s: %v", domain, err)), nil
 	}
 
-	c, dialErr := dialMX(targets, domain)
+	// MTA-STS lookup happens once per recipient domain per batch; the
+	// Cache memoises so a chatty domain does not re-fetch on every
+	// outbound message.
+	stsCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	policy, stsErr := q.mtasts.Get(stsCtx, domain)
+	cancel()
+	if stsErr != nil && !errors.Is(stsErr, mtasts.ErrNoPolicy) {
+		log.Printf("queue: MTA-STS lookup for %s: %v (treating as no policy)", domain, stsErr)
+		policy = nil
+	}
+
+	c, dialErr := dialMX(targets, domain, policy)
 	if c == nil {
-		return failuresFor(rcpts, fmt.Sprintf("could not connect to %s: %v", domain, dialErr)), nil
+		reason := fmt.Sprintf("could not connect to %s: %v", domain, dialErr)
+		// An MTA-STS enforce-mode failure is permanent: the policy
+		// is meant to refuse insecure delivery, not retry it.
+		if errors.Is(dialErr, errMTASTSReject) {
+			return nil, failuresFor(rcpts, reason)
+		}
+		return failuresFor(rcpts, reason), nil
 	}
 	defer c.Close()
 
@@ -252,29 +281,58 @@ func failureRecipients(fs []rcptFailure) []string {
 	return out
 }
 
+// errMTASTSReject is the sentinel used when an MTA-STS enforce-mode
+// policy refuses every reachable MX. Callers turn it into a
+// permanent failure rather than a retryable one — the policy is
+// designed to refuse delivery in this case, not delay it.
+var errMTASTSReject = errors.New("queue: MTA-STS policy refused every MX")
+
 // dialMX tries each target in order, attempting opportunistic STARTTLS
-// first and falling back to cleartext if the remote does not speak it.
-// The remote's certificate is not verified — most MX hosts run with
-// self-signed certs, and STARTTLS still defeats passive eavesdropping.
+// first and falling back to cleartext if the remote does not speak it
+// — UNLESS an MTA-STS policy is in enforce mode for the destination,
+// in which case the certificate is verified strictly against the
+// system trust store, the MX hostname must match one of the policy's
+// patterns, and a TLS or policy failure is fatal (no cleartext
+// fallback). Testing-mode policies log violations but still deliver.
+//
 // Returns (nil, lastErr) if every target is unreachable.
-func dialMX(targets []string, domain string) (*gosmtp.Client, error) {
-	tlsConfig := &tls.Config{
-		ServerName:         domain,
-		InsecureSkipVerify: true,
-	}
+func dialMX(targets []string, domain string, policy *mtasts.Policy) (*gosmtp.Client, error) {
+	strict := policy != nil && policy.Mode == mtasts.ModeEnforce
+
 	var lastErr error
 	for _, target := range targets {
+		mxHost := hostOnly(target)
+
+		// MTA-STS policy gates the MX hostname before we even dial.
+		// Testing mode logs a hint but proceeds.
+		if policy != nil && !policy.Allows(mxHost) {
+			lastErr = fmt.Errorf("MX %s not allowed by MTA-STS policy for %s", mxHost, domain)
+			if strict {
+				continue
+			}
+			log.Printf("queue: MTA-STS testing-mode warning: %v", lastErr)
+		}
+
+		tlsConfig := &tls.Config{ServerName: mxHost}
+		if !strict {
+			tlsConfig.InsecureSkipVerify = true
+		}
+
 		conn, err := net.DialTimeout("tcp", target, dialTimeout)
 		if err != nil {
 			lastErr = err
 			continue
 		}
 		// NewClientStartTLS does HELO → STARTTLS → re-HELO inside the
-		// library. It closes conn on error, so we have to re-dial for
-		// the cleartext fallback.
+		// library. It closes conn on error.
 		if c, err := gosmtp.NewClientStartTLS(conn, tlsConfig); err == nil {
 			return c, nil
+		} else if strict {
+			// Enforce mode forbids the cleartext fallback.
+			lastErr = fmt.Errorf("STARTTLS to %s failed under MTA-STS enforce: %w", mxHost, err)
+			continue
 		}
+		// Cleartext fallback (only outside enforce mode).
 		conn, err = net.DialTimeout("tcp", target, dialTimeout)
 		if err != nil {
 			lastErr = err
@@ -282,7 +340,18 @@ func dialMX(targets []string, domain string) (*gosmtp.Client, error) {
 		}
 		return gosmtp.NewClient(conn), nil
 	}
+	if strict && lastErr != nil {
+		return nil, fmt.Errorf("%w: %v", errMTASTSReject, lastErr)
+	}
 	return nil, lastErr
+}
+
+// hostOnly trims the ":port" off a "host:port" target.
+func hostOnly(target string) string {
+	if h, _, err := net.SplitHostPort(target); err == nil {
+		return h
+	}
+	return target
 }
 
 // writeData runs the SMTP DATA phase, writing the raw message.

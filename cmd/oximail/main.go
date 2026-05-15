@@ -89,7 +89,11 @@ func main() {
 		{"smtp", smtp.New(cfg.SMTPAddr, cfg.Hostname, st, pipeline, tlsConfig, fwd)},
 		{"submission", smtp.NewSubmission(cfg.SubmissionAddr, cfg.Hostname, st, tlsConfig)},
 		{"imap", imap.New(cfg.IMAPAddr, st, tlsConfig)},
-		{"webmail", webmail.New(cfg.WebmailAddr, cfg.WebmailStatic, st, tlsConfig)},
+		{"webmail", webmail.New(cfg.WebmailAddr, cfg.WebmailStatic, st, tlsConfig, webmail.MTASTSPolicy{
+			Mode:   cfg.MTASTSMode,
+			MX:     mtastsMX(cfg),
+			MaxAge: cfg.MTASTSMaxAge,
+		})},
 	}
 	if tlsConfig != nil {
 		components = append(components,
@@ -209,4 +213,14 @@ func (h *httpComponent) Stop() error {
 func redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
 	target := "https://" + r.Host + r.URL.RequestURI()
 	http.Redirect(w, r, target, http.StatusMovedPermanently)
+}
+
+// mtastsMX returns the MX hostname list for the MTA-STS policy: the
+// operator-configured list when present, otherwise just the announced
+// hostname.
+func mtastsMX(cfg config.Config) []string {
+	if len(cfg.MTASTSMX) > 0 {
+		return cfg.MTASTSMX
+	}
+	return []string{cfg.Hostname}
 }

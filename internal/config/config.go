@@ -86,6 +86,18 @@ type Config struct {
 	// RspamdURL — content spam scanning over HTTP. Empty disables it.
 	RspamdURL string
 
+	// MTASTSMode publishes an MTA-STS policy (RFC 8461) when set.
+	// Valid values: "enforce", "testing", "none". An empty value
+	// disables the /.well-known/mta-sts.txt handler.
+	MTASTSMode string
+	// MTASTSMX is the comma-separated list of MX hostname patterns
+	// included in the published policy. Defaults to Hostname when
+	// empty. Wildcards like "*.example.com" are honored.
+	MTASTSMX []string
+	// MTASTSMaxAge is how long remote senders may cache the policy.
+	// Defaults to 86400 (24h) per the spec's recommended minimum.
+	MTASTSMaxAge time.Duration
+
 	// SRSSecret is the hex-encoded HMAC key used to sign rewritten
 	// envelope senders for alias forwarding to remote addresses. When
 	// unset, aliases that point off-server are not relayed (the MX
@@ -126,6 +138,9 @@ func Load() Config {
 		RspamdURL:      env("OXIMAIL_RSPAMD_URL", ""),
 		SRSSecret:      env("OXIMAIL_SRS_SECRET", ""),
 		SRSMaxAge:      envDuration("OXIMAIL_SRS_MAX_AGE", 21*24*time.Hour),
+		MTASTSMode:     env("OXIMAIL_MTASTS_MODE", ""),
+		MTASTSMX:       splitCSV(env("OXIMAIL_MTASTS_MX", "")),
+		MTASTSMaxAge:   envDuration("OXIMAIL_MTASTS_MAX_AGE", 86400*time.Second),
 	}
 }
 
