@@ -46,6 +46,10 @@ const (
 	CollOutboundQueue = "outbound_queue"
 	CollVacations     = "vacations"
 	CollSieveScripts  = "sieve_scripts"
+	// CollExpungeLog records every expunged UID per mailbox with the
+	// mod-sequence at which it disappeared. QRESYNC reads it to
+	// answer "what UIDs vanished since mod-sequence M".
+	CollExpungeLog = "expunge_log"
 )
 
 // BlobBucket is the OxiDB blob-store bucket holding raw RFC 5322 message

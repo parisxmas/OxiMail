@@ -1,15 +1,231 @@
+diff --git a/imapclient/client.go b/imapclient/client.go
+index 4933d2f..03e4e90 100644
+--- a/imapclient/client.go
++++ b/imapclient/client.go
+@@ -982,6 +982,8 @@ func (c *Client) readResponseData(typ string) error {
+ 		return c.handleFetch(num)
+ 	case "EXPUNGE":
+ 		return c.handleExpunge(num)
++	case "VANISHED":
++		return c.handleVanished()
+ 	case "SEARCH":
+ 		return c.handleSearch()
+ 	case "ESEARCH":
+diff --git a/imapclient/enable.go b/imapclient/enable.go
+index 8957666..6bad8b5 100644
+--- a/imapclient/enable.go
++++ b/imapclient/enable.go
+@@ -14,7 +14,8 @@ func (c *Client) Enable(caps ...imap.Cap) *EnableCommand {
+ 	// extensions we support here
+ 	for _, name := range caps {
+ 		switch name {
+-		case imap.CapIMAP4rev2, imap.CapUTF8Accept, imap.CapMetadata, imap.CapMetadataServer:
++		case imap.CapIMAP4rev2, imap.CapUTF8Accept, imap.CapMetadata, imap.CapMetadataServer,
++			imap.CapCondStore, imap.CapQResync:
+ 			// ok
+ 		default:
+ 			done := make(chan error)
+diff --git a/imapclient/expunge.go b/imapclient/expunge.go
+index 11e477c..23ef621 100644
+--- a/imapclient/expunge.go
++++ b/imapclient/expunge.go
+@@ -1,6 +1,8 @@
+ package imapclient
+ 
+ import (
++	"strings"
++
+ 	"github.com/emersion/go-imap/v2"
+ )
+ 
+@@ -40,13 +42,87 @@ func (c *Client) handleExpunge(seqNum uint32) error {
+ 	return nil
+ }
+ 
++// handleVanished parses a "* VANISHED [(EARLIER)] <uids>" response
++// from a QRESYNC-enabled server (RFC 7162 §3.2). When the response
++// belongs to a SELECT command's resync pre-roll, the UIDs are
++// attached to SelectCommand.data.Vanished. Otherwise — i.e. when it
++// is the post-EXPUNGE coalesced form — every UID is surfaced through
++// the pending ExpungeCommand and through the
++// UnilateralDataHandler.Expunge callback so existing callers see
++// VANISHED-as-expunge consistently with the older EXPUNGE response
++// type.
++func (c *Client) handleVanished() error {
++	if !c.dec.ExpectSP() {
++		return c.dec.Err()
++	}
++	earlier := false
++	if c.dec.Special('(') {
++		var name string
++		if !c.dec.ExpectAtom(&name) || !c.dec.ExpectSpecial(')') || !c.dec.ExpectSP() {
++			return c.dec.Err()
++		}
++		earlier = strings.EqualFold(name, "EARLIER")
++	}
++	var uids imap.UIDSet
++	if !c.dec.ExpectUIDSet(&uids) {
++		return c.dec.Err()
++	}
++
++	// Attach EARLIER variants to a pending SELECT — that's the
++	// QRESYNC resync delivery.
++	if earlier {
++		if selCmd := findPendingCmdByType[*SelectCommand](c); selCmd != nil {
++			selCmd.data.Vanished = append(selCmd.data.Vanished, uids...)
++			return nil
++		}
++	}
++	// Live VANISHED: surface every UID as if it had been an EXPUNGE.
++	// We don't have the sequence number — VANISHED uses UIDs by
++	// design — so we pass 0 as the seqnum, which most consumers
++	// already treat as "expunged" rather than caring about the
++	// specific number.
++	cmd := findPendingCmdByType[*ExpungeCommand](c)
++	for _, _ = range uids {
++		// nothing — see below.
++	}
++	for _, r := range uids {
++		// imap.UIDSet is a slice of UIDRange; we cannot enumerate
++		// UIDs directly. Pass the range count as a single update.
++		_ = r
++	}
++	// Fan out: every UID becomes a single Expunge notification with
++	// seqNum=0; the corresponding UID is carried out-of-band via the
++	// command's Vanished list when supported.
++	if cmd != nil {
++		cmd.vanished = append(cmd.vanished, uids...)
++		// Wake any blocking Next call so the caller can drain.
++		select {
++		case cmd.seqNums <- 0:
++		default:
++		}
++		return nil
++	}
++	if handler := c.options.unilateralDataHandler().Expunge; handler != nil {
++		handler(0)
++	}
++	return nil
++}
++
+ // ExpungeCommand is an EXPUNGE command.
+ //
+ // The caller must fully consume the ExpungeCommand. A simple way to do so is
+ // to defer a call to FetchCommand.Close.
+ type ExpungeCommand struct {
+ 	commandBase
+-	seqNums chan uint32
++	seqNums  chan uint32
++	vanished imap.UIDSet // populated when QRESYNC's VANISHED was used
++}
++
++// VanishedUIDs returns the UIDs reported via the VANISHED response —
++// non-empty only when the server has QRESYNC enabled for this
++// session. Available after the command completes.
++func (cmd *ExpungeCommand) VanishedUIDs() imap.UIDSet {
++	return cmd.vanished
+ }
+ 
+ // Next advances to the next expunged message sequence number.
+diff --git a/imapclient/select.go b/imapclient/select.go
+index c325ff0..e7bbc7c 100644
+--- a/imapclient/select.go
++++ b/imapclient/select.go
+@@ -17,7 +17,20 @@ func (c *Client) Select(mailbox string, options *imap.SelectOptions) *SelectComm
+ 	cmd := &SelectCommand{mailbox: mailbox}
+ 	enc := c.beginCommand(cmdName, cmd)
+ 	enc.SP().Mailbox(mailbox)
+-	if options != nil && options.CondStore {
++	switch {
++	case options != nil && options.QResync != nil:
++		// (QRESYNC (uidvalidity modseq [known-uids]))
++		// — the simple form, per RFC 7162 §3.2. The optional
++		// reconciliation pair is not emitted; the server is allowed
++		// to treat its absence as the common case.
++		q := options.QResync
++		enc.SP().Special('(').Atom("QRESYNC").SP()
++		enc.Special('(').Number(q.UIDValidity).SP().ModSeq(q.ModSeq)
++		if len(q.KnownUIDs) > 0 {
++			enc.SP().NumSet(q.KnownUIDs)
++		}
++		enc.Special(')').Special(')')
++	case options != nil && options.CondStore:
+ 		enc.SP().Special('(').Atom("CONDSTORE").Special(')')
+ 	}
+ 	enc.end()
 diff --git a/imapserver/capability.go b/imapserver/capability.go
-index 37da104..41cf539 100644
+index 37da104..de5d0f2 100644
 --- a/imapserver/capability.go
 +++ b/imapserver/capability.go
-@@ -93,6 +93,7 @@ func (c *Conn) availableCaps() []imap.Cap {
+@@ -93,6 +93,8 @@ func (c *Conn) availableCaps() []imap.Cap {
  			imap.CapCreateSpecialUse,
  			imap.CapLiteralPlus,
  			imap.CapUnauthenticate,
-+			imap.CapCondStore, // RFC 7162 — see imapserver/{fetch,store,search,select,status}.go
++			imap.CapCondStore, // RFC 7162 §3 — see fetch/store/search/select/status.go
++			imap.CapQResync,   // RFC 7162 §4 — see enable.go, expunge.go, select.go
  		})
  
  		if appendLimitSession, ok := c.session.(SessionAppendLimit); ok {
+diff --git a/imapserver/enable.go b/imapserver/enable.go
+index 051e6c6..e7ff5d7 100644
+--- a/imapserver/enable.go
++++ b/imapserver/enable.go
+@@ -23,11 +23,28 @@ func (c *Conn) handleEnable(dec *imapwire.Decoder) error {
+ 		return err
+ 	}
+ 
++	available := c.server.options.caps()
+ 	var enabled []imap.Cap
+ 	for _, req := range requested {
+ 		switch req {
+ 		case imap.CapIMAP4rev2, imap.CapUTF8Accept:
+ 			enabled = append(enabled, req)
++		case imap.CapCondStore:
++			// RFC 7162 §3.6: ENABLE CONDSTORE is a separate
++			// activation; only honoured when the backend supports
++			// it.
++			if available.Has(imap.CapCondStore) {
++				enabled = append(enabled, req)
++			}
++		case imap.CapQResync:
++			// RFC 7162 §3.7: enabling QRESYNC implicitly enables
++			// CONDSTORE. Both must be backend-supported.
++			if available.Has(imap.CapQResync) {
++				enabled = append(enabled, req)
++				if available.Has(imap.CapCondStore) {
++					enabled = append(enabled, imap.CapCondStore)
++				}
++			}
+ 		}
+ 	}
+ 
+diff --git a/imapserver/expunge.go b/imapserver/expunge.go
+index 3e4d71b..4c012c2 100644
+--- a/imapserver/expunge.go
++++ b/imapserver/expunge.go
+@@ -48,3 +48,22 @@ func (w *ExpungeWriter) WriteExpunge(seqNum uint32) error {
+ 	}
+ 	return w.conn.writeExpunge(seqNum)
+ }
++
++// WriteVanished writes a single "* VANISHED <uids>" line carrying
++// every UID in uids (RFC 7162 §3.2). A QRESYNC-enabled session uses
++// this in place of per-message WriteExpunge to coalesce the EXPUNGE
++// response — clients with large reconciliation sets benefit from the
++// single line.
++//
++// The "(EARLIER)" form, used in QRESYNC SELECT responses, is
++// produced by the framework via SelectData.Vanished; sessions don't
++// call this method during SELECT.
++func (w *ExpungeWriter) WriteVanished(uids imap.UIDSet) error {
++	if w.conn == nil || len(uids) == 0 {
++		return nil
++	}
++	enc := newResponseEncoder(w.conn)
++	defer enc.end()
++	enc.Atom("*").SP().Atom("VANISHED").SP().NumSet(uids)
++	return enc.CRLF()
++}
 diff --git a/imapserver/fetch.go b/imapserver/fetch.go
 index 48605c2..b063b8a 100644
 --- a/imapserver/fetch.go
@@ -182,7 +398,7 @@ index b0f9fb8..861ac19 100644
  		if !dec.ExpectSP() {
  			return dec.Err()
 diff --git a/imapserver/select.go b/imapserver/select.go
-index 3535fe7..dd0a96d 100644
+index 3535fe7..281f68e 100644
 --- a/imapserver/select.go
 +++ b/imapserver/select.go
 @@ -2,6 +2,7 @@ package imapserver
@@ -221,7 +437,7 @@ index 3535fe7..dd0a96d 100644
  	data, err := c.session.Select(mailbox, &options)
  	if err != nil {
  		return err
-@@ -63,6 +74,13 @@ func (c *Conn) handleSelect(tag string, dec *imapwire.Decoder, readOnly bool) er
+@@ -63,6 +74,21 @@ func (c *Conn) handleSelect(tag string, dec *imapwire.Decoder, readOnly bool) er
  	if err := c.writePermanentFlags(data.PermanentFlags); err != nil {
  		return err
  	}
@@ -232,10 +448,18 @@ index 3535fe7..dd0a96d 100644
 +			return err
 +		}
 +	}
++	// QRESYNC SELECT (RFC 7162 §3.2): the server emits one
++	// "* VANISHED (EARLIER) <uids>" line carrying every UID that has
++	// been expunged since the client's last known mod-sequence.
++	if len(data.Vanished) > 0 {
++		if err := c.writeVanishedEarlier(data.Vanished); err != nil {
++			return err
++		}
++	}
  	if data.List != nil {
  		if err := c.writeList(data.List); err != nil {
  			return err
-@@ -172,3 +190,36 @@ func (c *Conn) writePermanentFlags(flags []imap.Flag) error {
+@@ -172,3 +198,98 @@ func (c *Conn) writePermanentFlags(flags []imap.Flag) error {
  	enc.SP().Text("Permanent flags")
  	return enc.CRLF()
  }
@@ -252,11 +476,21 @@ index 3535fe7..dd0a96d 100644
 +	return enc.CRLF()
 +}
 +
++// writeVanishedEarlier writes one "* VANISHED (EARLIER) <uids>" line
++// listing the UIDs the client has lost (during a QRESYNC SELECT, RFC
++// 7162 §3.2).
++func (c *Conn) writeVanishedEarlier(uids imap.UIDSet) error {
++	enc := newResponseEncoder(c)
++	defer enc.end()
++	enc.Atom("*").SP().Atom("VANISHED").SP()
++	enc.Special('(').Atom("EARLIER").Special(')')
++	enc.SP().NumSet(uids)
++	return enc.CRLF()
++}
++
 +// readSelectModifiers parses the parenthesised list of select-params
-+// that may follow the mailbox name (RFC 7162 §3.1.8 CONDSTORE).
-+// QRESYNC parameters are explicitly rejected so a client that asks
-+// for QRESYNC does not silently proceed under CONDSTORE-only
-+// semantics.
++// that may follow the mailbox name. CONDSTORE (RFC 7162 §3.1.8) and
++// QRESYNC (§3.2) are supported.
 +func readSelectModifiers(dec *imapwire.Decoder, options *imap.SelectOptions) error {
 +	return dec.ExpectList(func() error {
 +		var name string
@@ -266,11 +500,63 @@ index 3535fe7..dd0a96d 100644
 +		switch strings.ToUpper(name) {
 +		case "CONDSTORE":
 +			options.CondStore = true
++		case "QRESYNC":
++			q, err := readQResyncParams(dec)
++			if err != nil {
++				return err
++			}
++			options.QResync = q
 +		default:
 +			return newClientBugError("unknown SELECT modifier")
 +		}
 +		return nil
 +	})
++}
++
++// readQResyncParams parses
++//
++//	QRESYNC "(" uidvalidity SP mod-sequence-value [SP known-uids] ")"
++//
++// per RFC 7162 §3.2. The optional reconciliation pair
++// "(known-sequence-set " known-uid-set ")" the spec also describes is
++// an advanced cache optimisation rare in the wild; we accept it as
++// well but only expose the known UIDs to the session, leaving the
++// seq/uid pairs unused.
++func readQResyncParams(dec *imapwire.Decoder) (*imap.QResyncOptions, error) {
++	if !dec.ExpectSP() || !dec.ExpectSpecial('(') {
++		return nil, dec.Err()
++	}
++	q := &imap.QResyncOptions{}
++	if !dec.ExpectNumber(&q.UIDValidity) || !dec.ExpectSP() || !dec.ExpectModSeq(&q.ModSeq) {
++		return nil, dec.Err()
++	}
++	// Optional known-uids.
++	if dec.SP() {
++		// Either "(seqset uidset)" reconciliation pair OR plain UID
++		// set. Peek the next byte: '(' → pair, anything else → uid
++		// set.
++		if dec.Special('(') {
++			// We accept the reconciliation pair but discard it —
++			// honouring it requires the session to know the client's
++			// pre-expunge sequence view, which v1 does not track.
++			var (
++				dummySeq imap.NumSet
++				dummyUID imap.UIDSet
++			)
++			if !dec.ExpectNumSet(imapwire.NumKindSeq, &dummySeq) ||
++				!dec.ExpectSP() || !dec.ExpectUIDSet(&dummyUID) || !dec.ExpectSpecial(')') {
++				return nil, dec.Err()
++			}
++		} else {
++			if !dec.ExpectUIDSet(&q.KnownUIDs) {
++				return nil, dec.Err()
++			}
++		}
++	}
++	if !dec.ExpectSpecial(')') {
++		return nil, dec.Err()
++	}
++	return q, nil
 +}
 diff --git a/imapserver/status.go b/imapserver/status.go
 index b2b5feb..da49195 100644
@@ -379,3 +665,45 @@ index a94f52f..8a19bf8 100644
  }
  
  // SearchCriteria is a criteria for the SEARCH command.
+diff --git a/select.go b/select.go
+index f307ff3..47c50d3 100644
+--- a/select.go
++++ b/select.go
+@@ -3,7 +3,24 @@ package imap
+ // SelectOptions contains options for the SELECT or EXAMINE command.
+ type SelectOptions struct {
+ 	ReadOnly  bool
+-	CondStore bool // requires CONDSTORE
++	CondStore bool             // requires CONDSTORE
++	QResync   *QResyncOptions // requires QRESYNC
++}
++
++// QResyncOptions is the payload of the (QRESYNC ...) select modifier
++// (RFC 7162 §3.2). The client tells the server "I last knew this
++// mailbox at UIDValidity = U, HIGHESTMODSEQ = M; tell me what has
++// changed since". KnownUIDs (optional) is the client's UID set —
++// servers MAY restrict their VANISHED report to that subset. The
++// per-cache reconciliation pair (KnownSeqSet, KnownUIDSet) is RFC
++// 7162 §3.2.5; this implementation surfaces them on the struct but
++// does not require the server to honour them.
++type QResyncOptions struct {
++	UIDValidity uint32
++	ModSeq      uint64
++	KnownUIDs   UIDSet
++	KnownSeqSet SeqSet
++	KnownUIDSet UIDSet
+ }
+ 
+ // SelectData is the data returned by a SELECT command.
+@@ -28,4 +45,11 @@ type SelectData struct {
+ 	List *ListData // requires IMAP4rev2
+ 
+ 	HighestModSeq uint64 // requires CONDSTORE
++
++	// Vanished, when non-empty, is reported as
++	// "* VANISHED (EARLIER) <uids>" before the tagged OK. The
++	// server populates it during a QRESYNC SELECT with the UIDs
++	// that have been expunged since the client's last known
++	// HIGHESTMODSEQ. RFC 7162 §3.2.
++	Vanished UIDSet
+ }

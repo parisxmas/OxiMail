@@ -18,7 +18,7 @@ func EnsureSchema(s *Store) error {
 	for _, coll := range []string{
 		CollDomains, CollAccounts, CollAliases,
 		CollMailboxes, CollMessages, CollOutboundQueue,
-		CollVacations, CollSieveScripts,
+		CollVacations, CollSieveScripts, CollExpungeLog,
 	} {
 		if err := ensureCollection(s.db, coll); err != nil {
 			return err
@@ -53,6 +53,7 @@ func EnsureSchema(s *Store) error {
 		{CollMessages, "account_id"},
 		{CollOutboundQueue, "status"},
 		{CollOutboundQueue, "next_retry_at"},
+		{CollExpungeLog, "mailbox_id"},
 	} {
 		if err := ensureIndex(s.db, ix.coll, ix.field); err != nil {
 			return err

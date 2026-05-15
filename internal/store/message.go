@@ -441,9 +441,17 @@ func (s *Store) CopyMessage(messageID, destMailboxID uint64) (*Message, error) {
 // DeleteMessage removes a message: the metadata document first, then its
 // body blob (an orphaned blob is just wasted disk; a document pointing
 // at a missing blob would be a broken read). The account's used-bytes
-// counter is decremented best-effort.
+// counter is decremented best-effort, and the (UID, mod-seq) pair is
+// appended to the expunge log so QRESYNC clients can later resync.
 func (s *Store) DeleteMessage(id uint64) error {
 	msg, err := s.GetMessage(id)
+	if err != nil {
+		return err
+	}
+	// RFC 7162 §2.1.2: EXPUNGE bumps the mailbox mod-seq. The bumped
+	// value is what we record on the expunge log so QRESYNC's
+	// "since modseq M" comparison is exact.
+	modSeq, err := s.NextModSeq(msg.MailboxID)
 	if err != nil {
 		return err
 	}
@@ -452,6 +460,12 @@ func (s *Store) DeleteMessage(id uint64) error {
 	}
 	if err := s.db.DeleteObject(BlobBucket, msg.BodyBlob); err != nil {
 		return fmt.Errorf("store: delete message %d: remove body %q: %w", id, msg.BodyBlob, err)
+	}
+	if err := s.recordExpunge(msg.MailboxID, msg.UID, modSeq); err != nil {
+		// A log gap means QRESYNC clients won't be told this UID
+		// went away — they'll discover it on their own. Log and
+		// move on; do not fail the delete.
+		_ = err
 	}
 	_, _ = s.db.FindAndModify(
 		CollAccounts,

@@ -599,12 +599,16 @@ func (m *selectedMailbox) forEachWithIndex(numSet imap.NumSet, fn func(idx int, 
 	}
 }
 
-// expunge removes every \Deleted message in scope (all of them, or just
-// those in uids for a UID EXPUNGE). The actual EXPUNGE responses are
-// flushed to the client by the framework's post-command poll.
-func (m *selectedMailbox) expunge(_ *imapserver.ExpungeWriter, uids *imap.UIDSet) error {
+// expunge removes every \Deleted message in scope (all of them, or
+// just those in uids for a UID EXPUNGE). When qresync is true, the
+// per-message EXPUNGE responses are replaced by a single
+// "* VANISHED <uids>" line written directly via the ExpungeWriter
+// (RFC 7162 §3.2). Otherwise the actual EXPUNGE responses are flushed
+// to the client by the framework's post-command poll.
+func (m *selectedMailbox) expunge(w *imapserver.ExpungeWriter, uids *imap.UIDSet, qresync bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var vanished imap.UIDSet
 	// Walk back to front so each removal leaves the lower sequence
 	// numbers — and lower slice indices — untouched.
 	for i := len(m.msgs) - 1; i >= 0; i-- {
@@ -618,8 +622,15 @@ func (m *selectedMailbox) expunge(_ *imapserver.ExpungeWriter, uids *imap.UIDSet
 		if err := m.store.DeleteMessage(msg.ID); err != nil {
 			return err
 		}
-		m.tracker.QueueExpunge(uint32(i) + 1)
+		if qresync {
+			vanished.AddNum(imap.UID(msg.UID))
+		} else {
+			m.tracker.QueueExpunge(uint32(i) + 1)
+		}
 		m.msgs = append(m.msgs[:i], m.msgs[i+1:]...)
+	}
+	if qresync && len(vanished) > 0 {
+		return w.WriteVanished(vanished)
 	}
 	return nil
 }

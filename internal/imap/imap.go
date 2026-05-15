@@ -57,6 +57,7 @@ func New(addr string, st *store.Store, tlsConfig *tls.Config) *Server {
 				store:    st,
 				limiter:  limiter,
 				remoteIP: remoteIPOf(conn.NetConn()),
+				conn:     conn,
 			}, nil, nil
 		},
 		Caps: imap.CapSet{
@@ -66,6 +67,7 @@ func New(addr string, st *store.Store, tlsConfig *tls.Config) *Server {
 			imap.CapUIDPlus:   {},
 			imap.CapMove:      {},
 			imap.CapCondStore: {},
+			imap.CapQResync:   {},
 		},
 		TLSConfig:    tlsConfig,
 		InsecureAuth: tlsConfig == nil,

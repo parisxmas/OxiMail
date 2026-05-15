@@ -24,9 +24,21 @@ type session struct {
 	store    *store.Store
 	limiter  *ratelimit.Limiter
 	remoteIP string
+	conn     *imapserver.Conn // for EnabledCaps() (CONDSTORE / QRESYNC checks)
 
 	account *store.Account   // set by Login; nil until authenticated
 	mbox    *selectedMailbox // set by Select; nil in the authenticated state
+}
+
+// qresyncEnabled reports whether the client has run ENABLE QRESYNC on
+// this session. Sessions that have it on get VANISHED responses
+// instead of EXPUNGE, and pay attention to the (QRESYNC ...) SELECT
+// modifier.
+func (s *session) qresyncEnabled() bool {
+	if s.conn == nil {
+		return false
+	}
+	return s.conn.EnabledCaps().Has(imap.CapQResync)
 }
 
 var (
@@ -120,7 +132,7 @@ func (s *session) Authenticate(string) (sasl.Server, error) {
 
 // --- Authenticated state ---
 
-func (s *session) Select(name string, _ *imap.SelectOptions) (*imap.SelectData, error) {
+func (s *session) Select(name string, opts *imap.SelectOptions) (*imap.SelectData, error) {
 	mb, err := s.store.GetMailboxByName(s.account.ID, normalizeMailbox(name))
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, noSuchMailbox()
@@ -136,7 +148,42 @@ func (s *session) Select(name string, _ *imap.SelectOptions) (*imap.SelectData, 
 		s.mbox.Close()
 	}
 	s.mbox = sel
-	return sel.selectData(), nil
+	data := sel.selectData()
+	// QRESYNC SELECT (RFC 7162 §3.2): when the client passes
+	// (QRESYNC <uidvalidity> <modseq> ...) and our UIDValidity
+	// matches, populate Vanished with every UID expunged since the
+	// client's last known mod-sequence. A UIDValidity mismatch
+	// means the client's cache is gone — the spec says we ignore
+	// the rest of the QRESYNC payload, which is exactly what
+	// happens here (Vanished stays empty, NumMessages and friends
+	// are the fresh truth).
+	if opts != nil && opts.QResync != nil && opts.QResync.UIDValidity == data.UIDValidity {
+		uids, err := s.store.ExpungedSince(mb.ID, opts.QResync.ModSeq)
+		if err != nil {
+			return nil, err
+		}
+		// RFC 7162 §3.2: when the client passes a known-uid set the
+		// server MAY restrict the VANISHED report to that subset.
+		// We honour it when it's non-empty.
+		if len(opts.QResync.KnownUIDs) > 0 {
+			uids = filterKnownUIDs(uids, opts.QResync.KnownUIDs)
+		}
+		for _, u := range uids {
+			data.Vanished.AddNum(imap.UID(u))
+		}
+	}
+	return data, nil
+}
+
+// filterKnownUIDs keeps only the UIDs that are in `known`.
+func filterKnownUIDs(uids []uint32, known imap.UIDSet) []uint32 {
+	out := uids[:0]
+	for _, u := range uids {
+		if known.Contains(imap.UID(u)) {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 func (s *session) Unselect() error {
@@ -411,7 +458,7 @@ func (s *session) Expunge(w *imapserver.ExpungeWriter, uids *imap.UIDSet) error 
 	if s.mbox == nil {
 		return notSelected()
 	}
-	return s.mbox.expunge(w, uids)
+	return s.mbox.expunge(w, uids, s.qresyncEnabled())
 }
 
 func (s *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriteria, _ *imap.SearchOptions) (*imap.SearchData, error) {
