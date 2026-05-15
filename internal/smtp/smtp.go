@@ -17,7 +17,10 @@ import (
 	"bytes"
 	"context"
 	cryptorand "crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -29,6 +32,7 @@ import (
 
 	gosmtp "github.com/emersion/go-smtp"
 
+	"github.com/parisxmas/OxiMail/internal/arc"
 	"github.com/parisxmas/OxiMail/internal/observability"
 	"github.com/parisxmas/OxiMail/internal/sieve"
 	"github.com/parisxmas/OxiMail/internal/spam"
@@ -394,8 +398,11 @@ func (s *session) Data(r io.Reader) error {
 
 	// Alias forwarding: relay to the remote alias destinations with an
 	// SRS-rewritten envelope sender so SPF / DMARC line up at the next
-	// hop. An empty envelope sender (a bounce) is not rewritten — it
-	// stays empty so the receiving MX knows not to bounce it again.
+	// hop. We also try to prepend an ARC instance so the receiving MX
+	// can attest to the message's integrity at our hop and inherit
+	// the prior authentication state. An empty envelope sender (a
+	// bounce) is not rewritten — it stays empty so the receiving MX
+	// knows not to bounce it again.
 	if len(s.rcptRemote) > 0 {
 		sender := s.from
 		if sender != "" {
@@ -410,7 +417,8 @@ func (s *session) Data(r io.Reader) error {
 			}
 			sender = rewritten
 		}
-		if _, err := s.backend.store.Enqueue(sender, s.rcptRemote, raw); err != nil {
+		forwardRaw := s.sealARC(raw)
+		if _, err := s.backend.store.Enqueue(sender, s.rcptRemote, forwardRaw); err != nil {
 			log.Printf("smtp: enqueue forward to %v: %v", s.rcptRemote, err)
 			return &gosmtp.SMTPError{
 				Code:         451,
@@ -423,6 +431,68 @@ func (s *session) Data(r io.Reader) error {
 	log.Printf("smtp: accepted message from <%s> (%d bytes) — %d local, %d forwarded",
 		s.from, len(raw), len(s.rcptAccts), len(s.rcptRemote))
 	return nil
+}
+
+// sealARC tries to prepend an ARC instance to the raw message before
+// it is forwarded. The signing domain is the forwarder's domain
+// (same DKIM key that DKIM signing uses). On any failure the
+// original message is returned unchanged — sealing is best-effort,
+// never block a delivery for it.
+func (s *session) sealARC(raw []byte) []byte {
+	if arc.HasChain(raw) {
+		// A prior chain already exists. Extending it correctly
+		// requires running full RFC 8617 §5.2 chain validation
+		// across each prior hop — out of scope for v1 — so we leave
+		// the message untouched.
+		return raw
+	}
+	d, err := s.backend.store.GetDomain(s.backend.fwd.ForwarderDomain)
+	if err != nil || d.DKIMPrivateKey == "" || d.DKIMSelector == "" {
+		return raw // no key configured — silently skip
+	}
+	key, err := parseRSAKeyPEM(d.DKIMPrivateKey)
+	if err != nil {
+		log.Printf("smtp: ARC: unparseable DKIM key for %s: %v", s.backend.fwd.ForwarderDomain, err)
+		return raw
+	}
+	authResults := fmt.Sprintf("%s; spf=%s smtp.mailfrom=%s",
+		s.backend.fwd.ForwarderDomain,
+		spfStatusOf(s.remoteIP, s.from),
+		s.from,
+	)
+	sealed, err := arc.Seal(raw, arc.SealOptions{
+		Domain:      s.backend.fwd.ForwarderDomain,
+		Selector:    d.DKIMSelector,
+		Key:         key,
+		AuthResults: authResults,
+	})
+	if err != nil {
+		log.Printf("smtp: ARC seal: %v", err)
+		return raw
+	}
+	return sealed
+}
+
+// spfStatusOf is a very small SPF-result shim: we have not run a
+// fresh SPF check at this point in the pipeline (the spam.Pipeline
+// already ran one but does not return the result to us). For now we
+// emit "none" — receivers learn the SPF status from the envelope on
+// their side. A future change should plumb spam.Pipeline's per-
+// envelope verdict into AAR.
+func spfStatusOf(remoteIP, mailFrom string) string {
+	_ = remoteIP
+	_ = mailFrom
+	return "none"
+}
+
+// parseRSAKeyPEM decodes a PEM-encoded PKCS#1 RSA private key — the
+// same on-disk format DKIM signing uses.
+func parseRSAKeyPEM(pemKey string) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode([]byte(pemKey))
+	if block == nil {
+		return nil, errors.New("smtp: not a PEM block")
+	}
+	return x509.ParsePKCS1PrivateKey(block.Bytes)
 }
 
 // sieveDecide loads the account's Sieve script and runs it against

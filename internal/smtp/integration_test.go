@@ -9,6 +9,10 @@ package smtp_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	netsmtp "net/smtp"
 	"reflect"
@@ -16,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/parisxmas/OxiMail/internal/arc"
 	"github.com/parisxmas/OxiMail/internal/itest"
 	"github.com/parisxmas/OxiMail/internal/smtp"
 	"github.com/parisxmas/OxiMail/internal/spam"
@@ -277,6 +282,85 @@ func TestInboundSMTPVacation(t *testing.T) {
 			t.Errorf("auto-reply re-fired within the suppression window: queue grew from %d to %d", len(before), len(after))
 		}
 	})
+}
+
+// TestInboundSMTPARCSealing covers RFC 8617 ARC sealing on the
+// forward path: when the inbound MX relays an alias message and a
+// DKIM key is configured for the forwarder domain, the queued copy
+// carries three new ARC headers (Seal / Message-Signature /
+// Authentication-Results) with i=1 and cv=none, and the seal
+// round-trips through VerifyLastInstance using the same key.
+func TestInboundSMTPARCSealing(t *testing.T) {
+	host, port := itest.StartOxiDB(t)
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	// Hosted domain with a DKIM/ARC signing key.
+	if _, err := st.CreateDomain("oximail.test"); err != nil {
+		t.Fatalf("create domain: %v", err)
+	}
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+	pemKey := string(pem.EncodeToMemory(&pem.Block{
+		Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv),
+	}))
+	if err := st.SetDKIMKey("oximail.test", "s1", pemKey); err != nil {
+		t.Fatalf("set dkim key: %v", err)
+	}
+	// Alias forwarding to a remote address — that triggers the
+	// queued-relay path the ARC seal runs on.
+	if _, err := st.CreateAlias("team@oximail.test", []string{"bob@elsewhere.test"}); err != nil {
+		t.Fatalf("create alias: %v", err)
+	}
+
+	secret := []byte("a-stable-srs-secret-32-byteslong!")
+	smtpAddr := startSMTPWithForwarder(t, st, smtp.ForwarderConfig{
+		SRSSecret: secret, SRSMaxAge: 21 * 24 * time.Hour,
+		ForwarderDomain: "oximail.test",
+	})
+
+	msg := "From: alice@partners.test\r\nTo: team@oximail.test\r\nSubject: hi\r\nMessage-Id: <inbound-1@partners.test>\r\n\r\nforwarded body\r\n"
+	if err := netsmtp.SendMail(smtpAddr, nil, "alice@partners.test",
+		[]string{"team@oximail.test"}, []byte(msg)); err != nil {
+		t.Fatalf("SendMail: %v", err)
+	}
+
+	queued, err := st.ListDueOutbound(10)
+	if err != nil {
+		t.Fatalf("list outbound: %v", err)
+	}
+	if len(queued) != 1 {
+		t.Fatalf("outbound queue = %d, want 1", len(queued))
+	}
+	raw, err := st.FetchOutboundBody(&queued[0])
+	if err != nil {
+		t.Fatalf("fetch outbound: %v", err)
+	}
+	s := string(raw)
+	for _, want := range []string{
+		"ARC-Seal:",
+		"ARC-Message-Signature:",
+		"ARC-Authentication-Results:",
+		"i=1",
+		"cv=none",
+		"d=oximail.test",
+		"s=s1",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("queued message missing %q\n---\n%s", want, s)
+		}
+	}
+	if err := arc.VerifyLastInstance(raw, &priv.PublicKey); err != nil {
+		t.Errorf("ARC seal does not round-trip through VerifyLastInstance: %v", err)
+	}
 }
 
 // TestInboundSMTPAliasForwarding covers SRS-based alias forwarding to
