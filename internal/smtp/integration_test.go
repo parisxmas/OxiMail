@@ -101,6 +101,104 @@ func TestInboundSMTP(t *testing.T) {
 	})
 }
 
+// TestInboundSMTPVacation covers the RFC 3834 auto-responder: when a
+// local account has a vacation rule enabled, an inbound person-to-
+// person message lands the original in INBOX and drops an auto-reply
+// on the outbound queue addressed to the original sender — with the
+// loop-prevention headers RFC 3834 requires. A bounce (null envelope
+// sender) does NOT trigger a reply, and a second message from the
+// same sender within the suppression window is also silent.
+func TestInboundSMTPVacation(t *testing.T) {
+	host, port := itest.StartOxiDB(t)
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	acc, err := st.CreateAccount("ooo@oximail.test", "h", 0)
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if _, err := st.SetVacation(acc.ID, true, "Out of office", "I am away until Friday.", 7); err != nil {
+		t.Fatalf("set vacation: %v", err)
+	}
+
+	addr := startSMTP(t, st)
+
+	t.Run("auto-reply fires on a person-to-person message", func(t *testing.T) {
+		msg := "From: alice@partners.test\r\n" +
+			"To: ooo@oximail.test\r\n" +
+			"Subject: lunch?\r\n" +
+			"Message-Id: <p2p-1@partners.test>\r\n" +
+			"\r\n" +
+			"are you free?\r\n"
+		if err := netsmtp.SendMail(addr, nil, "alice@partners.test",
+			[]string{"ooo@oximail.test"}, []byte(msg)); err != nil {
+			t.Fatalf("SendMail: %v", err)
+		}
+		queued, err := st.ListDueOutbound(10)
+		if err != nil {
+			t.Fatalf("list outbound: %v", err)
+		}
+		if len(queued) != 1 {
+			t.Fatalf("outbound queue has %d items, want 1: %+v", len(queued), queued)
+		}
+		q := queued[0]
+		if q.From != "ooo@oximail.test" {
+			t.Errorf("envelope sender = %q, want the vacationer", q.From)
+		}
+		if len(q.Recipients) != 1 || q.Recipients[0] != "alice@partners.test" {
+			t.Errorf("envelope recipients = %v, want [alice@partners.test]", q.Recipients)
+		}
+		raw, err := st.FetchOutboundBody(&q)
+		if err != nil {
+			t.Fatalf("fetch outbound: %v", err)
+		}
+		s := string(raw)
+		for _, want := range []string{
+			"Auto-Submitted: auto-replied",
+			"Subject: Out of office",
+			"In-Reply-To: <p2p-1@partners.test>",
+			"I am away until Friday.",
+		} {
+			if !strings.Contains(s, want) {
+				t.Errorf("auto-reply missing %q\n---\n%s", want, s)
+			}
+		}
+	})
+
+	t.Run("no auto-reply for a bounce", func(t *testing.T) {
+		before, _ := st.ListDueOutbound(50)
+		msg := "From: MAILER-DAEMON@partners.test\r\n" +
+			"To: ooo@oximail.test\r\n" +
+			"Subject: delivery failed\r\n\r\n"
+		// Null envelope sender — a DSN.
+		if err := netsmtp.SendMail(addr, nil, "", []string{"ooo@oximail.test"}, []byte(msg)); err != nil {
+			t.Fatalf("SendMail: %v", err)
+		}
+		after, _ := st.ListDueOutbound(50)
+		if len(after) != len(before) {
+			t.Errorf("auto-reply fired on a bounce: queue grew from %d to %d", len(before), len(after))
+		}
+	})
+
+	t.Run("suppressor silences a second hit from the same sender", func(t *testing.T) {
+		before, _ := st.ListDueOutbound(50)
+		msg := "From: alice@partners.test\r\nTo: ooo@oximail.test\r\nSubject: still?\r\n\r\nthinking of you\r\n"
+		if err := netsmtp.SendMail(addr, nil, "alice@partners.test",
+			[]string{"ooo@oximail.test"}, []byte(msg)); err != nil {
+			t.Fatalf("SendMail: %v", err)
+		}
+		after, _ := st.ListDueOutbound(50)
+		if len(after) != len(before) {
+			t.Errorf("auto-reply re-fired within the suppression window: queue grew from %d to %d", len(before), len(after))
+		}
+	})
+}
+
 // TestInboundSMTPAliasForwarding covers SRS-based alias forwarding to
 // remote addresses: an alias whose destinations are all off-server is
 // accepted; the message is enqueued for relay with an envelope sender

@@ -12,9 +12,12 @@
 //	oximailctl account list [-domain <domain>]
 //	oximailctl account delete <address>
 //	oximailctl account passwd <address>              new password read from stdin
-//	oximailctl alias   add <address> <dest>[,<dest>...]
-//	oximailctl alias   list
-//	oximailctl alias   delete <address>
+//	oximailctl alias    add <address> <dest>[,<dest>...]
+//	oximailctl alias    list
+//	oximailctl alias    delete <address>
+//	oximailctl vacation get <address>
+//	oximailctl vacation set <address> -subject S -body B [-suppress-days N]
+//	oximailctl vacation clear <address>
 package main
 
 import (
@@ -73,6 +76,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return c.account(args[1:])
 	case "alias":
 		return c.alias(args[1:])
+	case "vacation":
+		return c.vacation(args[1:])
 	default:
 		fmt.Fprintf(stderr, "oximailctl: unknown command %q\n", args[0])
 		usage(stderr)
@@ -120,9 +125,12 @@ usage:
   oximailctl account list [-domain <domain>]
   oximailctl account delete <address>
   oximailctl account passwd <address>              new password read from stdin
-  oximailctl alias   add <address> <dest>[,<dest>...]
-  oximailctl alias   list
-  oximailctl alias   delete <address>
+  oximailctl alias    add <address> <dest>[,<dest>...]
+  oximailctl alias    list
+  oximailctl alias    delete <address>
+  oximailctl vacation get   <address>
+  oximailctl vacation set   <address> -subject S -body B [-suppress-days N]
+  oximailctl vacation clear <address>
 
 It connects to OxiDB with the same OXIMAIL_* environment variables as
 the server — OXIMAIL_OXIDB_HOST, OXIMAIL_OXIDB_PORT.

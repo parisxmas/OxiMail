@@ -16,8 +16,10 @@ package smtp
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -31,6 +33,7 @@ import (
 	"github.com/parisxmas/OxiMail/internal/spam"
 	"github.com/parisxmas/OxiMail/internal/srs"
 	"github.com/parisxmas/OxiMail/internal/store"
+	"github.com/parisxmas/OxiMail/internal/vacation"
 )
 
 // Server tuning. These are conservative defaults; they move into
@@ -98,10 +101,16 @@ func New(addr, hostname string, st *store.Store, sp *spam.Pipeline, tlsConfig *t
 	if fwd.ForwarderDomain == "" {
 		fwd.ForwarderDomain = hostname
 	}
+	be := &backend{
+		store:      st,
+		spam:       sp,
+		fwd:        fwd,
+		suppressor: vacation.NewSuppressor(7 * 24 * time.Hour),
+	}
 	return &Server{
 		name: "smtp",
 		addr: addr,
-		srv:  newServer(addr, hostname, &backend{store: st, spam: sp, fwd: fwd}, tlsConfig),
+		srv:  newServer(addr, hostname, be, tlsConfig),
 	}
 }
 
@@ -149,9 +158,10 @@ func (s *Server) Stop() error {
 
 // backend builds one session per incoming connection.
 type backend struct {
-	store *store.Store
-	spam  *spam.Pipeline
-	fwd   ForwarderConfig
+	store      *store.Store
+	spam       *spam.Pipeline
+	fwd        ForwarderConfig
+	suppressor *vacation.Suppressor
 }
 
 func (b *backend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
@@ -364,6 +374,14 @@ func (s *session) Data(r io.Reader) error {
 		}
 	}
 
+	// Vacation auto-responder: per local recipient with a configured
+	// rule, see whether RFC 3834 permits a reply, then build one and
+	// drop it on the outbound queue. Errors are best-effort logged —
+	// a vacation failure must not bounce the original delivery.
+	if folder == "INBOX" {
+		s.fireVacationReplies(raw)
+	}
+
 	// Alias forwarding: relay to the remote alias destinations with an
 	// SRS-rewritten envelope sender so SPF / DMARC line up at the next
 	// hop. An empty envelope sender (a bounce) is not rewritten — it
@@ -395,6 +413,57 @@ func (s *session) Data(r io.Reader) error {
 	log.Printf("smtp: accepted message from <%s> (%d bytes) — %d local, %d forwarded",
 		s.from, len(raw), len(s.rcptAccts), len(s.rcptRemote))
 	return nil
+}
+
+// fireVacationReplies asks every local recipient's configured
+// vacation rule whether it wants to reply, and queues the replies.
+// Suppressor stops re-replying to the same sender within the window.
+func (s *session) fireVacationReplies(raw []byte) {
+	for acctID := range s.rcptAccts {
+		v, err := s.backend.store.GetVacation(acctID)
+		if err != nil || v == nil || !v.Enabled {
+			continue
+		}
+		acc, err := s.backend.store.GetAccountByID(acctID)
+		if err != nil {
+			continue
+		}
+		if !vacation.ShouldReply(raw, s.from, []string{acc.Address}) {
+			continue
+		}
+		if !s.backend.suppressor.Allow(acctID, s.from, time.Now()) {
+			continue
+		}
+		messageID := randomMessageID(acc.Address)
+		reply, err := vacation.Reply(
+			vacation.Rule{Subject: v.Subject, Body: v.Body},
+			raw, acc.Address, s.from, messageID, time.Now(),
+		)
+		if err != nil {
+			log.Printf("smtp: vacation reply for account %d: %v", acctID, err)
+			continue
+		}
+		// The reply uses the recipient as its envelope sender (the
+		// original sender becomes the recipient). An empty MAIL FROM
+		// would also be correct per RFC 3834 — and avoids further
+		// loops — but breaks SPF on the destination, so we use the
+		// account address.
+		if _, err := s.backend.store.Enqueue(acc.Address, []string{s.from}, reply); err != nil {
+			log.Printf("smtp: enqueue vacation reply for account %d: %v", acctID, err)
+		}
+	}
+}
+
+// randomMessageID builds a fresh Message-Id for an auto-reply, using
+// the account's domain as the right-hand side.
+func randomMessageID(accountAddress string) string {
+	var buf [12]byte
+	_, _ = cryptorand.Read(buf[:])
+	domain := "localhost"
+	if at := strings.LastIndexByte(accountAddress, '@'); at >= 0 && at < len(accountAddress)-1 {
+		domain = accountAddress[at+1:]
+	}
+	return fmt.Sprintf("%x@%s", buf, domain)
 }
 
 // Reset discards the in-progress message's envelope state.

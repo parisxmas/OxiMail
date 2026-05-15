@@ -44,6 +44,7 @@ const (
 	CollMailboxes     = "mailboxes"
 	CollMessages      = "messages"
 	CollOutboundQueue = "outbound_queue"
+	CollVacations     = "vacations"
 )
 
 // BlobBucket is the OxiDB blob-store bucket holding raw RFC 5322 message

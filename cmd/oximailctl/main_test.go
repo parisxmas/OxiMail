@@ -172,6 +172,34 @@ func TestCLI(t *testing.T) {
 		}
 	})
 
+	t.Run("vacation set / get / clear round-trips", func(t *testing.T) {
+		if _, code := cli("pw\n", "account", "add", "ooo@example.test"); code != 0 {
+			t.Fatal("setup: account add failed")
+		}
+		// set
+		out, code := cli("", "vacation", "set", "-subject", "Away", "-body", "Back next week.",
+			"ooo@example.test")
+		if code != 0 || !strings.Contains(out, "vacation on for ooo@example.test") {
+			t.Fatalf("vacation set: code=%d out=%q", code, out)
+		}
+		// get
+		out, code = cli("", "vacation", "get", "ooo@example.test")
+		if code != 0 || !strings.Contains(out, "vacation on for ooo@example.test") ||
+			!strings.Contains(out, "subject: Away") || !strings.Contains(out, "Back next week.") {
+			t.Fatalf("vacation get: code=%d out=%q", code, out)
+		}
+		// clear
+		if out, code := cli("", "vacation", "clear", "ooo@example.test"); code != 0 ||
+			!strings.Contains(out, "vacation cleared for ooo@example.test") {
+			t.Fatalf("vacation clear: code=%d out=%q", code, out)
+		}
+		// get after clear
+		out, code = cli("", "vacation", "get", "ooo@example.test")
+		if code != 0 || !strings.Contains(out, "vacation disabled for ooo@example.test") {
+			t.Fatalf("vacation get after clear: code=%d out=%q", code, out)
+		}
+	})
+
 	t.Run("domain delete works after the accounts are gone", func(t *testing.T) {
 		if _, code := cli("", "domain", "add", "ephemeral.test"); code != 0 {
 			t.Fatal("setup: domain add failed")

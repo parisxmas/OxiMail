@@ -18,13 +18,14 @@ func EnsureSchema(s *Store) error {
 	for _, coll := range []string{
 		CollDomains, CollAccounts, CollAliases,
 		CollMailboxes, CollMessages, CollOutboundQueue,
+		CollVacations,
 	} {
 		if err := ensureCollection(s.db, coll); err != nil {
 			return err
 		}
 	}
 
-	// Unique identity indexes — one row per address / domain.
+	// Unique identity indexes — one row per address / domain / account.
 	if err := ensureUnique(s.db, CollDomains, "domain"); err != nil {
 		return err
 	}
@@ -32,6 +33,9 @@ func EnsureSchema(s *Store) error {
 		return err
 	}
 	if err := ensureUnique(s.db, CollAliases, "address"); err != nil {
+		return err
+	}
+	if err := ensureUnique(s.db, CollVacations, "account_id"); err != nil {
 		return err
 	}
 

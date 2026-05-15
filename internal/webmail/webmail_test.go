@@ -427,6 +427,71 @@ func TestWebmail(t *testing.T) {
 		}
 	})
 
+	t.Run("vacation GET / PUT / DELETE round-trips", func(t *testing.T) {
+		// Initially: GET returns the all-zero "off" response.
+		var get vacationResp
+		if status := getJSON(t, base+"/api/vacation", token, &get); status != http.StatusOK {
+			t.Fatalf("initial GET status = %d, want 200", status)
+		}
+		if get.Enabled {
+			t.Errorf("freshly-loaded vacation reports enabled=true: %+v", get)
+		}
+		// PUT a rule.
+		body := mustJSON(map[string]any{
+			"enabled":       true,
+			"subject":       "Out of office",
+			"body":          "Back Monday.",
+			"suppress_days": 5,
+		})
+		req, _ := http.NewRequest(http.MethodPut, base+"/api/vacation", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("PUT vacation: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("PUT status = %d, want 200", resp.StatusCode)
+		}
+		// GET reflects it.
+		if status := getJSON(t, base+"/api/vacation", token, &get); status != http.StatusOK ||
+			!get.Enabled || get.Subject != "Out of office" || get.Body != "Back Monday." ||
+			get.SuppressDays != 5 {
+			t.Fatalf("after PUT, GET = %+v (status=%d)", get, status)
+		}
+		// DELETE clears it.
+		delReq, _ := http.NewRequest(http.MethodDelete, base+"/api/vacation", nil)
+		delReq.Header.Set("Authorization", "Bearer "+token)
+		resp, err = http.DefaultClient.Do(delReq)
+		if err != nil {
+			t.Fatalf("DELETE vacation: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("DELETE status = %d, want 204", resp.StatusCode)
+		}
+		// And GET is back to the all-zero default.
+		if status := getJSON(t, base+"/api/vacation", token, &get); status != http.StatusOK || get.Enabled {
+			t.Fatalf("after DELETE, GET = %+v (status=%d)", get, status)
+		}
+	})
+
+	t.Run("vacation PUT refuses an enabled rule with empty body", func(t *testing.T) {
+		body := mustJSON(map[string]any{"enabled": true, "body": ""})
+		req, _ := http.NewRequest(http.MethodPut, base+"/api/vacation", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("PUT: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400 for an empty body on an enabled rule", resp.StatusCode)
+		}
+	})
+
 	t.Run("change flags", func(t *testing.T) {
 		body := mustJSON(map[string]any{"op": "add", "flags": []string{`\Seen`}})
 		var out struct{ Seen bool }
@@ -650,6 +715,16 @@ func TestWebmailRateLimit(t *testing.T) {
 	if status := post(t, base+"/api/login", "", loginBody("user@oximail.test", "s3cret")); status != http.StatusTooManyRequests {
 		t.Fatalf("login with the right password after exhausting the budget: status = %d, want 429", status)
 	}
+}
+
+// vacationResp mirrors internal/webmail.vacationResponse for the JSON
+// round-trip the test makes.
+type vacationResp struct {
+	Enabled      bool   `json:"enabled"`
+	Subject      string `json:"subject"`
+	Body         string `json:"body"`
+	SuppressDays int    `json:"suppress_days,omitempty"`
+	UpdatedAt    string `json:"updated_at,omitempty"`
 }
 
 // -----------------------------------------------------------------------
