@@ -270,6 +270,75 @@ func (s *Store) MoveMessage(messageID, destMailboxID uint64) (*Message, error) {
 	return msg, nil
 }
 
+// CopyMessage copies a message into another of the same account's
+// mailboxes. The destination gets a new UID and a fresh body blob — each
+// message owns its own blob, so deleting one cannot dangle the other's
+// read. IMAP flags, internal date, and the header metadata carry over.
+//
+// TODO: reference-counted blobs would avoid the body copy.
+func (s *Store) CopyMessage(messageID, destMailboxID uint64) (*Message, error) {
+	src, err := s.GetMessage(messageID)
+	if err != nil {
+		return nil, err
+	}
+	dest, err := s.GetMailbox(destMailboxID)
+	if err != nil {
+		return nil, err
+	}
+	if dest.AccountID != src.AccountID {
+		return nil, fmt.Errorf("store: copy message %d: destination mailbox belongs to another account", messageID)
+	}
+
+	body, err := s.FetchBody(src)
+	if err != nil {
+		return nil, fmt.Errorf("store: copy message %d: fetch body: %w", messageID, err)
+	}
+	key, err := newBlobKey()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.db.PutObject(BlobBucket, key, body, "message/rfc822", nil); err != nil {
+		return nil, fmt.Errorf("store: copy message %d: store body: %w", messageID, err)
+	}
+	uid, err := s.NextUID(destMailboxID)
+	if err != nil {
+		_ = s.db.DeleteObject(BlobBucket, key)
+		return nil, err
+	}
+
+	dst := &Message{
+		MailboxID:    destMailboxID,
+		AccountID:    src.AccountID,
+		UID:          uid,
+		BodyBlob:     key,
+		SizeBytes:    src.SizeBytes,
+		Flags:        append([]string(nil), src.Flags...),
+		InternalDate: src.InternalDate,
+		MessageID:    src.MessageID,
+		Subject:      src.Subject,
+		FromAddr:     src.FromAddr,
+		ReceivedAt:   nowRFC3339(),
+	}
+	if dst.Flags == nil {
+		dst.Flags = []string{}
+	}
+	doc, err := encodeDoc(dst)
+	if err != nil {
+		_ = s.db.DeleteObject(BlobBucket, key)
+		return nil, err
+	}
+	resp, err := s.db.Insert(CollMessages, doc)
+	if err != nil {
+		_ = s.db.DeleteObject(BlobBucket, key)
+		return nil, fmt.Errorf("store: copy message %d: insert: %w", messageID, err)
+	}
+	if dst.ID, err = insertedID(resp); err != nil {
+		_ = s.db.DeleteObject(BlobBucket, key)
+		return nil, err
+	}
+	return dst, nil
+}
+
 // DeleteMessage removes a message: the metadata document first, then its
 // body blob (an orphaned blob is just wasted disk; a document pointing
 // at a missing blob would be a broken read). The account's used-bytes

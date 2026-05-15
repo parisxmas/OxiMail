@@ -117,6 +117,47 @@ func (s *Store) EnsureDefaultMailboxes(accountID uint64) error {
 	return nil
 }
 
+// DeleteMailbox removes a mailbox and every message in it. The body
+// blobs go first — orphaned blobs are wasted disk, but a message
+// document pointing at a missing blob is a broken read.
+func (s *Store) DeleteMailbox(mailboxID uint64) error {
+	msgs, err := s.db.Find(CollMessages, map[string]any{"mailbox_id": mailboxID}, nil)
+	if err != nil {
+		return fmt.Errorf("store: delete mailbox %d: list messages: %w", mailboxID, err)
+	}
+	for _, m := range msgs {
+		if key, ok := m["body_blob"].(string); ok && key != "" {
+			if err := s.db.DeleteObject(BlobBucket, key); err != nil {
+				return fmt.Errorf("store: delete mailbox %d: remove body %q: %w", mailboxID, key, err)
+			}
+		}
+	}
+	if _, err := s.db.Delete(CollMessages, map[string]any{"mailbox_id": mailboxID}); err != nil {
+		return fmt.Errorf("store: delete mailbox %d: remove messages: %w", mailboxID, err)
+	}
+	if _, err := s.db.Delete(CollMailboxes, map[string]any{"_id": mailboxID}); err != nil {
+		return fmt.Errorf("store: delete mailbox %d: remove mailbox: %w", mailboxID, err)
+	}
+	return nil
+}
+
+// RenameMailbox updates a mailbox's name. The IMAP layer is responsible
+// for checking that the new name does not already exist for the account.
+func (s *Store) RenameMailbox(mailboxID uint64, newName string) error {
+	doc, err := s.db.FindAndModify(
+		CollMailboxes,
+		map[string]any{"_id": mailboxID},
+		map[string]any{"$set": map[string]any{"name": newName}},
+	)
+	if err != nil {
+		return fmt.Errorf("store: rename mailbox %d: %w", mailboxID, err)
+	}
+	if doc == nil {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetMailboxSubscribed updates a mailbox's IMAP subscription state
 // (the SUBSCRIBE / UNSUBSCRIBE commands).
 func (s *Store) SetMailboxSubscribed(mailboxID uint64, subscribed bool) error {

@@ -312,6 +312,35 @@ func (m *selectedMailbox) applyFlags(msg *store.Message, sf *imap.StoreFlags) ([
 	}
 }
 
+// copy duplicates every message in numSet into dest. Each copy gets a
+// fresh UID (via store.NextUID inside CopyMessage); flags carry over.
+func (m *selectedMailbox) copy(numSet imap.NumSet, dest *store.Mailbox) (*imap.CopyData, error) {
+	var (
+		sourceUIDs, destUIDs imap.UIDSet
+		copyErr              error
+	)
+	m.forEach(numSet, func(_ uint32, msg *store.Message) {
+		if copyErr != nil {
+			return
+		}
+		copied, err := m.store.CopyMessage(msg.ID, dest.ID)
+		if err != nil {
+			copyErr = err
+			return
+		}
+		sourceUIDs.AddNum(imap.UID(msg.UID))
+		destUIDs.AddNum(imap.UID(copied.UID))
+	})
+	if copyErr != nil {
+		return nil, copyErr
+	}
+	return &imap.CopyData{
+		UIDValidity: dest.UIDValidity,
+		SourceUIDs:  sourceUIDs,
+		DestUIDs:    destUIDs,
+	}, nil
+}
+
 // expunge removes every \Deleted message in scope (all of them, or just
 // those in uids for a UID EXPUNGE). The actual EXPUNGE responses are
 // flushed to the client by the framework's post-command poll.

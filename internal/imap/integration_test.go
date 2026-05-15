@@ -18,6 +18,7 @@ import (
 
 	goimap "github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
+	"github.com/emersion/go-sasl"
 
 	"github.com/parisxmas/OxiMail/internal/imap"
 	"github.com/parisxmas/OxiMail/internal/itest"
@@ -218,6 +219,107 @@ func TestIMAP(t *testing.T) {
 		}
 		if data.NumMessages != 0 {
 			t.Fatalf("INBOX NumMessages = %d after expunge, want 0", data.NumMessages)
+		}
+	})
+
+	t.Run("AUTHENTICATE PLAIN", func(t *testing.T) {
+		authC := dial(t, addr)
+		defer authC.Close()
+		if err := authC.Authenticate(sasl.NewPlainClient("", testAddr, testPassword)); err != nil {
+			t.Fatalf("authenticate: %v", err)
+		}
+		// Once authenticated via SASL, the session is in the
+		// authenticated state — basic commands work.
+		if _, err := authC.Select("INBOX", nil).Wait(); err != nil {
+			t.Fatalf("select after AUTHENTICATE: %v", err)
+		}
+	})
+
+	t.Run("AUTHENTICATE PLAIN rejects a bad password", func(t *testing.T) {
+		authC := dial(t, addr)
+		defer authC.Close()
+		if err := authC.Authenticate(sasl.NewPlainClient("", testAddr, "wrong-password")); err == nil {
+			t.Fatal("AUTHENTICATE with a bad password succeeded, want rejection")
+		}
+	})
+
+	t.Run("COPY into another mailbox", func(t *testing.T) {
+		// INBOX is empty after the EXPUNGE subtest. Append a fresh
+		// message that the next subtest can also rely on.
+		body := []byte("From: x@y.test\r\nTo: " + testAddr + "\r\n" +
+			"Subject: to be copied\r\n\r\nhi\r\n")
+		ac := c.Append("INBOX", int64(len(body)), nil)
+		if _, err := ac.Write(body); err != nil {
+			t.Fatalf("append write: %v", err)
+		}
+		if err := ac.Close(); err != nil {
+			t.Fatalf("append close: %v", err)
+		}
+		if _, err := ac.Wait(); err != nil {
+			t.Fatalf("append wait: %v", err)
+		}
+
+		if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+			t.Fatalf("select INBOX: %v", err)
+		}
+
+		data, err := c.Copy(goimap.SeqSetNum(1), "Archive").Wait()
+		if err != nil {
+			t.Fatalf("copy: %v", err)
+		}
+		if data == nil || len(data.SourceUIDs) == 0 || len(data.DestUIDs) == 0 {
+			t.Fatalf("CopyData missing UIDs: %+v", data)
+		}
+
+		// Archive now contains the copy.
+		sel, err := c.Select("Archive", nil).Wait()
+		if err != nil {
+			t.Fatalf("select Archive: %v", err)
+		}
+		if sel.NumMessages != 1 {
+			t.Errorf("Archive NumMessages = %d, want 1", sel.NumMessages)
+		}
+	})
+
+	t.Run("CREATE / RENAME / DELETE a user mailbox", func(t *testing.T) {
+		if err := c.Create("TempA", nil).Wait(); err != nil {
+			t.Fatalf("create TempA: %v", err)
+		}
+		if err := c.Rename("TempA", "TempB", nil).Wait(); err != nil {
+			t.Fatalf("rename TempA -> TempB: %v", err)
+		}
+
+		boxes, err := c.List("", "*", nil).Collect()
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		var hasA, hasB bool
+		for _, b := range boxes {
+			if b.Mailbox == "TempA" {
+				hasA = true
+			}
+			if b.Mailbox == "TempB" {
+				hasB = true
+			}
+		}
+		if hasA || !hasB {
+			t.Errorf("after rename: hasA=%v hasB=%v (want false / true)", hasA, hasB)
+		}
+
+		if err := c.Delete("TempB").Wait(); err != nil {
+			t.Fatalf("delete TempB: %v", err)
+		}
+		boxes, _ = c.List("", "*", nil).Collect()
+		for _, b := range boxes {
+			if b.Mailbox == "TempB" {
+				t.Error("TempB still listed after delete")
+			}
+		}
+	})
+
+	t.Run("DELETE INBOX is refused", func(t *testing.T) {
+		if err := c.Delete("INBOX").Wait(); err == nil {
+			t.Error("DELETE INBOX succeeded, should be refused")
 		}
 	})
 }

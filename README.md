@@ -17,8 +17,7 @@ layered spam pipeline — backed entirely by **OxiDB**.
 > DKIM keys; outbound mail is DKIM-signed by the delivery queue, which
 > also returns a bounce to the sender on permanent failure. Observability
 > is wired up: structured logging via slog, Prometheus metrics, and
-> liveness / readiness probes. The IMAP server still stubs COPY and
-> mailbox DELETE / RENAME. See "Roadmap" below.
+> liveness / readiness probes. See "Roadmap" below.
 
 ## Architecture
 
@@ -186,9 +185,9 @@ layer end to end:
 - **smtp** — a real SMTP client delivering into a mailbox, recipient
   rejection, (submission) authenticated send splitting local delivery
   from queued relay, and STARTTLS / implicit-TLS submission.
-- **imap** — a real IMAP client doing LOGIN / LIST / SELECT / FETCH /
-  STORE / APPEND / EXPUNGE / SEARCH, over plaintext and over
-  STARTTLS / IMAPS.
+- **imap** — a real IMAP client doing LOGIN, AUTHENTICATE (SASL PLAIN),
+  LIST, SELECT, FETCH, STORE, APPEND, EXPUNGE, SEARCH, COPY, and
+  CREATE / RENAME / DELETE — over plaintext and over STARTTLS / IMAPS.
 - **webmail** — a real HTTP client doing login, mailbox / message
   listing, fetching a parsed message, sending, flag changes, move and
   delete, and the auth / cross-account access rejections.
@@ -216,9 +215,9 @@ skipped.
    an integration test against a live `oxidb-server`.~~ *Done.*
 2. ~~Inbound SMTP (MX) on `emersion/go-smtp` — spam-pipeline call,
    recipient resolution, delivery into mailboxes.~~ *Done.*
-3. ~~IMAP on `emersion/go-imap/v2` — LOGIN, LIST, SELECT, STATUS, FETCH,
-   STORE, APPEND, EXPUNGE, SEARCH.~~ *Done.* Still to do: COPY, mailbox
-   DELETE / RENAME, SASL AUTHENTICATE.
+3. ~~IMAP on `emersion/go-imap/v2` — LOGIN, AUTHENTICATE (SASL PLAIN),
+   LIST, SELECT, STATUS, FETCH, STORE, APPEND, EXPUNGE, SEARCH, COPY,
+   CREATE / DELETE / RENAME / SUBSCRIBE.~~ *Done.*
 4. ~~Submission (port 587) + the outbound delivery queue — SMTP AUTH,
    local/remote recipient split, MX delivery with retry/backoff.~~
    *Done.*
@@ -243,4 +242,6 @@ skipped.
     metrics (`/metrics`), and liveness / readiness probes on a
     dedicated `:9090`.~~ *Done.*
 
-Beyond the roadmap: IMAP COPY / mailbox DELETE / RENAME / SASL.
+All roadmap items are done. Remaining loose ends — small, opt-in — are
+listed under each item's "Still to do" (the webmail polish, the CLI's
+password-change / domain delete).

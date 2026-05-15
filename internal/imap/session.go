@@ -9,6 +9,7 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
+	"github.com/emersion/go-sasl"
 
 	"github.com/parisxmas/OxiMail/internal/observability"
 	"github.com/parisxmas/OxiMail/internal/store"
@@ -25,7 +26,10 @@ type session struct {
 	mbox    *selectedMailbox // set by Select; nil in the authenticated state
 }
 
-var _ imapserver.Session = (*session)(nil)
+var (
+	_ imapserver.Session     = (*session)(nil)
+	_ imapserver.SessionSASL = (*session)(nil)
+)
 
 // notImplemented is the error returned for commands OxiMail does not
 // support yet.
@@ -75,6 +79,30 @@ func (s *session) Login(username, password string) error {
 	return nil
 }
 
+// AuthenticateMechanisms advertises the SASL mechanisms available
+// through the IMAP AUTHENTICATE command.
+func (s *session) AuthenticateMechanisms() []string {
+	return []string{sasl.Plain}
+}
+
+// Authenticate handles SASL authentication. Only PLAIN is offered.
+func (s *session) Authenticate(string) (sasl.Server, error) {
+	return sasl.NewPlainServer(func(identity, username, password string) error {
+		if identity != "" && identity != username {
+			observability.Logins.WithLabelValues("imap", "fail").Inc()
+			return imapserver.ErrAuthFailed
+		}
+		acc, err := s.store.Authenticate(username, password)
+		if err != nil {
+			observability.Logins.WithLabelValues("imap", "fail").Inc()
+			return imapserver.ErrAuthFailed
+		}
+		observability.Logins.WithLabelValues("imap", "ok").Inc()
+		s.account = acc
+		return nil
+	}), nil
+}
+
 // --- Authenticated state ---
 
 func (s *session) Select(name string, _ *imap.SelectOptions) (*imap.SelectData, error) {
@@ -121,14 +149,59 @@ func (s *session) Create(name string, _ *imap.CreateOptions) error {
 	return err
 }
 
-func (s *session) Delete(string) error {
-	// TODO: needs a store.DeleteMailbox that cascades messages + blobs.
-	return notImplemented("DELETE")
+func (s *session) Delete(name string) error {
+	name = normalizeMailbox(name)
+	if name == "INBOX" {
+		return &imap.Error{
+			Type: imap.StatusResponseTypeNo,
+			Code: imap.ResponseCodeCannot,
+			Text: "INBOX cannot be deleted",
+		}
+	}
+	mb, err := s.store.GetMailboxByName(s.account.ID, name)
+	if errors.Is(err, store.ErrNotFound) {
+		return noSuchMailbox()
+	}
+	if err != nil {
+		return err
+	}
+	// Drop the in-memory snapshot if it is the mailbox going away.
+	if s.mbox != nil && s.mbox.dbID == mb.ID {
+		s.mbox.Close()
+		s.mbox = nil
+	}
+	return s.store.DeleteMailbox(mb.ID)
 }
 
-func (s *session) Rename(string, string, *imap.RenameOptions) error {
-	// TODO: needs a store.RenameMailbox.
-	return notImplemented("RENAME")
+func (s *session) Rename(name, newName string, _ *imap.RenameOptions) error {
+	name = normalizeMailbox(name)
+	newName = strings.TrimRight(normalizeMailbox(newName), string(mailboxDelim))
+	if name == "INBOX" {
+		// RFC 3501's "rename INBOX" semantics are weird (move messages,
+		// keep INBOX itself, empty). Leave it unsupported for now.
+		return &imap.Error{
+			Type: imap.StatusResponseTypeNo,
+			Code: imap.ResponseCodeCannot,
+			Text: "renaming INBOX is not supported",
+		}
+	}
+	mb, err := s.store.GetMailboxByName(s.account.ID, name)
+	if errors.Is(err, store.ErrNotFound) {
+		return noSuchMailbox()
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := s.store.GetMailboxByName(s.account.ID, newName); err == nil {
+		return &imap.Error{
+			Type: imap.StatusResponseTypeNo,
+			Code: imap.ResponseCodeAlreadyExists,
+			Text: "Mailbox already exists",
+		}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	return s.store.RenameMailbox(mb.ID, newName)
 }
 
 func (s *session) Subscribe(name string) error {
@@ -328,9 +401,28 @@ func (s *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriteria,
 	return s.mbox.search(kind, criteria), nil
 }
 
-func (s *session) Copy(imap.NumSet, string) (*imap.CopyData, error) {
-	// TODO: copy messages (metadata + body blob) into another mailbox.
-	return nil, notImplemented("COPY")
+func (s *session) Copy(numSet imap.NumSet, dest string) (*imap.CopyData, error) {
+	if s.mbox == nil {
+		return nil, notSelected()
+	}
+	destMb, err := s.store.GetMailboxByName(s.account.ID, normalizeMailbox(dest))
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, &imap.Error{
+			Type: imap.StatusResponseTypeNo,
+			Code: imap.ResponseCodeTryCreate,
+			Text: "No such mailbox",
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if s.mbox.dbID == destMb.ID {
+		return nil, &imap.Error{
+			Type: imap.StatusResponseTypeNo,
+			Text: "Source and destination mailboxes are identical",
+		}
+	}
+	return s.mbox.copy(numSet, destMb)
 }
 
 // Close releases the session. It is the connection-teardown hook, not

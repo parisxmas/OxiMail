@@ -13,8 +13,6 @@
 // TODO: real-time cross-connection updates (IDLE seeing freshly
 // delivered mail) need either polling OxiDB or an OxiMem notification
 // channel.
-// TODO: SASL AUTHENTICATE — only LOGIN today.
-// TODO: SEARCH, COPY, and mailbox DELETE / RENAME are not implemented.
 //
 // When a TLS configuration is supplied, STARTTLS is advertised on the
 // plaintext listener; NewTLS additionally serves implicit TLS (IMAPS).
