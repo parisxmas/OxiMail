@@ -28,6 +28,9 @@ type Message struct {
 	Subject      string   `json:"subject"`
 	FromAddr     string   `json:"from_addr"`
 	ReceivedAt   string   `json:"received_at"`
+	// ModSeq is the per-mailbox mod-sequence value (RFC 7162). Bumped
+	// to a fresh NextModSeq on every flag change and on append.
+	ModSeq uint64 `json:"modseq,omitempty"`
 }
 
 // IncomingMessage is the input to AppendMessage: the raw bytes plus the
@@ -70,6 +73,10 @@ func (s *Store) AppendMessage(mailboxID uint64, in IncomingMessage) (*Message, e
 	if err != nil {
 		return nil, err
 	}
+	modSeq, err := s.NextModSeq(mailboxID)
+	if err != nil {
+		return nil, err
+	}
 
 	key, err := newBlobKey()
 	if err != nil {
@@ -95,6 +102,7 @@ func (s *Store) AppendMessage(mailboxID uint64, in IncomingMessage) (*Message, e
 		Subject:      in.Subject,
 		FromAddr:     in.FromAddr,
 		ReceivedAt:   nowRFC3339(),
+		ModSeq:       modSeq,
 	}
 	if msg.Flags == nil {
 		msg.Flags = []string{}
@@ -201,33 +209,61 @@ func (s *Store) SetFlags(messageID uint64, flags []string) error {
 	if flags == nil {
 		flags = []string{}
 	}
-	return s.modifyFlags(messageID, map[string]any{"$set": map[string]any{"flags": flags}})
+	return s.modifyFlags(messageID, func(set map[string]any) {
+		set["flags"] = flags
+	})
 }
 
 // AddFlags adds flags to a message (IMAP STORE +FLAGS).
 func (s *Store) AddFlags(messageID uint64, flags ...string) error {
-	for _, f := range flags {
-		if err := s.modifyFlags(messageID, map[string]any{"$addToSet": map[string]any{"flags": f}}); err != nil {
-			return err
-		}
+	msg, err := s.GetMessage(messageID)
+	if err != nil {
+		return err
 	}
-	return nil
+	merged := unionStrings(msg.Flags, flags)
+	return s.modifyFlags(messageID, func(set map[string]any) {
+		set["flags"] = merged
+	})
 }
 
 // RemoveFlags removes flags from a message (IMAP STORE -FLAGS).
 func (s *Store) RemoveFlags(messageID uint64, flags ...string) error {
-	for _, f := range flags {
-		if err := s.modifyFlags(messageID, map[string]any{"$pull": map[string]any{"flags": f}}); err != nil {
-			return err
-		}
+	msg, err := s.GetMessage(messageID)
+	if err != nil {
+		return err
 	}
-	return nil
+	pruned := minusStrings(msg.Flags, flags)
+	return s.modifyFlags(messageID, func(set map[string]any) {
+		set["flags"] = pruned
+	})
 }
 
-// modifyFlags applies a flag update atomically via find_and_modify, so
-// concurrent STORE commands on the same message cannot lose a change.
-func (s *Store) modifyFlags(messageID uint64, update map[string]any) error {
-	doc, err := s.db.FindAndModify(CollMessages, map[string]any{"_id": messageID}, update)
+// modifyFlags applies a flag update atomically via find_and_modify
+// AND stamps a fresh mod-sequence (RFC 7162) so concurrent STORE
+// commands on the same message cannot lose a change and CONDSTORE
+// clients see every transition reflected in MODSEQ.
+//
+// We use $set with the post-mutation flag list (computed by the
+// caller) rather than $addToSet / $pull so that the new modseq and
+// the new flag value land in one find_and_modify call. OxiDB does
+// not promise atomicity across multiple operators in a single
+// document update.
+func (s *Store) modifyFlags(messageID uint64, build func(set map[string]any)) error {
+	msg, err := s.GetMessage(messageID)
+	if err != nil {
+		return err
+	}
+	modSeq, err := s.NextModSeq(msg.MailboxID)
+	if err != nil {
+		return err
+	}
+	set := map[string]any{"modseq": modSeq}
+	build(set)
+	doc, err := s.db.FindAndModify(
+		CollMessages,
+		map[string]any{"_id": messageID},
+		map[string]any{"$set": set},
+	)
 	if err != nil {
 		return fmt.Errorf("store: modify flags of message %d: %w", messageID, err)
 	}
@@ -235,6 +271,41 @@ func (s *Store) modifyFlags(messageID uint64, update map[string]any) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// unionStrings returns a + b with duplicates removed (a's order
+// preserved, b's new entries appended).
+func unionStrings(a, b []string) []string {
+	out := append([]string(nil), a...)
+	seen := make(map[string]bool, len(out))
+	for _, v := range out {
+		seen[v] = true
+	}
+	for _, v := range b {
+		if !seen[v] {
+			out = append(out, v)
+			seen[v] = true
+		}
+	}
+	if out == nil {
+		return []string{}
+	}
+	return out
+}
+
+// minusStrings returns a with every element of b removed.
+func minusStrings(a, b []string) []string {
+	drop := make(map[string]bool, len(b))
+	for _, v := range b {
+		drop[v] = true
+	}
+	out := make([]string, 0, len(a))
+	for _, v := range a {
+		if !drop[v] {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // MoveMessage moves a message into another of the same account's
@@ -262,10 +333,18 @@ func (s *Store) MoveMessage(messageID, destMailboxID uint64) (*Message, error) {
 	if err != nil {
 		return nil, err
 	}
+	modSeq, err := s.NextModSeq(destMailboxID)
+	if err != nil {
+		return nil, err
+	}
 	doc, err := s.db.FindAndModify(
 		CollMessages,
 		map[string]any{"_id": messageID},
-		map[string]any{"$set": map[string]any{"mailbox_id": destMailboxID, "uid": uid}},
+		map[string]any{"$set": map[string]any{
+			"mailbox_id": destMailboxID,
+			"uid":        uid,
+			"modseq":     modSeq,
+		}},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: move message %d: %w", messageID, err)
@@ -279,6 +358,7 @@ func (s *Store) MoveMessage(messageID, destMailboxID uint64) (*Message, error) {
 	notifier.Default.Notify(msg.MailboxID)
 	msg.MailboxID = destMailboxID
 	msg.UID = uid
+	msg.ModSeq = modSeq
 	return msg, nil
 }
 
@@ -317,6 +397,11 @@ func (s *Store) CopyMessage(messageID, destMailboxID uint64) (*Message, error) {
 		_ = s.db.DeleteObject(BlobBucket, key)
 		return nil, err
 	}
+	modSeq, err := s.NextModSeq(destMailboxID)
+	if err != nil {
+		_ = s.db.DeleteObject(BlobBucket, key)
+		return nil, err
+	}
 
 	dst := &Message{
 		MailboxID:    destMailboxID,
@@ -330,6 +415,7 @@ func (s *Store) CopyMessage(messageID, destMailboxID uint64) (*Message, error) {
 		Subject:      src.Subject,
 		FromAddr:     src.FromAddr,
 		ReceivedAt:   nowRFC3339(),
+		ModSeq:       modSeq,
 	}
 	if dst.Flags == nil {
 		dst.Flags = []string{}

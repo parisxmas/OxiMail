@@ -1,3 +1,15 @@
+diff --git a/imapserver/capability.go b/imapserver/capability.go
+index 37da104..41cf539 100644
+--- a/imapserver/capability.go
++++ b/imapserver/capability.go
+@@ -93,6 +93,7 @@ func (c *Conn) availableCaps() []imap.Cap {
+ 			imap.CapCreateSpecialUse,
+ 			imap.CapLiteralPlus,
+ 			imap.CapUnauthenticate,
++			imap.CapCondStore, // RFC 7162 — see imapserver/{fetch,store,search,select,status}.go
+ 		})
+ 
+ 		if appendLimitSession, ok := c.session.(SessionAppendLimit); ok {
 diff --git a/imapserver/fetch.go b/imapserver/fetch.go
 index 48605c2..b063b8a 100644
 --- a/imapserver/fetch.go

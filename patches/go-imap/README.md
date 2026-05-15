@@ -28,6 +28,12 @@ emit MODSEQ values back to the client.
   `SelectData.HighestModSeq != 0` (RFC 7162 §3.1.2.1).
 - `imapserver/status.go` — recognise the `HIGHESTMODSEQ` STATUS data
   item and emit it in the response (RFC 7162 §3.1.2.2).
+- `imapserver/capability.go` — add `imap.CapCondStore` to the
+  cross-rev backend-supported allowlist so an operator's
+  `Options.Caps` map containing `CapCondStore` is actually
+  advertised. Without this, the capability is silently dropped by
+  the framework's filter and clients never see it — even though
+  the protocol-level wire support is in place.
 
 ## Scope (and what's deliberately out)
 

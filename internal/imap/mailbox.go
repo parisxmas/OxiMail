@@ -140,7 +140,23 @@ func (m *selectedMailbox) selectData() *imap.SelectData {
 		UIDNext:           imap.UID(m.uidNext),
 		UIDValidity:       m.uidValidity,
 		FirstUnseenSeqNum: m.firstUnseenSeqNumLocked(),
+		HighestModSeq:     m.highestModSeqLocked(),
 	}
+}
+
+// highestModSeqLocked returns the highest mod-sequence across the
+// snapshot. The mailbox-level counter is the authoritative number,
+// but for the SELECT reply we use the snapshot's max so it matches
+// what subsequent FETCH responses will report. The caller must hold
+// m.mu.
+func (m *selectedMailbox) highestModSeqLocked() uint64 {
+	var max uint64
+	for i := range m.msgs {
+		if m.msgs[i].ModSeq > max {
+			max = m.msgs[i].ModSeq
+		}
+	}
+	return max
 }
 
 // flagsLocked is the set of flags present on the snapshot's messages,
@@ -277,12 +293,25 @@ func (m *selectedMailbox) fetch(w *imapserver.FetchWriter, numSet imap.NumSet, o
 		if ferr != nil {
 			return
 		}
+		// RFC 7162 §3.2: CHANGEDSINCE skips messages whose mod-seq
+		// is at or below the floor. Mod-seq zero on the message
+		// (legacy data from before CONDSTORE was enabled) is
+		// treated as "older than anything" and is filtered out.
+		if options.ChangedSince != 0 && msg.ModSeq <= options.ChangedSince {
+			return
+		}
 		if markSeen && !hasFlag(msg.Flags, string(imap.FlagSeen)) {
 			if err := m.store.AddFlags(msg.ID, string(imap.FlagSeen)); err != nil {
 				ferr = err
 				return
 			}
 			msg.Flags = append(msg.Flags, string(imap.FlagSeen))
+			// AddFlags bumped the message's mod-seq; the local copy
+			// has the previous value. Refresh by re-reading from the
+			// store so subsequent WriteModSeq emits the new value.
+			if fresh, err := m.store.GetMessage(msg.ID); err == nil {
+				msg.ModSeq = fresh.ModSeq
+			}
 			m.tracker.QueueMessageFlags(seqNum, imap.UID(msg.UID), toIMAPFlags(msg.Flags), nil)
 		}
 		rw := w.CreateMessage(m.session.EncodeSeqNum(seqNum))
@@ -297,6 +326,9 @@ func (m *selectedMailbox) writeMessage(w *imapserver.FetchResponseWriter, msg *s
 	w.WriteUID(imap.UID(msg.UID))
 	if options.Flags {
 		w.WriteFlags(toIMAPFlags(msg.Flags))
+	}
+	if options.ModSeq {
+		w.WriteModSeq(msg.ModSeq)
 	}
 	if options.InternalDate {
 		w.WriteInternalDate(parseTime(msg.InternalDate))
@@ -360,10 +392,23 @@ func (m *selectedMailbox) writeMessage(w *imapserver.FetchResponseWriter, msg *s
 
 // storeFlags applies a STORE flag update to every message in numSet,
 // persisting it and queueing the change for the session's next poll.
-func (m *selectedMailbox) storeFlags(w *imapserver.FetchWriter, numSet imap.NumSet, sf *imap.StoreFlags) error {
-	var serr error
+// When opts.UnchangedSince is non-zero, messages whose mod-sequence
+// has advanced past the floor are NOT updated and are returned to the
+// client via a MODIFIED response code (RFC 7162 §3.1.3).
+func (m *selectedMailbox) storeFlags(w *imapserver.FetchWriter, numSet imap.NumSet, sf *imap.StoreFlags, opts *imap.StoreOptions) error {
+	var (
+		serr     error
+		applied  []uint32 // sequence numbers that did get updated
+		modified imap.UIDSet
+	)
 	m.forEach(numSet, func(seqNum uint32, msg *store.Message) {
 		if serr != nil {
+			return
+		}
+		if opts != nil && opts.UnchangedSince != 0 && msg.ModSeq > opts.UnchangedSince {
+			// The message has moved on since the client looked; do
+			// not apply the change. Report its UID under MODIFIED.
+			modified.AddNum(imap.UID(msg.UID))
 			return
 		}
 		newFlags, err := m.applyFlags(msg, sf)
@@ -372,17 +417,46 @@ func (m *selectedMailbox) storeFlags(w *imapserver.FetchWriter, numSet imap.NumS
 			return
 		}
 		msg.Flags = newFlags
+		// applyFlags bumped the message's modseq; refresh the local
+		// copy so the post-store FETCH echoes the new value.
+		if fresh, err := m.store.GetMessage(msg.ID); err == nil {
+			msg.ModSeq = fresh.ModSeq
+		}
 		m.tracker.QueueMessageFlags(seqNum, imap.UID(msg.UID), toIMAPFlags(newFlags), m.session)
+		applied = append(applied, seqNum)
 	})
 	if serr != nil {
 		return serr
 	}
-	// Unless the client asked for a silent STORE, echo the new flags
-	// back as a FETCH response.
-	if !sf.Silent {
-		return m.fetch(w, numSet, &imap.FetchOptions{UID: true, Flags: true})
+	// Echo the new flags (and the new MODSEQ when CONDSTORE is in
+	// play) for the messages we actually updated, unless the client
+	// asked for a silent STORE.
+	if !sf.Silent && len(applied) > 0 {
+		fetchOpts := &imap.FetchOptions{UID: true, Flags: true}
+		if opts != nil && opts.UnchangedSince != 0 {
+			fetchOpts.ModSeq = true
+		}
+		if err := m.fetch(w, appliedToNumSet(applied), fetchOpts); err != nil {
+			return err
+		}
+	}
+	if len(modified) > 0 {
+		return &imap.Error{
+			Type: imap.StatusResponseTypeOK,
+			Code: imap.ResponseCode("MODIFIED " + modified.String()),
+			Text: "Some messages have changed since UNCHANGEDSINCE",
+		}
 	}
 	return nil
+}
+
+// appliedToNumSet converts a sequence-number list to an imap.SeqSet.
+func appliedToNumSet(seqs []uint32) imap.NumSet {
+	var ss imap.SeqSet
+	for _, n := range seqs {
+		ss.AddNum(n)
+	}
+	return ss
 }
 
 // applyFlags persists one message's flag change and returns the

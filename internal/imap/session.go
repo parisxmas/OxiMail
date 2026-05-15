@@ -331,6 +331,11 @@ func (s *session) Status(name string, options *imap.StatusOptions) (*imap.Status
 		}
 		data.Size = &sz
 	}
+	if options.HighestModSeq {
+		// The authoritative value is the mailbox-level counter; we
+		// take it from the freshly-loaded Mailbox above.
+		data.HighestModSeq = mb.HighestModSeq
+	}
 	return data, nil
 }
 
@@ -395,11 +400,11 @@ func (s *session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *
 	return s.mbox.fetch(w, numSet, options)
 }
 
-func (s *session) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags *imap.StoreFlags, _ *imap.StoreOptions) error {
+func (s *session) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags *imap.StoreFlags, opts *imap.StoreOptions) error {
 	if s.mbox == nil {
 		return notSelected()
 	}
-	return s.mbox.storeFlags(w, numSet, flags)
+	return s.mbox.storeFlags(w, numSet, flags, opts)
 }
 
 func (s *session) Expunge(w *imapserver.ExpungeWriter, uids *imap.UIDSet) error {

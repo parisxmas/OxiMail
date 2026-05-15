@@ -18,8 +18,13 @@ type Mailbox struct {
 	// UIDValidity is fixed at creation. If a client ever sees it change,
 	// it must discard its cached view of the mailbox.
 	UIDValidity uint32 `json:"uidvalidity"`
-	Subscribed  bool   `json:"subscribed"`
-	CreatedAt   string `json:"created_at"`
+	// HighestModSeq is the highest mod-sequence value seen in this
+	// mailbox (RFC 7162 CONDSTORE). Bumped via NextModSeq on every
+	// flag change and every message append; returned as
+	// HIGHESTMODSEQ in SELECT / STATUS responses.
+	HighestModSeq uint64 `json:"highest_modseq"`
+	Subscribed    bool   `json:"subscribed"`
+	CreatedAt     string `json:"created_at"`
 }
 
 // defaultMailboxes are created for every new account. Junk holds
@@ -30,12 +35,13 @@ var defaultMailboxes = []string{"INBOX", "Sent", "Drafts", "Trash", "Archive", "
 // UIDValidity is set once, to the creation time.
 func (s *Store) CreateMailbox(accountID uint64, name string) (*Mailbox, error) {
 	mb := &Mailbox{
-		AccountID:   accountID,
-		Name:        name,
-		UIDNext:     1,
-		UIDValidity: uint32(time.Now().Unix()),
-		Subscribed:  true,
-		CreatedAt:   nowRFC3339(),
+		AccountID:     accountID,
+		Name:          name,
+		UIDNext:       1,
+		UIDValidity:   uint32(time.Now().Unix()),
+		HighestModSeq: 0,
+		Subscribed:    true,
+		CreatedAt:     nowRFC3339(),
 	}
 	doc, err := encodeDoc(mb)
 	if err != nil {
@@ -208,4 +214,32 @@ func (s *Store) NextUID(mailboxID uint64) (uint32, error) {
 		return 0, fmt.Errorf("store: mailbox %d has invalid uidnext %v", mailboxID, doc["uidnext"])
 	}
 	return uint32(next) - 1, nil
+}
+
+// NextModSeq atomically bumps a mailbox's HighestModSeq and returns
+// the new value. Like NextUID, every increment lands as one
+// find_and_modify so concurrent flag changes cannot lose a bump. The
+// returned value is the one to write on the affected message — and
+// the new HighestModSeq the mailbox is at.
+//
+// RFC 7162 §2.1.2 requires the mod-sequence to be a positive 63-bit
+// integer that never decreases. Burning one on a crash is harmless,
+// same as for UID.
+func (s *Store) NextModSeq(mailboxID uint64) (uint64, error) {
+	doc, err := s.db.FindAndModify(
+		CollMailboxes,
+		map[string]any{"_id": mailboxID},
+		map[string]any{"$inc": map[string]any{"highest_modseq": 1}},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("store: allocate mod-seq for mailbox %d: %w", mailboxID, err)
+	}
+	if doc == nil {
+		return 0, fmt.Errorf("store: mailbox %d not found", mailboxID)
+	}
+	next, ok := doc["highest_modseq"].(float64)
+	if !ok || next < 1 {
+		return 0, fmt.Errorf("store: mailbox %d has invalid highest_modseq %v", mailboxID, doc["highest_modseq"])
+	}
+	return uint64(next), nil
 }

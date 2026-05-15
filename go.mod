@@ -35,3 +35,9 @@ require (
 replace github.com/parisxmas/OxiDB/go/oxidb => ../docdb/go/oxidb
 
 replace github.com/parisxmas/OxiDB/go/oxiwire => ../docdb/go/oxiwire
+
+// go-imap runs from a sibling fork with the CONDSTORE server-side
+// patch from patches/go-imap/ applied on top of upstream
+// v2.0.0-beta.8. Drop this replace once the patch lands upstream and
+// a release is cut.
+replace github.com/emersion/go-imap/v2 => ../go-imap

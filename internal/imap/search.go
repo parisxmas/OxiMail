@@ -38,6 +38,11 @@ func (m *selectedMailbox) search(kind imapserver.NumKind, criteria *imap.SearchC
 			continue
 		}
 		uidSet.AddNum(imap.UID(msg.UID))
+		// RFC 7162 §3.1.5: a search that references MODSEQ returns
+		// the highest mod-sequence across the matched messages.
+		if msg.ModSeq > data.ModSeq {
+			data.ModSeq = msg.ModSeq
+		}
 
 		var num uint32
 		switch kind {
@@ -124,6 +129,12 @@ func (m *selectedMailbox) matches(msg *store.Message, seqNum uint32, c *imap.Sea
 		return false
 	}
 	if c.Smaller != 0 && msg.SizeBytes >= c.Smaller {
+		return false
+	}
+
+	// CONDSTORE: only messages whose mod-sequence is at or above the
+	// requested floor (RFC 7162 §3.1.5).
+	if c.ModSeq != nil && msg.ModSeq < c.ModSeq.ModSeq {
 		return false
 	}
 

@@ -597,6 +597,201 @@ func TestIMAPSearch(t *testing.T) {
 	})
 }
 
+// TestIMAPCondStore covers the RFC 7162 §3 CONDSTORE round-trip end
+// to end: server advertises CONDSTORE, SELECT carries a HIGHESTMODSEQ
+// response code, FETCH MODSEQ surfaces the per-message mod-sequence,
+// FETCH (CHANGEDSINCE n) filters out older messages, STORE
+// (UNCHANGEDSINCE n) refuses stale updates with a MODIFIED response,
+// and STATUS HIGHESTMODSEQ reports the mailbox-wide counter.
+func TestIMAPCondStore(t *testing.T) {
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	hash, err := store.HashPassword(testPassword)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	acc, err := st.CreateAccount(testAddr, hash, 0)
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if err := st.EnsureDefaultMailboxes(acc.ID); err != nil {
+		t.Fatalf("ensure mailboxes: %v", err)
+	}
+	inbox, err := st.GetMailboxByName(acc.ID, "INBOX")
+	if err != nil {
+		t.Fatalf("get INBOX: %v", err)
+	}
+	// Two messages seeded back-to-back; they pick up distinct
+	// mod-sequences (1 and 2) at append time.
+	seed := func(subject string) *store.Message {
+		raw := []byte("From: <s@x.test>\r\nSubject: " + subject + "\r\n\r\nbody\r\n")
+		m, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+			Raw: raw, Subject: subject, FromAddr: "s@x.test",
+		})
+		if err != nil {
+			t.Fatalf("seed %s: %v", subject, err)
+		}
+		return m
+	}
+	m1 := seed("first")
+	m2 := seed("second")
+	if m1.ModSeq == 0 || m2.ModSeq == 0 || m1.ModSeq >= m2.ModSeq {
+		t.Fatalf("expected fresh mod-seqs 1 < 2; got %d / %d", m1.ModSeq, m2.ModSeq)
+	}
+
+	addr := startIMAP(t, st, nil, false)
+	c := dial(t, addr)
+	t.Cleanup(func() { _ = c.Close() })
+	if err := c.Login(testAddr, testPassword).Wait(); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	t.Run("server advertises CONDSTORE", func(t *testing.T) {
+		if !c.Caps().Has(goimap.CapCondStore) {
+			t.Errorf("CAPABILITY did not include CONDSTORE: %v", c.Caps())
+		}
+	})
+
+	t.Run("SELECT reports HIGHESTMODSEQ", func(t *testing.T) {
+		sel, err := c.Select("INBOX", nil).Wait()
+		if err != nil {
+			t.Fatalf("select: %v", err)
+		}
+		if sel.HighestModSeq != m2.ModSeq {
+			t.Errorf("HIGHESTMODSEQ = %d, want %d (m2's mod-seq)", sel.HighestModSeq, m2.ModSeq)
+		}
+	})
+
+	t.Run("FETCH MODSEQ returns each message's mod-sequence", func(t *testing.T) {
+		msgs, err := c.Fetch(goimap.SeqSetNum(1, 2), &goimap.FetchOptions{ModSeq: true}).Collect()
+		if err != nil {
+			t.Fatalf("fetch: %v", err)
+		}
+		if len(msgs) != 2 {
+			t.Fatalf("got %d messages, want 2", len(msgs))
+		}
+		// msgs are ordered by sequence number; index 0 is m1.
+		if msgs[0].ModSeq == 0 || msgs[1].ModSeq == 0 {
+			t.Errorf("server returned ModSeq=0 (%d / %d)", msgs[0].ModSeq, msgs[1].ModSeq)
+		}
+		if msgs[0].ModSeq >= msgs[1].ModSeq {
+			t.Errorf("expected msg1.ModSeq < msg2.ModSeq, got %d / %d", msgs[0].ModSeq, msgs[1].ModSeq)
+		}
+	})
+
+	t.Run("FETCH CHANGEDSINCE filters out older messages", func(t *testing.T) {
+		// CHANGEDSINCE = m1.ModSeq → only m2 should come back.
+		msgs, err := c.Fetch(goimap.SeqSetNum(1, 2), &goimap.FetchOptions{
+			ModSeq:       true,
+			ChangedSince: m1.ModSeq,
+		}).Collect()
+		if err != nil {
+			t.Fatalf("fetch CHANGEDSINCE: %v", err)
+		}
+		if len(msgs) != 1 {
+			t.Fatalf("CHANGEDSINCE returned %d messages, want 1", len(msgs))
+		}
+		if msgs[0].SeqNum != 2 {
+			t.Errorf("returned seq=%d, want seq=2", msgs[0].SeqNum)
+		}
+	})
+
+	t.Run("STATUS HIGHESTMODSEQ reports the mailbox counter", func(t *testing.T) {
+		data, err := c.Status("INBOX", &goimap.StatusOptions{HighestModSeq: true}).Wait()
+		if err != nil {
+			t.Fatalf("status: %v", err)
+		}
+		if data.HighestModSeq == 0 || data.HighestModSeq < m2.ModSeq {
+			t.Errorf("STATUS HIGHESTMODSEQ = %d, want at least %d", data.HighestModSeq, m2.ModSeq)
+		}
+	})
+
+	t.Run("STORE bumps MODSEQ and echoes it in the FETCH reply", func(t *testing.T) {
+		// Pin the current count, then add \Flagged to m1 and check
+		// its mod-seq advanced.
+		fresh, err := c.Fetch(goimap.SeqSetNum(1), &goimap.FetchOptions{ModSeq: true}).Collect()
+		if err != nil || len(fresh) != 1 {
+			t.Fatalf("pre-STORE fetch: %v (%v)", fresh, err)
+		}
+		before := fresh[0].ModSeq
+		// STORE +FLAGS (\Flagged) — silent off so we get the FETCH back.
+		if err := c.Store(goimap.SeqSetNum(1), &goimap.StoreFlags{
+			Op:    goimap.StoreFlagsAdd,
+			Flags: []goimap.Flag{goimap.FlagFlagged},
+		}, nil).Close(); err != nil {
+			t.Fatalf("store: %v", err)
+		}
+		after, err := c.Fetch(goimap.SeqSetNum(1), &goimap.FetchOptions{ModSeq: true}).Collect()
+		if err != nil || len(after) != 1 {
+			t.Fatalf("post-STORE fetch: %v (%v)", after, err)
+		}
+		if after[0].ModSeq <= before {
+			t.Errorf("ModSeq did not advance: %d → %d", before, after[0].ModSeq)
+		}
+	})
+
+	t.Run("STORE UNCHANGEDSINCE refuses stale updates", func(t *testing.T) {
+		// m1's mod-seq has moved on by now. STORE UNCHANGEDSINCE 1
+		// must NOT apply the new flag — the server replies OK with
+		// a [MODIFIED <uidset>] code, which the client library
+		// treats as success (only NO/BAD become a Go error), so we
+		// verify the SIDE EFFECT: the flag is still absent.
+		if err := c.Store(goimap.SeqSetNum(1), &goimap.StoreFlags{
+			Op:    goimap.StoreFlagsAdd,
+			Flags: []goimap.Flag{goimap.FlagAnswered},
+		}, &goimap.StoreOptions{UnchangedSince: 1}).Close(); err != nil {
+			t.Fatalf("store: %v", err)
+		}
+		got, err := c.Fetch(goimap.SeqSetNum(1), &goimap.FetchOptions{Flags: true}).Collect()
+		if err != nil || len(got) != 1 {
+			t.Fatalf("re-fetch: %v (%v)", got, err)
+		}
+		for _, f := range got[0].Flags {
+			if f == goimap.FlagAnswered {
+				t.Error("UNCHANGEDSINCE 1 should have refused the update; \\Answered is set")
+			}
+		}
+	})
+
+	t.Run("STORE UNCHANGEDSINCE applies when the floor is current", func(t *testing.T) {
+		// Read m1's actual mod-seq and pass it as the floor — the
+		// update is then in-bounds and must take effect.
+		got, err := c.Fetch(goimap.SeqSetNum(1), &goimap.FetchOptions{ModSeq: true}).Collect()
+		if err != nil || len(got) != 1 {
+			t.Fatalf("pre-store fetch: %v (%v)", got, err)
+		}
+		floor := got[0].ModSeq
+		if err := c.Store(goimap.SeqSetNum(1), &goimap.StoreFlags{
+			Op:    goimap.StoreFlagsAdd,
+			Flags: []goimap.Flag{goimap.FlagAnswered},
+		}, &goimap.StoreOptions{UnchangedSince: floor}).Close(); err != nil {
+			t.Fatalf("store: %v", err)
+		}
+		got, err = c.Fetch(goimap.SeqSetNum(1), &goimap.FetchOptions{Flags: true}).Collect()
+		if err != nil || len(got) != 1 {
+			t.Fatalf("post-store fetch: %v (%v)", got, err)
+		}
+		var sawAnswered bool
+		for _, f := range got[0].Flags {
+			if f == goimap.FlagAnswered {
+				sawAnswered = true
+			}
+		}
+		if !sawAnswered {
+			t.Error("UNCHANGEDSINCE with the current mod-seq should have applied the flag")
+		}
+	})
+}
+
 // TestIMAPIdle covers cross-connection IDLE: a client IDLE'ing on INBOX
 // receives an unsolicited EXISTS when *another* writer — here, a direct
 // store.AppendMessage — drops a message into the same mailbox. The wire
