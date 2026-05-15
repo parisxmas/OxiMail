@@ -30,6 +30,7 @@ import (
 	gosmtp "github.com/emersion/go-smtp"
 
 	"github.com/parisxmas/OxiMail/internal/observability"
+	"github.com/parisxmas/OxiMail/internal/sieve"
 	"github.com/parisxmas/OxiMail/internal/spam"
 	"github.com/parisxmas/OxiMail/internal/srs"
 	"github.com/parisxmas/OxiMail/internal/store"
@@ -357,8 +358,17 @@ func (s *session) Data(r io.Reader) error {
 	}
 	var failed int
 	for acctID := range s.rcptAccts {
-		if _, err := s.backend.store.DeliverTo(acctID, folder, in); err != nil {
-			log.Printf("smtp: deliver to account %d (%s) failed: %v", acctID, folder, err)
+		// Per-account Sieve filter: it can override the chosen folder
+		// (fileinto), drop the message (discard), or fall through to
+		// the spam-pipeline default. A parse / load error is logged
+		// and treated as "no filter" so a botched script never loses
+		// mail.
+		acctFolder, drop := s.sieveDecide(acctID, in, folder)
+		if drop {
+			continue
+		}
+		if _, err := s.backend.store.DeliverTo(acctID, acctFolder, in); err != nil {
+			log.Printf("smtp: deliver to account %d (%s) failed: %v", acctID, acctFolder, err)
 			failed++
 		}
 	}
@@ -413,6 +423,47 @@ func (s *session) Data(r io.Reader) error {
 	log.Printf("smtp: accepted message from <%s> (%d bytes) — %d local, %d forwarded",
 		s.from, len(raw), len(s.rcptAccts), len(s.rcptRemote))
 	return nil
+}
+
+// sieveDecide loads the account's Sieve script and runs it against
+// the incoming message. The returned folder replaces the spam-
+// pipeline default; if drop is true the message is dropped entirely.
+// If the account has no script or the script fails to parse, the
+// default folder is used and the message is delivered.
+func (s *session) sieveDecide(acctID uint64, in store.IncomingMessage, defaultFolder string) (folder string, drop bool) {
+	script, err := s.backend.store.GetSieveScript(acctID)
+	if err != nil || script == nil || script.Source == "" {
+		return defaultFolder, false
+	}
+	prog, err := sieve.Parse(script.Source)
+	if err != nil {
+		log.Printf("smtp: parse sieve script for account %d: %v", acctID, err)
+		return defaultFolder, false
+	}
+	headers, err := sieve.ParseHeaders(in.Raw)
+	if err != nil {
+		return defaultFolder, false
+	}
+	actions := prog.Eval(sieve.Message{
+		Headers: headers,
+		Size:    int64(len(in.Raw)),
+		Raw:     in.Raw,
+	})
+	// Action precedence: an explicit Discard wins; otherwise the
+	// last FileInto wins; otherwise the default folder.
+	folder = defaultFolder
+	chose := false
+	for _, a := range actions {
+		switch v := a.(type) {
+		case sieve.Discard:
+			return "", true
+		case sieve.FileInto:
+			folder = v.Mailbox
+			chose = true
+		}
+	}
+	_ = chose
+	return folder, false
 }
 
 // fireVacationReplies asks every local recipient's configured

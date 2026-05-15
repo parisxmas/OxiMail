@@ -18,6 +18,9 @@
 //	oximailctl vacation get <address>
 //	oximailctl vacation set <address> -subject S -body B [-suppress-days N]
 //	oximailctl vacation clear <address>
+//	oximailctl sieve    get <address>
+//	oximailctl sieve    set <address>           script on stdin
+//	oximailctl sieve    clear <address>
 package main
 
 import (
@@ -78,6 +81,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return c.alias(args[1:])
 	case "vacation":
 		return c.vacation(args[1:])
+	case "sieve":
+		return c.sieve(args[1:])
 	default:
 		fmt.Fprintf(stderr, "oximailctl: unknown command %q\n", args[0])
 		usage(stderr)
@@ -131,6 +136,9 @@ usage:
   oximailctl vacation get   <address>
   oximailctl vacation set   <address> -subject S -body B [-suppress-days N]
   oximailctl vacation clear <address>
+  oximailctl sieve    get   <address>
+  oximailctl sieve    set   <address>            # script on stdin
+  oximailctl sieve    clear <address>
 
 It connects to OxiDB with the same OXIMAIL_* environment variables as
 the server — OXIMAIL_OXIDB_HOST, OXIMAIL_OXIDB_PORT.

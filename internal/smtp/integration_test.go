@@ -101,6 +101,86 @@ func TestInboundSMTP(t *testing.T) {
 	})
 }
 
+// TestInboundSMTPSieve covers the per-account Sieve filter: a script
+// that files messages containing "report" in the Subject lands one
+// into a custom folder rather than INBOX, and a script that discards
+// "spam"-subject messages drops them entirely (neither INBOX nor any
+// other folder gets a copy).
+func TestInboundSMTPSieve(t *testing.T) {
+	host, port := itest.StartOxiDB(t)
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	acc, err := st.CreateAccount("rules@oximail.test", "h", 0)
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if err := st.EnsureDefaultMailboxes(acc.ID); err != nil {
+		t.Fatalf("ensure mailboxes: %v", err)
+	}
+	if _, err := st.CreateMailbox(acc.ID, "Reports"); err != nil {
+		t.Fatalf("create Reports: %v", err)
+	}
+	script := `
+		require ["fileinto"];
+		if header :contains "Subject" "report" {
+		    fileinto "Reports";
+		}
+		if header :contains "Subject" "spam" {
+		    discard;
+		}
+	`
+	if _, err := st.SetSieveScript(acc.ID, script); err != nil {
+		t.Fatalf("set sieve: %v", err)
+	}
+
+	addr := startSMTP(t, st)
+	inbox, _ := st.GetMailboxByName(acc.ID, "INBOX")
+	reports, _ := st.GetMailboxByName(acc.ID, "Reports")
+
+	t.Run("fileinto picks a custom folder", func(t *testing.T) {
+		msg := "From: alice@partners.test\r\nTo: rules@oximail.test\r\nSubject: Q3 report\r\n\r\nnumbers\r\n"
+		if err := netsmtp.SendMail(addr, nil, "alice@partners.test",
+			[]string{"rules@oximail.test"}, []byte(msg)); err != nil {
+			t.Fatalf("SendMail: %v", err)
+		}
+		if msgs, _ := st.ListMessages(reports.ID); len(msgs) != 1 {
+			t.Errorf("Reports has %d messages, want 1", len(msgs))
+		}
+		if msgs, _ := st.ListMessages(inbox.ID); len(msgs) != 0 {
+			t.Errorf("INBOX has %d messages, want 0 (fileinto should have rerouted)", len(msgs))
+		}
+	})
+
+	t.Run("discard drops the message entirely", func(t *testing.T) {
+		before, _ := st.ListMessages(inbox.ID)
+		msg := "From: alice@partners.test\r\nTo: rules@oximail.test\r\nSubject: spam alert\r\n\r\nbody\r\n"
+		if err := netsmtp.SendMail(addr, nil, "alice@partners.test",
+			[]string{"rules@oximail.test"}, []byte(msg)); err != nil {
+			t.Fatalf("SendMail: %v", err)
+		}
+		after, _ := st.ListMessages(inbox.ID)
+		if len(after) != len(before) {
+			t.Errorf("INBOX grew from %d to %d on a discard'd message", len(before), len(after))
+		}
+		// Other folders unaffected too.
+		for _, name := range []string{"Reports", "Sent", "Drafts", "Trash", "Archive", "Junk"} {
+			mb, _ := st.GetMailboxByName(acc.ID, name)
+			msgs, _ := st.ListMessages(mb.ID)
+			for _, m := range msgs {
+				if m.Subject == "spam alert" {
+					t.Errorf("discard'd message turned up in %s", name)
+				}
+			}
+		}
+	})
+}
+
 // TestInboundSMTPVacation covers the RFC 3834 auto-responder: when a
 // local account has a vacation rule enabled, an inbound person-to-
 // person message lands the original in INBOX and drops an auto-reply

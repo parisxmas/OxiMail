@@ -172,6 +172,40 @@ func TestCLI(t *testing.T) {
 		}
 	})
 
+	t.Run("sieve set / get / clear round-trips", func(t *testing.T) {
+		if _, code := cli("pw\n", "account", "add", "filters@example.test"); code != 0 {
+			t.Fatal("setup: account add failed")
+		}
+		script := `if header :contains "Subject" "report" { fileinto "Reports"; }` + "\n"
+		// set — script comes from stdin
+		out, code := cli(script, "sieve", "set", "filters@example.test")
+		if code != 0 || !strings.Contains(out, "sieve script saved for filters@example.test") {
+			t.Fatalf("sieve set: code=%d out=%q", code, out)
+		}
+		// get echoes the source back
+		out, code = cli("", "sieve", "get", "filters@example.test")
+		if code != 0 || !strings.Contains(out, "fileinto \"Reports\"") {
+			t.Fatalf("sieve get: code=%d out=%q", code, out)
+		}
+		// a bad script is refused; the previous one stays in place.
+		// `if {` has no test identifier — parser must reject.
+		if _, code := cli("if { fileinto \"X\"; }", "sieve", "set", "filters@example.test"); code == 0 {
+			t.Error("sieve set accepted a malformed script")
+		}
+		out, _ = cli("", "sieve", "get", "filters@example.test")
+		if !strings.Contains(out, "fileinto \"Reports\"") {
+			t.Errorf("a bad script replaced the working one; sieve get = %q", out)
+		}
+		// clear
+		if out, code := cli("", "sieve", "clear", "filters@example.test"); code != 0 ||
+			!strings.Contains(out, "sieve script cleared for filters@example.test") {
+			t.Fatalf("sieve clear: code=%d out=%q", code, out)
+		}
+		if out, _ := cli("", "sieve", "get", "filters@example.test"); !strings.Contains(out, "no sieve script set for filters@example.test") {
+			t.Errorf("sieve get after clear: out=%q", out)
+		}
+	})
+
 	t.Run("vacation set / get / clear round-trips", func(t *testing.T) {
 		if _, code := cli("pw\n", "account", "add", "ooo@example.test"); code != 0 {
 			t.Fatal("setup: account add failed")

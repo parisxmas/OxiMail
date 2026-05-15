@@ -427,6 +427,56 @@ func TestWebmail(t *testing.T) {
 		}
 	})
 
+	t.Run("sieve GET / PUT / DELETE round-trips, rejects bad scripts", func(t *testing.T) {
+		// Initially empty.
+		var get struct{ Source string }
+		if status := getJSON(t, base+"/api/sieve", token, &get); status != http.StatusOK {
+			t.Fatalf("initial GET status = %d, want 200", status)
+		}
+		if get.Source != "" {
+			t.Errorf("fresh account has source = %q, want empty", get.Source)
+		}
+		// PUT a good script.
+		script := `if header :contains "Subject" "report" { fileinto "Reports"; }`
+		body := mustJSON(map[string]string{"source": script})
+		req, _ := http.NewRequest(http.MethodPut, base+"/api/sieve", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("PUT: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("PUT status = %d, want 200", resp.StatusCode)
+		}
+		if status := getJSON(t, base+"/api/sieve", token, &get); status != http.StatusOK || get.Source != script {
+			t.Fatalf("GET after PUT = %q (status=%d), want %q", get.Source, status, script)
+		}
+		// PUT a syntactically broken script — must be 400.
+		bad := mustJSON(map[string]string{"source": "if { fileinto; }"})
+		req, _ = http.NewRequest(http.MethodPut, base+"/api/sieve", bytes.NewReader(bad))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, _ = http.DefaultClient.Do(req)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("bad sieve PUT status = %d, want 400", resp.StatusCode)
+		}
+		// The good script is still there.
+		if status := getJSON(t, base+"/api/sieve", token, &get); status != http.StatusOK || get.Source != script {
+			t.Errorf("after a bad PUT, GET returned %q (status=%d), want the previous good script", get.Source, status)
+		}
+		// DELETE.
+		delReq, _ := http.NewRequest(http.MethodDelete, base+"/api/sieve", nil)
+		delReq.Header.Set("Authorization", "Bearer "+token)
+		resp, _ = http.DefaultClient.Do(delReq)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Errorf("DELETE status = %d, want 204", resp.StatusCode)
+		}
+	})
+
 	t.Run("vacation GET / PUT / DELETE round-trips", func(t *testing.T) {
 		// Initially: GET returns the all-zero "off" response.
 		var get vacationResp
