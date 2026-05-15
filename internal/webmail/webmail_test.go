@@ -330,6 +330,103 @@ func TestWebmail(t *testing.T) {
 		}
 	})
 
+	t.Run("send carries In-Reply-To and References for replies", func(t *testing.T) {
+		body := mustJSON(map[string]any{
+			"to":           []string{"other@oximail.test"},
+			"subject":      "Re: Hello webmail",
+			"text":         "thanks for the note",
+			"in_reply_to":  "wm-1@elsewhere.test",
+			"references":   []string{"wm-1@elsewhere.test"},
+		})
+		var out struct{ Delivered int }
+		if status := postJSON(t, base+"/api/messages", token, body, &out); status != http.StatusOK {
+			t.Fatalf("status = %d, want 200", status)
+		}
+		// Find the reply in the recipient's INBOX and confirm both
+		// threading headers are present.
+		otherInbox, _ := st.GetMailboxByName(other.ID, "INBOX")
+		recvd, _ := st.ListMessages(otherInbox.ID)
+		var reply *store.Message
+		for i := range recvd {
+			if recvd[i].Subject == "Re: Hello webmail" {
+				reply = &recvd[i]
+				break
+			}
+		}
+		if reply == nil {
+			t.Fatal("recipient did not receive the reply")
+		}
+		raw, err := st.FetchBody(reply)
+		if err != nil {
+			t.Fatalf("fetch reply: %v", err)
+		}
+		s := string(raw)
+		if !strings.Contains(s, "In-Reply-To: <wm-1@elsewhere.test>") {
+			t.Error("reply is missing the In-Reply-To header")
+		}
+		if !strings.Contains(s, "References: <wm-1@elsewhere.test>") {
+			t.Error("reply is missing the References header")
+		}
+	})
+
+	t.Run("save a draft and overwrite it in place", func(t *testing.T) {
+		// First save — no id; the server allocates one.
+		body := mustJSON(map[string]any{
+			"to":      []string{"someone@partners.test"},
+			"subject": "Work in progress",
+			"text":    "first draft",
+		})
+		var first struct {
+			ID      uint64
+			Subject string
+		}
+		if status := postJSON(t, base+"/api/drafts", token, body, &first); status != http.StatusOK {
+			t.Fatalf("first draft status = %d, want 200", status)
+		}
+		if first.ID == 0 {
+			t.Fatal("first draft response missing id")
+		}
+		drafts, err := st.GetMailboxByName(acc.ID, "Drafts")
+		if err != nil {
+			t.Fatalf("get Drafts: %v", err)
+		}
+		msgs, err := st.ListMessages(drafts.ID)
+		if err != nil {
+			t.Fatalf("list Drafts: %v", err)
+		}
+		if len(msgs) != 1 || msgs[0].Subject != "Work in progress" {
+			t.Fatalf("Drafts after first save: %v", msgs)
+		}
+		// The draft carries the \Draft flag so IMAP clients show it
+		// correctly.
+		if !flagSet(msgs[0].Flags, `\Draft`) {
+			t.Errorf("draft missing \\Draft flag: %v", msgs[0].Flags)
+		}
+
+		// Second save — same id, new body. The Drafts folder still
+		// contains exactly one message, with the updated subject.
+		body = mustJSON(map[string]any{
+			"id":      first.ID,
+			"to":      []string{"someone@partners.test"},
+			"subject": "Work in progress (revised)",
+			"text":    "second draft",
+		})
+		var second struct{ ID uint64 }
+		if status := postJSON(t, base+"/api/drafts", token, body, &second); status != http.StatusOK {
+			t.Fatalf("second draft status = %d, want 200", status)
+		}
+		if second.ID == first.ID {
+			t.Error("second draft kept the same message id; want a fresh one (the previous was deleted)")
+		}
+		msgs, _ = st.ListMessages(drafts.ID)
+		if len(msgs) != 1 {
+			t.Fatalf("Drafts has %d messages after the second save, want 1 (overwrite, not append)", len(msgs))
+		}
+		if msgs[0].Subject != "Work in progress (revised)" {
+			t.Errorf("Drafts subject = %q, want the revised one", msgs[0].Subject)
+		}
+	})
+
 	t.Run("change flags", func(t *testing.T) {
 		body := mustJSON(map[string]any{"op": "add", "flags": []string{`\Seen`}})
 		var out struct{ Seen bool }

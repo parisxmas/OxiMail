@@ -73,6 +73,7 @@ func New(addr, staticDir string, st *store.Store, tlsConfig *tls.Config) *Server
 	mux.HandleFunc("GET /api/messages/{id}", s.auth(s.handleGetMessage))
 	mux.HandleFunc("GET /api/messages/{id}/attachments/{n}", s.auth(s.handleAttachment))
 	mux.HandleFunc("POST /api/messages", s.auth(s.handleSend))
+	mux.HandleFunc("POST /api/drafts", s.auth(s.handleSaveDraft))
 	mux.HandleFunc("PATCH /api/messages/{id}/flags", s.auth(s.handleFlags))
 	mux.HandleFunc("POST /api/messages/{id}/move", s.auth(s.handleMove))
 	mux.HandleFunc("DELETE /api/messages/{id}", s.auth(s.handleDelete))

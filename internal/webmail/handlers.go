@@ -285,6 +285,13 @@ type sendRequest struct {
 	// Optional HTML body. When non-empty, the outbound message is
 	// multipart/alternative carrying both Text and HTML.
 	HTML string `json:"html"`
+	// Optional threading metadata for reply / forward composes. Both
+	// values are Message-IDs without angle brackets; the server adds
+	// them. References should already include in_reply_to as its
+	// last entry (the client builds it from the original message's
+	// References + the original's own Message-Id, per RFC 5322 §3.6.4).
+	InReplyTo  string   `json:"in_reply_to,omitempty"`
+	References []string `json:"references,omitempty"`
 }
 
 // sendResponse reports how a sent message was dispatched.
@@ -309,8 +316,19 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, acc *store.A
 	}
 
 	messageID := randomID() + "@" + addressDomain(acc.Address)
+	raw := buildMessage(composeFields{
+		from:       acc.Address,
+		to:         req.To,
+		cc:         req.Cc,
+		subject:    req.Subject,
+		text:       req.Text,
+		html:       req.HTML,
+		messageID:  messageID,
+		inReplyTo:  req.InReplyTo,
+		references: req.References,
+	})
 	in := store.IncomingMessage{
-		Raw:       buildMessage(acc.Address, req.To, req.Cc, req.Subject, req.Text, req.HTML, messageID),
+		Raw:       raw,
 		Subject:   req.Subject,
 		FromAddr:  acc.Address,
 		MessageID: messageID,
@@ -332,6 +350,64 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, acc *store.A
 	}
 
 	writeJSON(w, http.StatusOK, sendResponse{Delivered: routed.LocalCount, Queued: routed.QueuedCount})
+}
+
+// draftRequest is the body of POST /api/drafts. The payload is the
+// same compose-form data send accepts, plus an optional id of an
+// existing draft to overwrite (so auto-save keeps a stable spot in
+// the Drafts folder instead of piling up versions).
+type draftRequest struct {
+	sendRequest
+	ID uint64 `json:"id,omitempty"`
+}
+
+// handleSaveDraft files a compose-form payload into the account's
+// Drafts folder. The response is the resulting message summary so the
+// SPA can pick up its id (and keep submitting that id back on
+// subsequent auto-saves to overwrite in place).
+func (s *Server) handleSaveDraft(w http.ResponseWriter, r *http.Request, acc *store.Account) {
+	var req draftRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	drafts, err := s.store.GetMailboxByName(acc.ID, "Drafts")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Drafts folder not available")
+		return
+	}
+	messageID := randomID() + "@" + addressDomain(acc.Address)
+	raw := buildMessage(composeFields{
+		from:       acc.Address,
+		to:         req.To,
+		cc:         req.Cc,
+		subject:    req.Subject,
+		text:       req.Text,
+		html:       req.HTML,
+		messageID:  messageID,
+		inReplyTo:  req.InReplyTo,
+		references: req.References,
+	})
+	in := store.IncomingMessage{
+		Raw:       raw,
+		Subject:   req.Subject,
+		FromAddr:  acc.Address,
+		MessageID: messageID,
+		Flags:     []string{`\Draft`},
+	}
+	// Overwriting an existing draft: delete the old document first so
+	// the user sees one (newer) entry in Drafts rather than many.
+	if req.ID != 0 {
+		if prev, err := s.store.GetMessage(req.ID); err == nil && prev.AccountID == acc.ID && prev.MailboxID == drafts.ID {
+			_ = s.store.DeleteMessage(prev.ID)
+		}
+	}
+	saved, err := s.store.AppendMessage(drafts.ID, in)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not save draft")
+		return
+	}
+	writeJSON(w, http.StatusOK, summarize(saved))
 }
 
 // loadOwnedMessage parses the {id} path value and loads the message,

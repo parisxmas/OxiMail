@@ -3,7 +3,7 @@ import { DatePipe } from '@angular/common';
 import { Router } from '@angular/router';
 
 import { ApiService } from '../api.service';
-import { ComposeComponent } from '../compose/compose.component';
+import { ComposeComponent, ComposeSeed } from '../compose/compose.component';
 import {
   FLAG_FLAGGED,
   FLAG_SEEN,
@@ -20,7 +20,7 @@ import {
       <!-- Folder sidebar -->
       <aside class="folders">
         <div class="me" [title]="api.address()">{{ api.address() }}</div>
-        <button class="primary compose-btn" (click)="composing.set(true)">
+        <button class="primary compose-btn" (click)="openCompose()">
           Compose
         </button>
         @for (mb of mailboxes(); track mb.name) {
@@ -86,6 +86,9 @@ import {
               <div class="date">{{ msg.date | date: 'medium' }}</div>
             </div>
             <div class="actions">
+              <button (click)="reply(msg, false)">Reply</button>
+              <button (click)="reply(msg, true)">Reply all</button>
+              <button (click)="forward(msg)">Forward</button>
               <button (click)="toggleFlagged(msg)">
                 {{ isFlagged(msg) ? 'Unflag' : 'Flag' }}
               </button>
@@ -129,7 +132,8 @@ import {
 
     @if (composing()) {
       <oximail-compose
-        (close)="composing.set(false)"
+        [seed]="composeSeed()"
+        (close)="closeCompose()"
         (sent)="onSent()"
       />
     }
@@ -317,6 +321,7 @@ export class MailboxComponent implements OnInit {
   readonly messages = signal<MessageSummary[]>([]);
   readonly openMessage = signal<MessageDetail | null>(null);
   readonly composing = signal(false);
+  readonly composeSeed = signal<ComposeSeed | null>(null);
   readonly loadingList = signal(false);
   readonly query = signal<string>('');
   // index of the attachment currently being downloaded, or -1 for none.
@@ -417,8 +422,55 @@ export class MailboxComponent implements OnInit {
     });
   }
 
-  onSent(): void {
+  // reply opens the compose dialog pre-filled with a reply or
+  // reply-all seed: To = original sender, Cc (reply-all) = original
+  // To + Cc minus our own address, Subject with "Re: " prefix, body
+  // is a quoted citation block, and the In-Reply-To / References
+  // headers wire it into the thread.
+  reply(msg: MessageDetail, all: boolean): void {
+    let cc = '';
+    if (all) {
+      const me = this.api.address();
+      const others = [...msg.to, ...msg.cc]
+        .map(addressOnly)
+        .filter((a) => a && a !== me);
+      cc = Array.from(new Set(others)).join(', ');
+    }
+    this.composeSeed.set({
+      to: addressOnly(msg.from),
+      cc,
+      subject: prefixedSubject(msg.subject, 'Re: '),
+      text: quoteBody(msg),
+      inReplyTo: msg.message_id,
+      references: [msg.message_id],
+    });
+    this.composing.set(true);
+  }
+
+  // forward opens the compose dialog with the message inlined and the
+  // recipient left blank.
+  forward(msg: MessageDetail): void {
+    this.composeSeed.set({
+      to: '',
+      subject: prefixedSubject(msg.subject, 'Fwd: '),
+      text: forwardBody(msg),
+    });
+    this.composing.set(true);
+  }
+
+  // openCompose starts a fresh message — no seed.
+  openCompose(): void {
+    this.composeSeed.set(null);
+    this.composing.set(true);
+  }
+
+  closeCompose(): void {
     this.composing.set(false);
+    this.composeSeed.set(null);
+  }
+
+  onSent(): void {
+    this.closeCompose();
     this.refreshMailboxes();
     this.loadMessages();
   }
@@ -482,4 +534,57 @@ export class MailboxComponent implements OnInit {
       boxes.map((b) => (b.name === name ? { ...b, unseen } : b)),
     );
   }
+}
+
+// addressOnly pulls "alice@x" out of "Alice <alice@x>"; on a plain
+// address it is the identity.
+function addressOnly(s: string): string {
+  const start = s.lastIndexOf('<');
+  const end = s.lastIndexOf('>');
+  if (start >= 0 && end > start) {
+    return s.slice(start + 1, end).trim();
+  }
+  return s.trim();
+}
+
+// prefixedSubject adds "Re: " / "Fwd: " unless the subject already
+// starts with that prefix (case-insensitive) — so deep threads don't
+// stack "Re: Re: Re:".
+function prefixedSubject(subject: string, prefix: string): string {
+  const lower = (subject || '').toLowerCase();
+  if (lower.startsWith(prefix.toLowerCase())) {
+    return subject;
+  }
+  return prefix + (subject || '');
+}
+
+// quoteBody builds the citation block that goes above the user's reply.
+function quoteBody(msg: MessageDetail): string {
+  const date = msg.date ? new Date(msg.date).toLocaleString() : '(unknown)';
+  const header = `\n\nOn ${date}, ${msg.from} wrote:\n`;
+  const body = (msg.text || stripHTML(msg.html || '')).split('\n').map((l) => '> ' + l).join('\n');
+  return header + body;
+}
+
+// forwardBody builds the inline-forward block.
+function forwardBody(msg: MessageDetail): string {
+  const lines = [
+    '',
+    '',
+    '---------- Forwarded message ----------',
+    `From: ${msg.from}`,
+    `To: ${msg.to.join(', ')}`,
+    msg.cc.length ? `Cc: ${msg.cc.join(', ')}` : '',
+    `Date: ${msg.date}`,
+    `Subject: ${msg.subject}`,
+    '',
+    msg.text || stripHTML(msg.html || ''),
+  ];
+  return lines.filter((l) => l !== '').concat('').join('\n');
+}
+
+// stripHTML is the same crude tag-strip the server and the compose
+// component use as a plain-text fallback.
+function stripHTML(s: string): string {
+  return s.replace(/<[^>]*>/g, '');
 }

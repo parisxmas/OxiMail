@@ -94,8 +94,26 @@ export class ApiService {
     subject: string;
     text: string;
     html?: string;
+    in_reply_to?: string;
+    references?: string[];
   }) {
     return this.http.post<SendResult>('/api/messages', body);
+  }
+
+  // saveDraft files a compose payload into the Drafts folder. Passing
+  // an id overwrites that draft so auto-save keeps a single entry
+  // there instead of one per keystroke window.
+  saveDraft(body: {
+    id?: number;
+    to: string[];
+    cc: string[];
+    subject: string;
+    text: string;
+    html?: string;
+    in_reply_to?: string;
+    references?: string[];
+  }) {
+    return this.http.post<MessageSummary>('/api/drafts', body);
   }
 
   setFlags(id: number, op: 'add' | 'remove' | 'set', flags: string[]) {

@@ -1,7 +1,20 @@
-import { Component, inject, output, signal } from '@angular/core';
+import { Component, inject, input, output, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 
 import { ApiService } from '../api.service';
+
+// ComposeSeed pre-populates the dialog: reply / forward callers fill
+// the threading fields, draft-resume callers fill the id.
+export interface ComposeSeed {
+  to?: string;
+  cc?: string;
+  subject?: string;
+  text?: string;
+  html?: string;
+  inReplyTo?: string;
+  references?: string[];
+  draftId?: number;
+}
 
 @Component({
   selector: 'oximail-compose',
@@ -86,6 +99,9 @@ import { ApiService } from '../api.service';
 
       <footer>
         <button type="button" (click)="cancel()">Cancel</button>
+        <button type="button" (click)="saveDraft()" [disabled]="busy()">
+          {{ savedAt() ? 'Saved' : 'Save draft' }}
+        </button>
         <button class="primary" type="submit" [disabled]="busy()">
           {{ busy() ? 'Sending…' : 'Send' }}
         </button>
@@ -173,6 +189,9 @@ import { ApiService } from '../api.service';
 export class ComposeComponent {
   private readonly api = inject(ApiService);
 
+  /** Optional starting data for reply / forward / draft-resume. */
+  readonly seed = input<ComposeSeed | null>(null);
+
   /** Emitted when the dialog is dismissed without sending. */
   readonly close = output<void>();
   /** Emitted after a message has been sent. */
@@ -183,9 +202,34 @@ export class ComposeComponent {
   subject = '';
   text = '';
   html = '';
+  // inReplyTo / references travel with the form so a Save Draft and a
+  // later Send both preserve the threading metadata.
+  inReplyTo = '';
+  references: string[] = [];
+  // draftId is set by the server on the first Save Draft and on a
+  // resume; on subsequent saves we send it back so the existing draft
+  // gets overwritten in place.
+  draftId = 0;
+
   readonly htmlMode = signal(false);
   readonly error = signal('');
   readonly busy = signal(false);
+  readonly savedAt = signal<number>(0); // unix ms of the last successful save
+
+  ngOnInit(): void {
+    const s = this.seed();
+    if (s) {
+      this.to = s.to ?? '';
+      this.cc = s.cc ?? '';
+      this.subject = s.subject ?? '';
+      this.text = s.text ?? '';
+      this.html = s.html ?? '';
+      this.htmlMode.set((s.html ?? '') !== '');
+      this.inReplyTo = s.inReplyTo ?? '';
+      this.references = s.references ?? [];
+      this.draftId = s.draftId ?? 0;
+    }
+  }
 
   cancel(): void {
     this.close.emit();
@@ -207,11 +251,51 @@ export class ComposeComponent {
     const html = this.htmlMode() ? this.html : '';
     const text = this.htmlMode() ? stripTags(this.html) : this.text;
     this.api
-      .send({ to, cc: splitAddresses(this.cc), subject: this.subject, text, html })
+      .send({
+        to,
+        cc: splitAddresses(this.cc),
+        subject: this.subject,
+        text,
+        html,
+        in_reply_to: this.inReplyTo || undefined,
+        references: this.references.length ? this.references : undefined,
+      })
       .subscribe({
         next: () => this.sent.emit(),
         error: () => {
           this.error.set('Could not send the message. Please try again.');
+          this.busy.set(false);
+        },
+      });
+  }
+
+  saveDraft(): void {
+    if (this.busy()) {
+      return;
+    }
+    this.busy.set(true);
+    this.error.set('');
+    const html = this.htmlMode() ? this.html : '';
+    const text = this.htmlMode() ? stripTags(this.html) : this.text;
+    this.api
+      .saveDraft({
+        id: this.draftId || undefined,
+        to: splitAddresses(this.to),
+        cc: splitAddresses(this.cc),
+        subject: this.subject,
+        text,
+        html,
+        in_reply_to: this.inReplyTo || undefined,
+        references: this.references.length ? this.references : undefined,
+      })
+      .subscribe({
+        next: (msg) => {
+          this.draftId = msg.id;
+          this.savedAt.set(Date.now());
+          this.busy.set(false);
+        },
+        error: () => {
+          this.error.set('Could not save the draft. Please try again.');
           this.busy.set(false);
         },
       });

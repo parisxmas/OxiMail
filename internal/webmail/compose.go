@@ -11,6 +11,15 @@ import (
 	"time"
 )
 
+// composeFields collects the fields a compose form provides. inReplyTo
+// is the Message-ID of the message being replied to (no angle
+// brackets); references is the existing References chain plus that
+// id — buildMessage handles the angle bracketing.
+type composeFields struct {
+	from, subject, text, html, messageID, inReplyTo string
+	to, cc, references                              []string
+}
+
 // buildMessage assembles a minimal RFC 5322 message from the fields a
 // compose form provides. If html is empty, the body is a single
 // text/plain part. If html is non-empty, the body is multipart/
@@ -18,19 +27,36 @@ import (
 // one they understand.
 //
 // TODO: attachments (multipart/mixed wrapping the alternative).
-func buildMessage(from string, to, cc []string, subject, text, html, messageID string) []byte {
+func buildMessage(f composeFields) []byte {
 	var b strings.Builder
-	fmt.Fprintf(&b, "From: %s\r\n", from)
-	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(to, ", "))
-	if len(cc) > 0 {
-		fmt.Fprintf(&b, "Cc: %s\r\n", strings.Join(cc, ", "))
+	fmt.Fprintf(&b, "From: %s\r\n", f.from)
+	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(f.to, ", "))
+	if len(f.cc) > 0 {
+		fmt.Fprintf(&b, "Cc: %s\r\n", strings.Join(f.cc, ", "))
 	}
 	// QEncoding.Encode leaves plain ASCII untouched and RFC 2047-encodes
 	// anything else, so a non-ASCII subject stays well-formed.
-	fmt.Fprintf(&b, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject))
+	fmt.Fprintf(&b, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", f.subject))
 	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
-	fmt.Fprintf(&b, "Message-ID: <%s>\r\n", messageID)
+	fmt.Fprintf(&b, "Message-ID: <%s>\r\n", f.messageID)
+	if f.inReplyTo != "" {
+		fmt.Fprintf(&b, "In-Reply-To: <%s>\r\n", f.inReplyTo)
+	}
+	if len(f.references) > 0 {
+		var refs []string
+		for _, r := range f.references {
+			r = strings.TrimSpace(strings.Trim(r, "<>"))
+			if r != "" {
+				refs = append(refs, "<"+r+">")
+			}
+		}
+		if len(refs) > 0 {
+			fmt.Fprintf(&b, "References: %s\r\n", strings.Join(refs, " "))
+		}
+	}
 	b.WriteString("MIME-Version: 1.0\r\n")
+
+	text, html := f.text, f.html
 
 	if html == "" {
 		b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
