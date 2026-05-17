@@ -27,10 +27,10 @@ github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 h1:C3w9PqII01/Oq1c1nUAm88MOHcQC9l5mIlSMApZMrHA=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822/go.mod h1:+n7T8mK8HuQTcFwEeznm/DIxMOiR9yIdICNftLE1DvQ=
-github.com/parisxmas/OxiDB/go/oxidb v0.0.0-20260517182305-d04ac4db0e89 h1:6ldNzMLxAp53QQElJyiGUWYZWQ/4pZknk/bm0kpXcLk=
-github.com/parisxmas/OxiDB/go/oxidb v0.0.0-20260517182305-d04ac4db0e89/go.mod h1:89rU8x1NidBYMkHh4k2DwTwpvcn2pmqaCCZqVEMUCIU=
-github.com/parisxmas/OxiDB/go/oxiwire v0.0.0-20260517182305-d04ac4db0e89 h1:2rrRZiraIFUaJULl+ga9IhNrqx/J4iqz0aiA/nBfb6E=
-github.com/parisxmas/OxiDB/go/oxiwire v0.0.0-20260517182305-d04ac4db0e89/go.mod h1:8CoUJsz8PoPZ/eXsvTXbwDSKq66uB951Y1bzLE/NjcM=
+github.com/parisxmas/OxiDB/go/oxidb v0.0.0-20260517194244-2b7f52489aaa h1:8z9c8VFDDYQs1H9or7/h8ufeQ/Uq5JbxrBR5yjZr4kk=
+github.com/parisxmas/OxiDB/go/oxidb v0.0.0-20260517194244-2b7f52489aaa/go.mod h1:89rU8x1NidBYMkHh4k2DwTwpvcn2pmqaCCZqVEMUCIU=
+github.com/parisxmas/OxiDB/go/oxiwire v0.0.0-20260517194244-2b7f52489aaa h1:ijhGIF7blCmGgCvLpDmSdYF2NEA05rTjen8YcU0M89A=
+github.com/parisxmas/OxiDB/go/oxiwire v0.0.0-20260517194244-2b7f52489aaa/go.mod h1:8CoUJsz8PoPZ/eXsvTXbwDSKq66uB951Y1bzLE/NjcM=
 github.com/parisxmas/go-imap/v2 v2.0.0-beta.8.0.20260517135356-4b395c25f04d h1:uN92XpXCp7yvBWgWTLkn0xqjO/IqNJ0iORkAYU3tlls=
 github.com/parisxmas/go-imap/v2 v2.0.0-beta.8.0.20260517135356-4b395c25f04d/go.mod h1:dhoFe2Q0PwLrMD7oZw8ODuaD0vLYPe5uj2wcOMnvh48=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=

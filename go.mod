@@ -9,7 +9,7 @@ require (
 	github.com/emersion/go-msgauth v0.7.0
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
 	github.com/emersion/go-smtp v0.24.0
-	github.com/parisxmas/OxiDB/go/oxidb v0.0.0-20260517182305-d04ac4db0e89
+	github.com/parisxmas/OxiDB/go/oxidb v0.0.0-20260517194244-2b7f52489aaa
 	github.com/prometheus/client_golang v1.23.2
 	golang.org/x/crypto v0.51.0
 	golang.org/x/net v0.53.0
@@ -41,4 +41,4 @@ replace github.com/emersion/go-imap/v2 => github.com/parisxmas/go-imap/v2 v2.0.0
 // declares `replace => ../oxiwire`. That sibling-path replace works
 // inside OxiDB itself but does not carry to consumers, so we pin
 // the version explicitly here.
-replace github.com/parisxmas/OxiDB/go/oxiwire => github.com/parisxmas/OxiDB/go/oxiwire v0.0.0-20260517182305-d04ac4db0e89
+replace github.com/parisxmas/OxiDB/go/oxiwire => github.com/parisxmas/OxiDB/go/oxiwire v0.0.0-20260517194244-2b7f52489aaa
