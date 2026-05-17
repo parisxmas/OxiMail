@@ -85,6 +85,10 @@ func (s *Store) AppendMessage(mailboxID uint64, in IncomingMessage) (*Message, e
 	if _, err := s.db.PutObject(BlobBucket, key, in.Raw, "message/rfc822", nil); err != nil {
 		return nil, fmt.Errorf("store: append to mailbox %d: store body: %w", mailboxID, err)
 	}
+	if err := s.blobAddRef(key); err != nil {
+		_ = s.db.DeleteObject(BlobBucket, key)
+		return nil, err
+	}
 
 	internal := in.InternalDate
 	if internal.IsZero() {
@@ -367,11 +371,13 @@ func (s *Store) MoveMessage(messageID, destMailboxID uint64) (*Message, error) {
 }
 
 // CopyMessage copies a message into another of the same account's
-// mailboxes. The destination gets a new UID and a fresh body blob — each
-// message owns its own blob, so deleting one cannot dangle the other's
-// read. IMAP flags, internal date, and the header metadata carry over.
+// mailboxes. The body is NOT duplicated: the new metadata document
+// points at the source's blob key and the blob's refcount is bumped
+// via blobBumpRef. IMAP flags, internal date, and header metadata
+// carry over; the destination gets a fresh UID and mod-sequence.
 //
-// TODO: reference-counted blobs would avoid the body copy.
+// The blob is only physically removed when the LAST referrer is
+// deleted (see DeleteMessage → blobDropRef).
 func (s *Store) CopyMessage(messageID, destMailboxID uint64) (*Message, error) {
 	src, err := s.GetMessage(messageID)
 	if err != nil {
@@ -385,25 +391,19 @@ func (s *Store) CopyMessage(messageID, destMailboxID uint64) (*Message, error) {
 		return nil, fmt.Errorf("store: copy message %d: destination mailbox belongs to another account", messageID)
 	}
 
-	body, err := s.FetchBody(src)
-	if err != nil {
-		return nil, fmt.Errorf("store: copy message %d: fetch body: %w", messageID, err)
-	}
-	key, err := newBlobKey()
-	if err != nil {
-		return nil, err
-	}
-	if _, err := s.db.PutObject(BlobBucket, key, body, "message/rfc822", nil); err != nil {
-		return nil, fmt.Errorf("store: copy message %d: store body: %w", messageID, err)
+	// Bump the source blob's refcount before we insert the new
+	// metadata doc. On any later failure we drop it back down.
+	if _, err := s.blobBumpRef(src.BodyBlob); err != nil {
+		return nil, fmt.Errorf("store: copy message %d: %w", messageID, err)
 	}
 	uid, err := s.NextUID(destMailboxID)
 	if err != nil {
-		_ = s.db.DeleteObject(BlobBucket, key)
+		_, _ = s.blobDropRef(src.BodyBlob)
 		return nil, err
 	}
 	modSeq, err := s.NextModSeq(destMailboxID)
 	if err != nil {
-		_ = s.db.DeleteObject(BlobBucket, key)
+		_, _ = s.blobDropRef(src.BodyBlob)
 		return nil, err
 	}
 
@@ -411,7 +411,7 @@ func (s *Store) CopyMessage(messageID, destMailboxID uint64) (*Message, error) {
 		MailboxID:    destMailboxID,
 		AccountID:    src.AccountID,
 		UID:          uid,
-		BodyBlob:     key,
+		BodyBlob:     src.BodyBlob,
 		SizeBytes:    src.SizeBytes,
 		Flags:        append([]string(nil), src.Flags...),
 		InternalDate: src.InternalDate,
@@ -426,16 +426,16 @@ func (s *Store) CopyMessage(messageID, destMailboxID uint64) (*Message, error) {
 	}
 	doc, err := encodeDoc(dst)
 	if err != nil {
-		_ = s.db.DeleteObject(BlobBucket, key)
+		_, _ = s.blobDropRef(src.BodyBlob)
 		return nil, err
 	}
 	resp, err := s.db.Insert(CollMessages, doc)
 	if err != nil {
-		_ = s.db.DeleteObject(BlobBucket, key)
+		_, _ = s.blobDropRef(src.BodyBlob)
 		return nil, fmt.Errorf("store: copy message %d: insert: %w", messageID, err)
 	}
 	if dst.ID, err = insertedID(resp); err != nil {
-		_ = s.db.DeleteObject(BlobBucket, key)
+		_, _ = s.blobDropRef(src.BodyBlob)
 		return nil, err
 	}
 	notifier.Default.Notify(destMailboxID)
@@ -462,8 +462,12 @@ func (s *Store) DeleteMessage(id uint64) error {
 	if _, err := s.db.Delete(CollMessages, map[string]any{"_id": id}); err != nil {
 		return fmt.Errorf("store: delete message %d: %w", id, err)
 	}
-	if err := s.db.DeleteObject(BlobBucket, msg.BodyBlob); err != nil {
-		return fmt.Errorf("store: delete message %d: remove body %q: %w", id, msg.BodyBlob, err)
+	// Drop our refcount on the body; the blob is physically removed
+	// only when this was the last referrer (the common case — copies
+	// are rare). A failure here is logged but not fatal: the metadata
+	// doc is already gone and the blob is, at worst, leaked disk.
+	if _, err := s.blobDropRef(msg.BodyBlob); err != nil {
+		return fmt.Errorf("store: delete message %d: %w", id, err)
 	}
 	if err := s.recordExpunge(msg.MailboxID, msg.UID, modSeq); err != nil {
 		// A log gap means QRESYNC clients won't be told this UID

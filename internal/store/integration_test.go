@@ -355,6 +355,52 @@ func TestStore(t *testing.T) {
 		}
 	})
 
+	t.Run("CopyMessage shares the body blob via refcount", func(t *testing.T) {
+		acc, err := st.CreateAccount("ref@cmt.test", "h", 0)
+		if err != nil {
+			t.Fatalf("create account: %v", err)
+		}
+		if err := st.EnsureDefaultMailboxes(acc.ID); err != nil {
+			t.Fatalf("ensure mailboxes: %v", err)
+		}
+		inbox, _ := st.GetMailboxByName(acc.ID, "INBOX")
+		archive, _ := st.GetMailboxByName(acc.ID, "Archive")
+		raw := []byte("From: <a@x>\r\nSubject: shared\r\n\r\nshared body\r\n")
+		src, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+			Raw: raw, Subject: "shared", FromAddr: "a@x",
+		})
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		dst, err := st.CopyMessage(src.ID, archive.ID)
+		if err != nil {
+			t.Fatalf("copy: %v", err)
+		}
+		if dst.BodyBlob != src.BodyBlob {
+			t.Errorf("copy got a fresh blob (%q) instead of sharing the source (%q)", dst.BodyBlob, src.BodyBlob)
+		}
+		// Delete the source: dst still points at the shared blob, so
+		// FetchBody on dst must still succeed.
+		if err := st.DeleteMessage(src.ID); err != nil {
+			t.Fatalf("delete src: %v", err)
+		}
+		body, err := st.FetchBody(dst)
+		if err != nil {
+			t.Fatalf("fetch dst after deleting src: %v", err)
+		}
+		if !bytes.Equal(body, raw) {
+			t.Errorf("body mismatch: got %q", body)
+		}
+		// Delete the destination too — refcount hits zero, blob
+		// goes away.
+		if err := st.DeleteMessage(dst.ID); err != nil {
+			t.Fatalf("delete dst: %v", err)
+		}
+		if _, err := st.FetchBody(dst); err == nil {
+			t.Error("body blob still readable after the last referrer was expunged")
+		}
+	})
+
 	t.Run("DeleteAccount cascades to mailboxes, messages, and blobs", func(t *testing.T) {
 		acc, err := st.CreateAccount("cascade@cascade.test", "h", 0)
 		if err != nil {

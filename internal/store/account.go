@@ -273,10 +273,15 @@ func (s *Store) DeleteAccount(id uint64) error {
 	if err != nil {
 		return fmt.Errorf("store: delete account %d: list messages: %w", id, err)
 	}
+	// Drop one refcount per message doc; the blob disappears when
+	// the count hits zero. A blob that is also referenced by another
+	// account (which OxiMail never produces today, but the refcount
+	// model permits) survives until that other account drops it
+	// too.
 	for _, m := range msgs {
 		if key, ok := m["body_blob"].(string); ok && key != "" {
-			if err := s.db.DeleteObject(BlobBucket, key); err != nil {
-				return fmt.Errorf("store: delete account %d: remove body %q: %w", id, key, err)
+			if _, err := s.blobDropRef(key); err != nil {
+				return fmt.Errorf("store: delete account %d: drop blob %q: %w", id, key, err)
 			}
 		}
 	}

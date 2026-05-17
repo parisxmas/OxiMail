@@ -18,7 +18,7 @@ func EnsureSchema(s *Store) error {
 	for _, coll := range []string{
 		CollDomains, CollAccounts, CollAliases,
 		CollMailboxes, CollMessages, CollOutboundQueue,
-		CollVacations, CollSieveScripts, CollExpungeLog,
+		CollVacations, CollSieveScripts, CollExpungeLog, CollBlobRefs,
 	} {
 		if err := ensureCollection(s.db, coll); err != nil {
 			return err
@@ -39,6 +39,9 @@ func EnsureSchema(s *Store) error {
 		return err
 	}
 	if err := ensureUnique(s.db, CollSieveScripts, "account_id"); err != nil {
+		return err
+	}
+	if err := ensureUnique(s.db, CollBlobRefs, "blob_key"); err != nil {
 		return err
 	}
 

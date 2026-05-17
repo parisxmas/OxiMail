@@ -50,6 +50,10 @@ const (
 	// mod-sequence at which it disappeared. QRESYNC reads it to
 	// answer "what UIDs vanished since mod-sequence M".
 	CollExpungeLog = "expunge_log"
+	// CollBlobRefs holds {blob_key, count} rows used by IMAP COPY to
+	// share one body blob across many message documents. The body is
+	// only removed when the last referrer is deleted.
+	CollBlobRefs = "blob_refs"
 )
 
 // BlobBucket is the OxiDB blob-store bucket holding raw RFC 5322 message
