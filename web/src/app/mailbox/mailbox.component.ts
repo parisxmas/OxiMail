@@ -1,6 +1,6 @@
 import { Component, OnInit, inject, signal } from '@angular/core';
 import { DatePipe } from '@angular/common';
-import { Router } from '@angular/router';
+import { Router, RouterLink } from '@angular/router';
 
 import { ApiService } from '../api.service';
 import { ComposeComponent, ComposeSeed } from '../compose/compose.component';
@@ -14,9 +14,9 @@ import {
 
 @Component({
   selector: 'oximail-mailbox',
-  imports: [DatePipe, ComposeComponent],
+  imports: [DatePipe, ComposeComponent, RouterLink],
   template: `
-    <div class="app">
+    <div class="app" [attr.data-view]="view()">
       <!-- Folder sidebar -->
       <aside class="folders">
         <div class="me" [title]="api.address()">{{ api.address() }}</div>
@@ -35,12 +35,19 @@ import {
             }
           </button>
         }
+        <a class="settings" routerLink="/settings">Settings</a>
         <button class="logout" (click)="logout()">Sign out</button>
       </aside>
 
       <!-- Message list -->
       <section class="list">
         <header>
+          <button
+            class="back mobile-only"
+            type="button"
+            (click)="view.set('folders')"
+            aria-label="Back to folders"
+          >‹</button>
           <span>{{ selected() }}</span>
           <input
             class="search"
@@ -74,6 +81,12 @@ import {
       <section class="reader">
         @if (openMessage(); as msg) {
           <div class="reader-head">
+            <button
+              class="back mobile-only"
+              type="button"
+              (click)="view.set('list')"
+              aria-label="Back to list"
+            >‹ Back</button>
             <h2>{{ msg.subject || '(no subject)' }}</h2>
             <div class="meta">
               <div><strong>From:</strong> {{ msg.from }}</div>
@@ -144,6 +157,29 @@ import {
       grid-template-columns: 200px 320px 1fr;
       height: 100%;
     }
+    .mobile-only { display: none; }
+    /* Below ~720px we collapse to a single column and show only the
+       column that matches the current view signal. Back buttons in
+       the list header and reader header navigate between them. */
+    @media (max-width: 720px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+      .app > * { display: none; }
+      .app[data-view='folders'] .folders { display: flex; }
+      .app[data-view='list'] .list { display: flex; flex-direction: column; }
+      .app[data-view='reader'] .reader { display: flex; }
+      .mobile-only {
+        display: inline-flex;
+        align-items: center;
+        background: transparent;
+        border: none;
+        font-size: 18px;
+        color: var(--text-muted);
+        padding: 4px 8px;
+        margin-right: 4px;
+      }
+    }
     .folders,
     .list {
       border-right: 1px solid var(--border);
@@ -187,8 +223,14 @@ import {
       padding: 0 7px;
       font-size: 11px;
     }
-    .logout {
+    .settings {
       margin-top: auto;
+      color: var(--text-muted);
+      text-decoration: none;
+      padding: 7px 8px;
+      font-size: 13px;
+    }
+    .logout {
       border: none;
       background: transparent;
       color: var(--text-muted);
@@ -322,6 +364,10 @@ export class MailboxComponent implements OnInit {
   readonly openMessage = signal<MessageDetail | null>(null);
   readonly composing = signal(false);
   readonly composeSeed = signal<ComposeSeed | null>(null);
+  // Mobile-only navigation state. On wide screens the CSS shows all
+  // three columns regardless; on narrow screens the data-view attr
+  // controls which one is visible.
+  readonly view = signal<'folders' | 'list' | 'reader'>('list');
   readonly loadingList = signal(false);
   readonly query = signal<string>('');
   // index of the attachment currently being downloaded, or -1 for none.
@@ -335,13 +381,13 @@ export class MailboxComponent implements OnInit {
   }
 
   selectMailbox(name: string): void {
-    if (name === this.selected()) {
-      return;
+    if (name !== this.selected()) {
+      this.selected.set(name);
+      this.openMessage.set(null);
+      this.query.set('');
+      this.loadMessages();
     }
-    this.selected.set(name);
-    this.openMessage.set(null);
-    this.query.set('');
-    this.loadMessages();
+    this.view.set('list');
   }
 
   // onSearchInput debounces keystrokes by 250 ms before re-querying the
@@ -383,6 +429,7 @@ export class MailboxComponent implements OnInit {
     this.api.message(id).subscribe({
       next: (msg) => {
         this.openMessage.set(msg);
+        this.view.set('reader');
         // The API does not auto-mark on read, so the client does it.
         if (!msg.seen) {
           this.api.setFlags(id, 'add', [FLAG_SEEN]).subscribe({

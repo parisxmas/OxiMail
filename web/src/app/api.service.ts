@@ -132,6 +132,43 @@ export class ApiService {
   remove(id: number) {
     return this.http.delete<void>(`/api/messages/${id}`);
   }
+
+  // --- Settings: vacation + sieve ---
+
+  getVacation() {
+    return this.http.get<VacationRule>('/api/vacation');
+  }
+  putVacation(rule: VacationRule) {
+    return this.http.put<VacationRule>('/api/vacation', rule);
+  }
+  deleteVacation() {
+    return this.http.delete<void>('/api/vacation');
+  }
+
+  getSieve() {
+    return this.http.get<SieveScript>('/api/sieve');
+  }
+  putSieve(source: string) {
+    return this.http.put<SieveScript>('/api/sieve', { source });
+  }
+  deleteSieve() {
+    return this.http.delete<void>('/api/sieve');
+  }
+}
+
+// VacationRule mirrors internal/webmail.vacationResponse.
+export interface VacationRule {
+  enabled: boolean;
+  subject: string;
+  body: string;
+  suppress_days?: number;
+  updated_at?: string;
+}
+
+// SieveScript mirrors internal/webmail.sieveResponse.
+export interface SieveScript {
+  source: string;
+  updated_at?: string;
 }
 
 // readCookie returns the value of cookie `name`, or '' if absent. It is

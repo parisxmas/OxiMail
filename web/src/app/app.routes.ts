@@ -14,6 +14,12 @@ export const routes: Routes = [
       import('./mailbox/mailbox.component').then((m) => m.MailboxComponent),
     canActivate: [authGuard],
   },
+  {
+    path: 'settings',
+    loadComponent: () =>
+      import('./settings/settings.component').then((m) => m.SettingsComponent),
+    canActivate: [authGuard],
+  },
   { path: '', pathMatch: 'full', redirectTo: 'mail' },
   { path: '**', redirectTo: 'mail' },
 ];
