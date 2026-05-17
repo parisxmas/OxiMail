@@ -12,6 +12,13 @@ import {
   MessageSummary,
 } from '../models';
 
+// Auto-refresh cadence for the open mailbox + folder counts. 10s strikes
+// a balance between feeling live and the load it puts on the server
+// (one /mailboxes + one /messages call per tab per cadence). A future
+// upgrade would push these from the server via SSE/WebSocket keyed off
+// the IMAP tracker's mailbox-update events instead of polling.
+const REFRESH_INTERVAL_MS = 10_000;
+
 @Component({
   selector: 'oximail-mailbox',
   imports: [DatePipe, ComposeComponent, RouterLink],
@@ -354,13 +361,6 @@ import {
     }
   `,
 })
-// Auto-refresh cadence for the open mailbox + folder counts. 10s strikes
-// a balance between feeling live and the load it puts on the server
-// (one /mailboxes + one /messages call per tab per cadence). A future
-// upgrade would push these from the server via SSE/WebSocket keyed off
-// the IMAP tracker's mailbox-update events instead of polling.
-const REFRESH_INTERVAL_MS = 10_000;
-
 export class MailboxComponent implements OnInit, OnDestroy {
   protected readonly api = inject(ApiService);
   private readonly router = inject(Router);
