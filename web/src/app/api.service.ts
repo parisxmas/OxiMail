@@ -101,6 +101,7 @@ export class ApiService {
     html?: string;
     in_reply_to?: string;
     references?: string[];
+    attachments?: AttachmentUpload[];
   }) {
     return this.http.post<SendResult>('/api/messages', body);
   }
@@ -117,6 +118,7 @@ export class ApiService {
     html?: string;
     in_reply_to?: string;
     references?: string[];
+    attachments?: AttachmentUpload[];
   }) {
     return this.http.post<MessageSummary>('/api/drafts', body);
   }
@@ -170,6 +172,15 @@ export class ApiService {
       new_password: newPassword,
     });
   }
+}
+
+// AttachmentUpload mirrors internal/webmail.attachmentInput — one file
+// the user attached to an outbound message. `data` is base64-encoded
+// bytes; the server decodes + enforces a 25 MB total budget.
+export interface AttachmentUpload {
+  filename: string;
+  content_type: string;
+  data: string;
 }
 
 // VacationRule mirrors internal/webmail.vacationResponse.

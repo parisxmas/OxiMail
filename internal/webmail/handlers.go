@@ -1,6 +1,7 @@
 package webmail
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -314,7 +315,32 @@ type sendRequest struct {
 	// References + the original's own Message-Id, per RFC 5322 §3.6.4).
 	InReplyTo  string   `json:"in_reply_to,omitempty"`
 	References []string `json:"references,omitempty"`
+	// Optional file attachments. Each entry carries the filename,
+	// content type, and the file bytes base64-encoded. The server
+	// decodes, enforces maxAttachmentBytes total, and wraps the
+	// message in multipart/mixed. Empty / nil means a plain message.
+	Attachments []attachmentInput `json:"attachments,omitempty"`
 }
+
+// attachmentInput is one file attached to an outbound message. Sent
+// over JSON, with Data base64-encoded — gross on the wire but works
+// with the existing JSON pipeline and keeps the API single-shot
+// (no separate multipart upload flow). For a personal mail server's
+// typical attachment sizes (a few MB) the ~33% base64 overhead is
+// fine; the maxAttachmentBytes cap below is what keeps it honest.
+type attachmentInput struct {
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	Data        string `json:"data"` // base64-encoded bytes
+}
+
+// maxAttachmentBytes is the hard cap on the total decoded attachment
+// payload for one outbound message. 25 MB matches Gmail's outbound
+// limit and is what most receiving MTAs accept without splitting
+// messages or rejecting them outright. Per-attachment count is not
+// capped — one big file or twenty small files both have to fit
+// under the same byte budget.
+const maxAttachmentBytes = 25 * 1024 * 1024
 
 // sendResponse reports how a sent message was dispatched.
 type sendResponse struct {
@@ -336,18 +362,24 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, acc *store.A
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	attachments, err := decodeAttachments(req.Attachments)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	messageID := randomID() + "@" + addressDomain(acc.Address)
 	raw := buildMessage(composeFields{
-		from:       acc.Address,
-		to:         req.To,
-		cc:         req.Cc,
-		subject:    req.Subject,
-		text:       req.Text,
-		html:       req.HTML,
-		messageID:  messageID,
-		inReplyTo:  req.InReplyTo,
-		references: req.References,
+		from:        acc.Address,
+		to:          req.To,
+		cc:          req.Cc,
+		subject:     req.Subject,
+		text:        req.Text,
+		html:        req.HTML,
+		messageID:   messageID,
+		inReplyTo:   req.InReplyTo,
+		references:  req.References,
+		attachments: attachments,
 	})
 	in := store.IncomingMessage{
 		Raw:       raw,
@@ -398,17 +430,23 @@ func (s *Server) handleSaveDraft(w http.ResponseWriter, r *http.Request, acc *st
 		writeError(w, http.StatusInternalServerError, "Drafts folder not available")
 		return
 	}
+	attachments, err := decodeAttachments(req.Attachments)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	messageID := randomID() + "@" + addressDomain(acc.Address)
 	raw := buildMessage(composeFields{
-		from:       acc.Address,
-		to:         req.To,
-		cc:         req.Cc,
-		subject:    req.Subject,
-		text:       req.Text,
-		html:       req.HTML,
-		messageID:  messageID,
-		inReplyTo:  req.InReplyTo,
-		references: req.References,
+		from:        acc.Address,
+		to:          req.To,
+		cc:          req.Cc,
+		subject:     req.Subject,
+		text:        req.Text,
+		html:        req.HTML,
+		messageID:   messageID,
+		inReplyTo:   req.InReplyTo,
+		references:  req.References,
+		attachments: attachments,
 	})
 	in := store.IncomingMessage{
 		Raw:       raw,
@@ -453,6 +491,39 @@ func (s *Server) loadOwnedMessage(w http.ResponseWriter, r *http.Request, acc *s
 		return nil, false
 	}
 	return m, true
+}
+
+// decodeAttachments base64-decodes the SPA-side attachment payload
+// and enforces maxAttachmentBytes across the whole set. Returns the
+// per-attachment data ready for buildMessage. An empty / nil input
+// returns nil, nil — no error.
+//
+// Validation is strict on purpose: a bad payload from the SPA is more
+// likely to mean a bug than user fat-fingering, so we surface it as a
+// 400 rather than silently dropping the file.
+func decodeAttachments(in []attachmentInput) ([]attachment, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	total := 0
+	out := make([]attachment, 0, len(in))
+	for i, a := range in {
+		bytes, err := base64.StdEncoding.DecodeString(a.Data)
+		if err != nil {
+			return nil, fmt.Errorf("attachment %d (%q): not valid base64: %w", i, a.Filename, err)
+		}
+		total += len(bytes)
+		if total > maxAttachmentBytes {
+			return nil, fmt.Errorf("attachments exceed %d bytes (Gmail-style limit) — split into multiple messages",
+				maxAttachmentBytes)
+		}
+		out = append(out, attachment{
+			Filename:    a.Filename,
+			ContentType: a.ContentType,
+			Content:     bytes,
+		})
+	}
+	return out, nil
 }
 
 // collectRecipients merges, trims, and de-duplicates the To and Cc

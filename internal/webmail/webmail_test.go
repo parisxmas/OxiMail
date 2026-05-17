@@ -8,6 +8,7 @@ package webmail_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -328,6 +329,124 @@ func TestWebmail(t *testing.T) {
 		}
 		if !strings.Contains(s, "<p>fallback <b>plain</b> text</p>") {
 			t.Error("HTML body not present in the raw message")
+		}
+	})
+
+	t.Run("send with attachment wraps body in multipart/mixed", func(t *testing.T) {
+		// Two small files: one PNG-ish, one text. base64 in the wire
+		// payload — the server decodes and assembles multipart/mixed
+		// with each as a separate part.
+		fileA := []byte("PNG\x89BYTES\x00\x01\x02")
+		fileB := []byte("# notes\nthis is a tiny text file\n")
+		body := mustJSON(map[string]any{
+			"to":      []string{"other@oximail.test"},
+			"subject": "Email with files",
+			"text":    "see attached",
+			"attachments": []map[string]any{
+				{
+					"filename":     "diagram.png",
+					"content_type": "image/png",
+					"data":         base64.StdEncoding.EncodeToString(fileA),
+				},
+				{
+					"filename":     "notes.txt",
+					"content_type": "text/plain",
+					"data":         base64.StdEncoding.EncodeToString(fileB),
+				},
+			},
+		})
+		var out struct{ Delivered, Queued int }
+		if status := postJSON(t, base+"/api/messages", token, body, &out); status != http.StatusOK {
+			t.Fatalf("status = %d, want 200", status)
+		}
+		if out.Delivered != 1 {
+			t.Fatalf("delivered = %d, want 1", out.Delivered)
+		}
+
+		// Recipient sees the message and the API surfaces both
+		// attachments with their original metadata.
+		otherInbox, _ := st.GetMailboxByName(other.ID, "INBOX")
+		recvd, _ := st.ListMessages(other.ID, otherInbox.ID)
+		var withAtt *store.Message
+		for i := range recvd {
+			if recvd[i].Subject == "Email with files" {
+				withAtt = &recvd[i]
+				break
+			}
+		}
+		if withAtt == nil {
+			t.Fatal("recipient did not receive the attachment message")
+		}
+		raw, _ := st.FetchBody(withAtt)
+		if !strings.Contains(string(raw), "multipart/mixed") {
+			t.Error("composed message is not multipart/mixed")
+		}
+
+		// Log in as the recipient and pull the message detail to verify
+		// the parsed attachments list comes back with correct metadata.
+		var otherLogin struct{ Token string }
+		postJSON(t, base+"/api/login", "", loginBody("other@oximail.test", "s3cret"), &otherLogin)
+		var detail struct {
+			Subject     string
+			Attachments []struct {
+				Filename    string `json:"filename"`
+				ContentType string `json:"content_type"`
+				Size        int    `json:"size"`
+			}
+		}
+		url := fmt.Sprintf("%s/api/messages/%d", base, withAtt.ID)
+		if status := getJSON(t, url, otherLogin.Token, &detail); status != http.StatusOK {
+			t.Fatalf("get message: %d", status)
+		}
+		if len(detail.Attachments) != 2 {
+			t.Fatalf("attachments count = %d, want 2 (%+v)", len(detail.Attachments), detail.Attachments)
+		}
+		want := map[string]int{"diagram.png": len(fileA), "notes.txt": len(fileB)}
+		for _, a := range detail.Attachments {
+			if w, ok := want[a.Filename]; !ok || a.Size != w {
+				t.Errorf("attachment %+v: missing or wrong size (want %d)", a, w)
+			}
+			delete(want, a.Filename)
+		}
+		if len(want) > 0 {
+			t.Errorf("expected attachments not seen: %+v", want)
+		}
+
+		// Download attachment 0 (diagram.png) and verify the bytes
+		// round-trip exactly.
+		req, _ := http.NewRequest(http.MethodGet,
+			fmt.Sprintf("%s/api/messages/%d/attachments/0", base, withAtt.ID), nil)
+		req.Header.Set("Authorization", "Bearer "+otherLogin.Token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("download attachment: %v", err)
+		}
+		defer resp.Body.Close()
+		got, _ := io.ReadAll(resp.Body)
+		// Attachments may come back in either order — accept matching
+		// either of the two payloads.
+		if !bytes.Equal(got, fileA) && !bytes.Equal(got, fileB) {
+			t.Errorf("attachment 0 bytes = %q, want one of fileA/fileB", got)
+		}
+	})
+
+	t.Run("send rejects attachments over the size limit", func(t *testing.T) {
+		// 26 MB > 25 MB cap — server must 400.
+		big := make([]byte, 26*1024*1024)
+		body := mustJSON(map[string]any{
+			"to":      []string{"other@oximail.test"},
+			"subject": "Too big",
+			"text":    "nope",
+			"attachments": []map[string]any{
+				{
+					"filename":     "huge.bin",
+					"content_type": "application/octet-stream",
+					"data":         base64.StdEncoding.EncodeToString(big),
+				},
+			},
+		})
+		if status := post(t, base+"/api/messages", token, body); status != http.StatusBadRequest {
+			t.Fatalf("oversize attachment: status = %d, want 400", status)
 		}
 	})
 

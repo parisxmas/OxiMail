@@ -2,6 +2,7 @@ package webmail
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"mime"
@@ -11,6 +12,16 @@ import (
 	"time"
 )
 
+// attachment is one file the user attached to an outbound message.
+// Content is the raw bytes (already base64-decoded by the handler);
+// Filename + ContentType land on the part header. A nil/empty
+// ContentType defaults to application/octet-stream.
+type attachment struct {
+	Filename    string
+	ContentType string
+	Content     []byte
+}
+
 // composeFields collects the fields a compose form provides. inReplyTo
 // is the Message-ID of the message being replied to (no angle
 // brackets); references is the existing References chain plus that
@@ -18,15 +29,18 @@ import (
 type composeFields struct {
 	from, subject, text, html, messageID, inReplyTo string
 	to, cc, references                              []string
+	attachments                                     []attachment
 }
 
 // buildMessage assembles a minimal RFC 5322 message from the fields a
-// compose form provides. If html is empty, the body is a single
-// text/plain part. If html is non-empty, the body is multipart/
-// alternative carrying both representations — clients pick the richer
-// one they understand.
+// compose form provides.
 //
-// TODO: attachments (multipart/mixed wrapping the alternative).
+// MIME structure picked based on what's present:
+//   - no html, no attachments  → text/plain
+//   - html, no attachments     → multipart/alternative (text + html)
+//   - any attachments          → multipart/mixed with the body part
+//                                first (either plain or alternative),
+//                                followed by one part per attachment
 func buildMessage(f composeFields) []byte {
 	var b strings.Builder
 	fmt.Fprintf(&b, "From: %s\r\n", f.from)
@@ -56,30 +70,135 @@ func buildMessage(f composeFields) []byte {
 	}
 	b.WriteString("MIME-Version: 1.0\r\n")
 
-	text, html := f.text, f.html
+	bodyPart := renderBodyPart(f.text, f.html)
+	if len(f.attachments) == 0 {
+		// No attachments — the body part IS the message body. Strip
+		// the leading MIME-Version header line we'd write twice
+		// (renderBodyPart returns headers + body together).
+		b.WriteString(bodyPart)
+		return []byte(b.String())
+	}
 
+	// Attachments — wrap the body part and each attachment in
+	// multipart/mixed.
+	var mixed strings.Builder
+	mw := multipart.NewWriter(&mixed)
+
+	// First part: the body (which is itself either text/plain or a
+	// nested multipart/alternative). We write it as a raw part — the
+	// part header lines are already in bodyPart and they precede the
+	// blank line + body bytes.
+	bodyPartHeader, bodyPartBody := splitHeaderBody(bodyPart)
+	if err := writeRawPart(mw, bodyPartHeader, bodyPartBody); err != nil {
+		return []byte(b.String()) // best-effort; truncate cleanly
+	}
+
+	// Each attachment as its own part — base64 encoded, with
+	// Content-Disposition: attachment so clients offer it as a file.
+	for _, att := range f.attachments {
+		ct := att.ContentType
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		h := textproto.MIMEHeader{}
+		h.Set("Content-Type", ct)
+		h.Set("Content-Transfer-Encoding", "base64")
+		if att.Filename != "" {
+			h.Set("Content-Disposition",
+				fmt.Sprintf("attachment; filename=%q", att.Filename))
+		} else {
+			h.Set("Content-Disposition", "attachment")
+		}
+		part, err := mw.CreatePart(h)
+		if err != nil {
+			continue
+		}
+		// base64 with CRLF line wraps at 76 chars (RFC 2045 §6.8).
+		wrapped := wrapBase64(att.Content)
+		_, _ = part.Write([]byte(wrapped))
+	}
+	_ = mw.Close()
+
+	fmt.Fprintf(&b, "Content-Type: multipart/mixed; boundary=%q\r\n", mw.Boundary())
+	b.WriteString("\r\n")
+	b.WriteString(mixed.String())
+	return []byte(b.String())
+}
+
+// renderBodyPart returns the headers + body bytes for the message's
+// content area — either a single text/plain block or a
+// multipart/alternative wrapper. The string starts with one or more
+// header lines, then a blank line, then the body.
+func renderBodyPart(text, html string) string {
 	if html == "" {
+		var b strings.Builder
 		b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
 		b.WriteString("Content-Transfer-Encoding: 8bit\r\n")
 		b.WriteString("\r\n")
 		b.WriteString(normalizeNewlines(text))
-		return []byte(b.String())
+		return b.String()
 	}
-
-	// multipart/alternative — text first (so plain-text clients show it),
-	// HTML last (so MIME-aware clients prefer it, per RFC 2046 §5.1.4).
 	var body strings.Builder
 	mw := multipart.NewWriter(&body)
 	addPart(mw, "text/plain; charset=utf-8", text)
-	if html != "" {
-		addPart(mw, "text/html; charset=utf-8", html)
-	}
+	addPart(mw, "text/html; charset=utf-8", html)
 	_ = mw.Close()
 
+	var b strings.Builder
 	fmt.Fprintf(&b, "Content-Type: multipart/alternative; boundary=%q\r\n", mw.Boundary())
 	b.WriteString("\r\n")
 	b.WriteString(body.String())
-	return []byte(b.String())
+	return b.String()
+}
+
+// splitHeaderBody splits a "headers\r\n\r\nbody" blob into the two
+// halves. Used by buildMessage to re-wrap the body part as a nested
+// multipart part inside multipart/mixed.
+func splitHeaderBody(s string) (headers, body string) {
+	if i := strings.Index(s, "\r\n\r\n"); i >= 0 {
+		return s[:i], s[i+4:]
+	}
+	return s, ""
+}
+
+// writeRawPart writes a part whose Content-Type and other headers are
+// already in `headers` (the unfolded "Header: value" lines, one per
+// line, separated by CRLF). Used to nest a pre-rendered
+// multipart/alternative block inside multipart/mixed without
+// re-parsing.
+func writeRawPart(mw *multipart.Writer, headers, body string) error {
+	h := textproto.MIMEHeader{}
+	for _, line := range strings.Split(headers, "\r\n") {
+		if line == "" {
+			continue
+		}
+		if c := strings.IndexByte(line, ':'); c > 0 {
+			h.Set(strings.TrimSpace(line[:c]), strings.TrimSpace(line[c+1:]))
+		}
+	}
+	part, err := mw.CreatePart(h)
+	if err != nil {
+		return err
+	}
+	_, err = part.Write([]byte(body))
+	return err
+}
+
+// wrapBase64 encodes content and inserts CRLF every 76 characters per
+// RFC 2045 §6.8.
+func wrapBase64(content []byte) string {
+	enc := base64.StdEncoding.EncodeToString(content)
+	var b strings.Builder
+	const w = 76
+	for i := 0; i < len(enc); i += w {
+		end := i + w
+		if end > len(enc) {
+			end = len(enc)
+		}
+		b.WriteString(enc[i:end])
+		b.WriteString("\r\n")
+	}
+	return b.String()
 }
 
 // addPart writes one inline part with the given content type and body.
