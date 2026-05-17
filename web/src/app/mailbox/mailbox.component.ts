@@ -39,11 +39,29 @@ import {
 // the IMAP tracker's mailbox-update events instead of polling.
 const REFRESH_INTERVAL_MS = 10_000;
 
+// Pane-width constraints + defaults for the resizable splitter between
+// folders | list | reader. The reader pane takes whatever's left
+// (1fr); only the first two panes are explicit-width. Persisted to
+// localStorage under STORAGE_KEY_* so the layout survives reload.
+const FOLDERS_MIN = 160;
+const FOLDERS_MAX = 360;
+const FOLDERS_DEFAULT = 200;
+const LIST_MIN = 260;
+const LIST_MAX = 600;
+const LIST_DEFAULT = 360;
+const STORAGE_KEY_FOLDERS = 'oximail.foldersWidth';
+const STORAGE_KEY_LIST = 'oximail.listWidth';
+
 @Component({
   selector: 'oximail-mailbox',
   imports: [DatePipe, ComposeComponent, RouterLink, LucideAngularModule],
   template: `
-    <div class="app" [attr.data-view]="view()">
+    <div
+      class="app"
+      [attr.data-view]="view()"
+      [style.--folders-width.px]="foldersWidth()"
+      [style.--list-width.px]="listWidth()"
+    >
       <!-- Folder sidebar -->
       <aside class="folders">
         <div class="me" [title]="api.address()">{{ api.address() }}</div>
@@ -73,6 +91,15 @@ const REFRESH_INTERVAL_MS = 10_000;
           Sign out
         </button>
       </aside>
+
+      <!-- Divider: folders | list. Drag to resize. Double-click resets. -->
+      <div
+        class="divider"
+        role="separator"
+        aria-label="Resize folders pane"
+        (mousedown)="startResize($event, 'folders')"
+        (dblclick)="resetWidth('folders')"
+      ></div>
 
       <!-- Message list -->
       <section class="list">
@@ -127,6 +154,15 @@ const REFRESH_INTERVAL_MS = 10_000;
           }
         }
       </section>
+
+      <!-- Divider: list | reader. Drag to resize. Double-click resets. -->
+      <div
+        class="divider"
+        role="separator"
+        aria-label="Resize message list"
+        (mousedown)="startResize($event, 'list')"
+        (dblclick)="resetWidth('list')"
+      ></div>
 
       <!-- Reader -->
       <section class="reader">
@@ -230,18 +266,42 @@ const REFRESH_INTERVAL_MS = 10_000;
   styles: `
     .app {
       display: grid;
-      grid-template-columns: 200px 320px 1fr;
+      /* Two thin (6px) divider columns sit between the three panes.
+         --folders-width and --list-width are bound from the host via
+         signals; the reader takes whatever's left (1fr). */
+      grid-template-columns:
+        var(--folders-width, 200px)
+        6px
+        var(--list-width, 360px)
+        6px
+        1fr;
       height: 100%;
+    }
+    /* The drag handle itself. 6px wide, transparent until hover/active
+       so it reads as a thin gutter at rest. col-resize cursor advertises
+       the affordance. */
+    .divider {
+      background: transparent;
+      cursor: col-resize;
+      user-select: none;
+      transition: background 120ms ease;
+    }
+    .divider:hover,
+    .divider:active {
+      background: var(--accent);
+      opacity: 0.4;
     }
     .mobile-only { display: none; }
     /* Below ~720px we collapse to a single column and show only the
        column that matches the current view signal. Back buttons in
-       the list header and reader header navigate between them. */
+       the list header and reader header navigate between them. The
+       dividers are hidden — at that width there's nothing to resize. */
     @media (max-width: 720px) {
       .app {
         grid-template-columns: 1fr;
       }
       .app > * { display: none; }
+      .divider { display: none !important; }
       .app[data-view='folders'] .folders { display: flex; }
       .app[data-view='list'] .list { display: flex; flex-direction: column; }
       .app[data-view='reader'] .reader { display: flex; }
@@ -584,6 +644,22 @@ export class MailboxComponent implements OnInit, OnDestroy {
     Reply, ReplyAll, Search, Send, Settings, Star, Trash2,
   };
 
+  // Pane widths for the resizable splitter. Restored from localStorage
+  // on construction so a returning user gets their last layout back;
+  // the template binds them to CSS variables on .app, which the grid
+  // template-columns then consumes. See FOLDERS_DEFAULT / LIST_DEFAULT
+  // and the related min/max constants up top.
+  readonly foldersWidth = signal<number>(this.loadWidth(STORAGE_KEY_FOLDERS, FOLDERS_DEFAULT, FOLDERS_MIN, FOLDERS_MAX));
+  readonly listWidth = signal<number>(this.loadWidth(STORAGE_KEY_LIST, LIST_DEFAULT, LIST_MIN, LIST_MAX));
+
+  // Active resize state — populated on mousedown over a divider, drives
+  // the document-level mousemove/mouseup listeners.
+  private resizeTarget: 'folders' | 'list' | null = null;
+  private resizeStartX = 0;
+  private resizeStartWidth = 0;
+  private readonly onResizeMove = (e: MouseEvent) => this.resizeMove(e);
+  private readonly onResizeEnd = () => this.resizeEnd();
+
   readonly mailboxes = signal<Mailbox[]>([]);
   readonly selected = signal<string>('INBOX');
   readonly messages = signal<MessageSummary[]>([]);
@@ -626,6 +702,14 @@ export class MailboxComponent implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     this.stopPolling();
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    // Guard against a mid-drag teardown — clear the document-level
+    // resize listeners and reset the cursor, otherwise they leak.
+    if (this.resizeTarget) {
+      document.removeEventListener('mousemove', this.onResizeMove);
+      document.removeEventListener('mouseup', this.onResizeEnd);
+      document.body.style.cursor = '';
+      this.resizeTarget = null;
+    }
   }
 
   private startPolling(): void {
@@ -811,6 +895,72 @@ export class MailboxComponent implements OnInit, OnDestroy {
     this.api.logout().subscribe({ next: done, error: done });
   }
 
+  // startResize captures the initial mouse position and current
+  // pane width, then attaches document-level listeners that track
+  // the drag through to mouseup. Listeners go on `document` (not
+  // the 6px divider) so dragging works even when the cursor leaves
+  // the tiny target — the standard splitter idiom.
+  protected startResize(event: MouseEvent, target: 'folders' | 'list'): void {
+    event.preventDefault();
+    this.resizeTarget = target;
+    this.resizeStartX = event.clientX;
+    this.resizeStartWidth = target === 'folders' ? this.foldersWidth() : this.listWidth();
+    document.body.style.cursor = 'col-resize';
+    document.addEventListener('mousemove', this.onResizeMove);
+    document.addEventListener('mouseup', this.onResizeEnd);
+  }
+
+  private resizeMove(event: MouseEvent): void {
+    if (!this.resizeTarget) return;
+    const delta = event.clientX - this.resizeStartX;
+    const next = this.resizeStartWidth + delta;
+    if (this.resizeTarget === 'folders') {
+      this.foldersWidth.set(clamp(next, FOLDERS_MIN, FOLDERS_MAX));
+    } else {
+      this.listWidth.set(clamp(next, LIST_MIN, LIST_MAX));
+    }
+  }
+
+  private resizeEnd(): void {
+    if (!this.resizeTarget) return;
+    // Persist the final widths only on drag-end (not every mousemove)
+    // so we don't hammer localStorage during the drag.
+    const key = this.resizeTarget === 'folders' ? STORAGE_KEY_FOLDERS : STORAGE_KEY_LIST;
+    const width = this.resizeTarget === 'folders' ? this.foldersWidth() : this.listWidth();
+    try { localStorage.setItem(key, String(width)); } catch { /* ignore quota / disabled storage */ }
+    this.resizeTarget = null;
+    document.body.style.cursor = '';
+    document.removeEventListener('mousemove', this.onResizeMove);
+    document.removeEventListener('mouseup', this.onResizeEnd);
+  }
+
+  // resetWidth (double-click on a divider) restores the pane to its
+  // default width and clears the stored override.
+  protected resetWidth(target: 'folders' | 'list'): void {
+    if (target === 'folders') {
+      this.foldersWidth.set(FOLDERS_DEFAULT);
+      try { localStorage.removeItem(STORAGE_KEY_FOLDERS); } catch { /* ignore */ }
+    } else {
+      this.listWidth.set(LIST_DEFAULT);
+      try { localStorage.removeItem(STORAGE_KEY_LIST); } catch { /* ignore */ }
+    }
+  }
+
+  // loadWidth restores a persisted pane width, clamped into the legal
+  // range. Returns the default if storage is empty, unparseable, or
+  // out of bounds.
+  private loadWidth(key: string, def: number, min: number, max: number): number {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return def;
+      const n = parseInt(raw, 10);
+      if (!Number.isFinite(n)) return def;
+      return clamp(n, min, max);
+    } catch {
+      return def;
+    }
+  }
+
   // folderIcon maps an IMAP mailbox name to a Lucide icon. Standard
   // folder names (case-insensitive) get a recognisable icon; anything
   // else falls back to a generic folder.
@@ -962,4 +1112,10 @@ function forwardBody(msg: MessageDetail): string {
 // component use as a plain-text fallback.
 function stripHTML(s: string): string {
   return s.replace(/<[^>]*>/g, '');
+}
+
+// clamp confines n to [min, max]. Used by the resizable splitter to
+// keep pane widths inside the configured legal range.
+function clamp(n: number, min: number, max: number): number {
+  return Math.min(Math.max(n, min), max);
 }
