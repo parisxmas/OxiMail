@@ -1,6 +1,7 @@
 package spam
 
 import (
+	"net"
 	"sync"
 	"time"
 )
@@ -48,8 +49,15 @@ func newGreylister(delay time.Duration) *greylister {
 // check records a delivery attempt from (ip, mailFrom) and returns the
 // verdict for it: Greylist until the tuple has been seen, waited out the
 // delay, and retried; Accept thereafter.
+//
+// The IP is folded down to its /24 (IPv4) or /64 (IPv6) before keying.
+// Large MTAs (Gmail, Outlook, Apple, Amazon SES) commonly retry from a
+// different exit IP within the same subnet; keying on the exact IP
+// would force them to re-greylist on every attempt and eventually give
+// up. The subnet sizes match what RFC 5321 §4.4 callers tend to
+// allocate in practice and what greylisting tools like postgrey use.
 func (g *greylister) check(ip, mailFrom string) Verdict {
-	key := ip + "\x00" + mailFrom
+	key := greylistKey(ip) + "\x00" + mailFrom
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -74,6 +82,29 @@ func (g *greylister) check(ip, mailFrom string) Verdict {
 		e.lastSeen = now
 		return Greylist
 	}
+}
+
+// greylistKey returns the subnet form of an IP that the greylister
+// uses as a tuple key. For IPv4 the last octet is zeroed (/24); for
+// IPv6 the lowest 64 bits are zeroed (/64). An unparseable address is
+// passed through unchanged so it still keys consistently.
+func greylistKey(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return ip
+	}
+	if v4 := parsed.To4(); v4 != nil {
+		v4[3] = 0
+		return v4.String() + "/24"
+	}
+	v6 := parsed.To16()
+	if v6 == nil {
+		return ip
+	}
+	for i := 8; i < 16; i++ {
+		v6[i] = 0
+	}
+	return v6.String() + "/64"
 }
 
 // sweep drops tuples that have aged out: pending ones that were never

@@ -86,6 +86,15 @@ type Config struct {
 	// RspamdURL — content spam scanning over HTTP. Empty disables it.
 	RspamdURL string
 
+	// DNSBLZones is the comma-separated list of DNS blocklist zones
+	// queried at connection-time (see internal/spam/dnsbl.go). The
+	// default — "zen.spamhaus.org" — only works when OxiMail resolves
+	// it through a private/registered DNS path; Spamhaus refuses
+	// queries that go via public resolvers (1.1.1.1, 8.8.8.8, …) and
+	// returns a diagnostic 127.255.255.x reply that the checker treats
+	// as "unable to classify". Set to empty to disable DNSBL entirely.
+	DNSBLZones []string
+
 	// MTASTSMode publishes an MTA-STS policy (RFC 8461) when set.
 	// Valid values: "enforce", "testing", "none". An empty value
 	// disables the /.well-known/mta-sts.txt handler.
@@ -136,6 +145,7 @@ func Load() Config {
 		OxiDBHost:      env("OXIMAIL_OXIDB_HOST", "127.0.0.1"),
 		OxiDBPort:      envInt("OXIMAIL_OXIDB_PORT", 4444),
 		RspamdURL:      env("OXIMAIL_RSPAMD_URL", ""),
+		DNSBLZones:     splitCSV(envOrDefault("OXIMAIL_DNSBL_ZONES", "zen.spamhaus.org")),
 		SRSSecret:      env("OXIMAIL_SRS_SECRET", ""),
 		SRSMaxAge:      envDuration("OXIMAIL_SRS_MAX_AGE", 21*24*time.Hour),
 		MTASTSMode:     env("OXIMAIL_MTASTS_MODE", ""),
@@ -241,6 +251,17 @@ func splitCSV(raw string) []string {
 
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// envOrDefault is like env, but distinguishes "unset" from "set to the
+// empty string". An explicit empty value wins over def — used for
+// settings where setting the env var to "" is the operator's way of
+// disabling a feature whose default is non-empty.
+func envOrDefault(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok {
 		return v
 	}
 	return def

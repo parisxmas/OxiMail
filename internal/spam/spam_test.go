@@ -107,6 +107,59 @@ func TestDNSBLFailsOpen(t *testing.T) {
 	}
 }
 
+// Spamhaus signals "we refused this query because it came in through a
+// public open resolver" with 127.255.255.254 (and 127.255.255.252 /
+// 255 for related conditions). Reading any of those as a listing
+// would reject every inbound message; the checker must treat them as
+// "not listed" and warn instead.
+func TestDNSBLSpamhausDiagnosticIsNotAListing(t *testing.T) {
+	for _, code := range []string{"127.255.255.252", "127.255.255.254", "127.255.255.255"} {
+		d := newDNSBLChecker([]string{"zen.spamhaus.org"})
+		d.lookup = func(string) ([]string, error) { return []string{code}, nil }
+		if d.listed("1.2.3.4") {
+			t.Errorf("DNSBL reply %s must NOT count as listed (it is a refusal code)", code)
+		}
+	}
+}
+
+// 127.0.0.x with x in [1, 254] is the RFC 5782 listing range.
+func TestDNSBLRecognizesListingRange(t *testing.T) {
+	for _, code := range []string{"127.0.0.2", "127.0.0.3", "127.0.0.10", "127.0.0.254"} {
+		d := newDNSBLChecker([]string{"bl.example"})
+		d.lookup = func(string) ([]string, error) { return []string{code}, nil }
+		if !d.listed("1.2.3.4") {
+			t.Errorf("DNSBL reply %s MUST count as listed", code)
+		}
+	}
+}
+
+// Composite-zone replies (Spamhaus ZEN returns several A records, one
+// per sub-list the IP is on) — a single real listing in the bag wins.
+func TestDNSBLMixedListedAndDiagnosticIsListed(t *testing.T) {
+	d := newDNSBLChecker([]string{"zen.spamhaus.org"})
+	d.lookup = func(string) ([]string, error) {
+		return []string{"127.255.255.254", "127.0.0.2"}, nil
+	}
+	if !d.listed("1.2.3.4") {
+		t.Error("a real listing alongside a diagnostic code MUST count as listed")
+	}
+}
+
+// An empty zones list disables DNSBL — the checker never even does a
+// lookup. Tested via a lookup that would panic if called.
+func TestDNSBLEmptyZonesDisables(t *testing.T) {
+	d := newDNSBLChecker(nil)
+	d.lookup = func(string) ([]string, error) { panic("should not be called") }
+	if d.listed("1.2.3.4") {
+		t.Error("empty zones list must short-circuit to not-listed")
+	}
+	d = newDNSBLChecker([]string{})
+	d.lookup = func(string) ([]string, error) { panic("should not be called") }
+	if d.listed("1.2.3.4") {
+		t.Error("empty zones list must short-circuit to not-listed")
+	}
+}
+
 func TestGreylister(t *testing.T) {
 	clk := newFakeClock()
 	g := newGreylister(5 * time.Minute)
@@ -134,6 +187,46 @@ func TestGreylister(t *testing.T) {
 	}
 }
 
+// Large MTAs commonly retry from a different exit IP in the same /24
+// (Gmail, Outlook, Apple). The greylister must collapse that into one
+// tuple, so a retry from any neighbour IP within the same subnet
+// counts as the original sender retrying — otherwise cloud senders
+// stay perpetually greylisted.
+func TestGreylisterFoldsIPv4Subnet(t *testing.T) {
+	clk := newFakeClock()
+	g := newGreylister(time.Minute)
+	g.now = clk.now
+
+	if v := g.check("209.85.208.47", "x@gmail.com"); v != Greylist {
+		t.Fatalf("first contact = %v, want Greylist", v)
+	}
+	clk.advance(2 * time.Minute)
+	// Retry from a different IP in the same /24 — must pass.
+	if v := g.check("209.85.208.179", "x@gmail.com"); v != Accept {
+		t.Fatalf("retry from same /24 = %v, want Accept (cloud-sender folding)", v)
+	}
+	// Adjacent /24 is still a fresh tuple.
+	if v := g.check("209.85.209.47", "x@gmail.com"); v != Greylist {
+		t.Fatalf("retry from a different /24 = %v, want Greylist", v)
+	}
+}
+
+func TestGreylistKey(t *testing.T) {
+	cases := map[string]string{
+		"209.85.208.47":       "209.85.208.0/24",
+		"209.85.208.179":      "209.85.208.0/24",
+		"1.2.3.4":             "1.2.3.0/24",
+		"2001:db8::1":         "2001:db8::/64",
+		"2001:db8::ffff:1234": "2001:db8::/64",
+		"not-an-ip":           "not-an-ip",
+	}
+	for in, want := range cases {
+		if got := greylistKey(in); got != want {
+			t.Errorf("greylistKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestGreylisterSweep(t *testing.T) {
 	clk := newFakeClock()
 	g := newGreylister(5 * time.Minute)
@@ -154,7 +247,7 @@ func TestGreylisterSweep(t *testing.T) {
 
 func TestPipelineCheck(t *testing.T) {
 	clk := newFakeClock()
-	p := New("")
+	p := New("", nil)
 	p.rateLimit.now = clk.now
 	p.greylist.now = clk.now
 	p.dnsbl.lookup = notListed

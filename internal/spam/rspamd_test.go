@@ -104,7 +104,7 @@ func TestPipelineRspamdStage(t *testing.T) {
 	defer srv.Close()
 
 	clk := newFakeClock()
-	p := New("")                         // no rspamd from the constructor...
+	p := New("", nil)                    // no rspamd from the constructor...
 	p.rspamd = newRspamdChecker(srv.URL) // ...inject one directly
 	p.rateLimit.now = clk.now
 	p.greylist.now = clk.now
