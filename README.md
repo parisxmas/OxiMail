@@ -280,4 +280,10 @@ The roadmap is long but a few items are explicit gaps:
 
 ## License
 
-See [LICENSE](./LICENSE).
+**AGPL-3.0-or-later.** See [LICENSE](./LICENSE) for the full text.
+
+OxiMail is a network-facing service: if you modify the source and
+run the modified version where users interact with it over a network
+(an MX, an IMAP server, a webmail API, an admin API), §13 of the
+AGPL requires you to offer those users the corresponding source of
+the running version. Internal-only deployments are unaffected.

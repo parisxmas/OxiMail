@@ -2,6 +2,7 @@
   "name": "oximail-webmail",
   "version": "0.1.0",
   "description": "OxiMail webmail frontend — an Angular SPA over the webmail HTTP+JSON API.",
+  "license": "AGPL-3.0-or-later",
   "private": true,
   "scripts": {
     "start": "ng serve --proxy-config proxy.conf.json",
