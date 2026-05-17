@@ -40,6 +40,16 @@ new types in the `imap` package as well — `SelectOptions.QResync`,
 - `expunge.go` — add `ExpungeWriter.WriteVanished(uids)` for the
   post-EXPUNGE coalesced `* VANISHED <uids>` form a QRESYNC session
   uses in place of per-message `WriteExpunge`.
+- `tracker.go` — `trackerUpdate` grows an `expungeUID` field;
+  `QueueExpungeWithUID(seqNum, uid)` lets QRESYNC-aware servers
+  attach the UID, while the existing UID-less `QueueExpunge` stays
+  for backward compat. `SessionTracker.Poll` now routes expunge
+  updates through `UpdateWriter.WriteExpungeUID`, which checks the
+  connection's enabled-caps and emits `* VANISHED <uid>` to QRESYNC
+  sessions (RFC 7162 §3.7) and the legacy `EXPUNGE seq` form to
+  everyone else.
+- `conn.go` — `UpdateWriter.WriteExpungeUID(seqNum, uid)` is the new
+  routing helper described above.
 - `enable.go` — `ENABLE CONDSTORE` and `ENABLE QRESYNC` both
   accepted; enabling QRESYNC implicitly also enables CONDSTORE per
   RFC 7162 §3.7.

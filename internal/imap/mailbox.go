@@ -85,12 +85,10 @@ func (m *selectedMailbox) Close() {
 //     local copy — i.e. another connection ran STORE — get their
 //     flags refreshed and FETCH FLAGS (+ MODSEQ) is queued.
 //
-// QRESYNC nuance: per RFC 7162 §3.7 a QRESYNC-enabled session is
-// supposed to see VANISHED instead of EXPUNGE even for cross-
-// connection expunges. The upstream tracker only emits EXPUNGE
-// today, so QRESYNC clients on this code path still get EXPUNGE for
-// cross-connection deletes. Most QRESYNC clients tolerate both, and
-// a fully QRESYNC-aware tracker is a separate upstream patch.
+// Cross-connection expunges go through MailboxTracker.
+// QueueExpungeWithUID, which lets the framework emit "* VANISHED
+// <uid>" for QRESYNC-enabled sessions (RFC 7162 §3.7) and plain
+// EXPUNGE for everyone else.
 func (m *selectedMailbox) watch() {
 	for {
 		select {
@@ -121,12 +119,14 @@ func (m *selectedMailbox) refresh() {
 
 	// (2) Cross-connection EXPUNGE: snapshot UIDs that no longer
 	// exist. Walk back-to-front so the lower indices stay valid as
-	// we drop entries.
+	// we drop entries. Queue with the UID so a QRESYNC-enabled
+	// session gets the VANISHED form.
 	for i := len(m.msgs) - 1; i >= 0; i-- {
-		if _, ok := latestByUID[m.msgs[i].UID]; ok {
+		uid := m.msgs[i].UID
+		if _, ok := latestByUID[uid]; ok {
 			continue
 		}
-		m.tracker.QueueExpunge(uint32(i) + 1)
+		m.tracker.QueueExpungeWithUID(uint32(i)+1, imap.UID(uid))
 		m.msgs = append(m.msgs[:i], m.msgs[i+1:]...)
 	}
 
@@ -146,7 +146,8 @@ func (m *selectedMailbox) refresh() {
 		m.tracker.QueueMessageFlags(seqNum, imap.UID(local.UID), toIMAPFlags(local.Flags), nil)
 	}
 
-	// (1) New arrivals — same logic as before.
+	// (1) New arrivals.
+	added := false
 	for i := range latest {
 		if latest[i].UID < m.uidNext {
 			continue
@@ -158,8 +159,18 @@ func (m *selectedMailbox) refresh() {
 		if latest[i].UID+1 > m.uidNext {
 			m.uidNext = latest[i].UID + 1
 		}
+		added = true
 	}
-	m.tracker.QueueNumMessages(uint32(len(m.msgs)))
+	// Only re-announce the count when something was actually
+	// appended. QueueExpunge already decremented the tracker count
+	// internally, so an expunge-only refresh leaves the tracker in
+	// the right state; calling QueueNumMessages with the post-
+	// expunge count would (a) be redundant and (b) panic upstream
+	// when that count is zero (the dispatch switch has no case for
+	// a no-op update).
+	if added {
+		m.tracker.QueueNumMessages(uint32(len(m.msgs)))
+	}
 }
 
 // containsUID reports whether any message in msgs has uid.

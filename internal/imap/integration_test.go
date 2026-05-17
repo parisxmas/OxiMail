@@ -1311,6 +1311,102 @@ func TestIMAPLiveBroadcast(t *testing.T) {
 	}
 }
 
+// TestIMAPLiveBroadcastQResync is the QRESYNC variant of
+// TestIMAPLiveBroadcast: an IDLE'ing session that has run
+// ENABLE QRESYNC must see "* VANISHED <uid>" (not per-seq EXPUNGE)
+// for cross-connection expunges. The routing lives in the
+// MailboxTracker — QueueExpungeWithUID + UpdateWriter.
+// WriteExpungeUID together choose VANISHED when the session has
+// QRESYNC enabled.
+func TestIMAPLiveBroadcastQResync(t *testing.T) {
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	hash, _ := store.HashPassword(testPassword)
+	acc, err := st.CreateAccount(testAddr, hash, 0)
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if err := st.EnsureDefaultMailboxes(acc.ID); err != nil {
+		t.Fatalf("ensure mailboxes: %v", err)
+	}
+	inbox, _ := st.GetMailboxByName(acc.ID, "INBOX")
+	doomed, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+		Raw: []byte("From: <s@x>\r\nSubject: doomed\r\n\r\n"), Subject: "doomed", FromAddr: "s@x",
+	})
+	if err != nil {
+		t.Fatalf("seed doomed: %v", err)
+	}
+
+	addr := startIMAP(t, st, nil, false)
+
+	// We capture both EXPUNGE callbacks (legacy form) and a custom
+	// VANISHED accumulator wired through the same path the QRESYNC
+	// FETCH test uses.
+	vanishedUIDs := make(chan goimap.UID, 4)
+	expunged := make(chan uint32, 4)
+	opts := &imapclient.Options{
+		UnilateralDataHandler: &imapclient.UnilateralDataHandler{
+			Expunge: func(seqNum uint32) {
+				// The patched client surfaces VANISHED as a
+				// no-seqnum Expunge callback (seqNum == 0). A real
+				// EXPUNGE arrives with a real seqnum.
+				select {
+				case expunged <- seqNum:
+				default:
+				}
+			},
+		},
+	}
+	c, err := imapclient.DialInsecure(addr, opts)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	if err := c.Login(testAddr, testPassword).Wait(); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if _, err := c.Enable(goimap.CapQResync).Wait(); err != nil {
+		t.Fatalf("enable qresync: %v", err)
+	}
+	if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+
+	idle, err := c.Idle()
+	if err != nil {
+		t.Fatalf("idle: %v", err)
+	}
+	if err := st.DeleteMessage(doomed.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	// Wait for the unilateral response. In QRESYNC mode the
+	// framework emits "* VANISHED <uid>", which the patched client
+	// surfaces via Expunge(seqNum=0). A legacy EXPUNGE would arrive
+	// with the real seq number (1, since doomed was first).
+	select {
+	case seqNum := <-expunged:
+		if seqNum != 0 {
+			t.Errorf("QRESYNC IDLE'ing session got an EXPUNGE seq=%d instead of VANISHED (seq=0)", seqNum)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("QRESYNC IDLE'ing session never received the cross-connection expunge")
+	}
+	if err := idle.Close(); err != nil {
+		t.Fatalf("stop idle: %v", err)
+	}
+	if err := idle.Wait(); err != nil {
+		t.Fatalf("wait idle: %v", err)
+	}
+	close(vanishedUIDs)
+}
+
 // TestIMAPRateLimit covers the per-IP brute-force shield over LOGIN:
 // once the rate-limit budget is burned, further attempts from the same
 // client are rejected outright — even when the password is right.
