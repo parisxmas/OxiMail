@@ -109,15 +109,20 @@ git apply patches/go-imap/condstore-qresync.patch
 The patch applies cleanly and all existing upstream tests still pass —
 verified with `go test ./...` against a freshly-patched checkout.
 
-To use the patched library from OxiMail before upstream merges:
+To use the patched library from another project before upstream
+merges, point `replace` at the public fork on GitHub at the patch
+commit (the fork's `v2` path satisfies Go's major-version constraint
+on `/v2` modules):
 
 ```
 # go.mod
-replace github.com/emersion/go-imap/v2 => ../go-imap
+replace github.com/emersion/go-imap/v2 => github.com/parisxmas/go-imap/v2 v2.0.0-beta.8.0.20260517135356-4b395c25f04d
 ```
 
-This repository ships exactly that setup: `../go-imap` is a sibling
-fork with the patches above, used during development.
+This is what OxiMail's own `go.mod` does — the fork is at
+[parisxmas/go-imap](https://github.com/parisxmas/go-imap), branch
+`condstore-qresync`, awaiting upstream merge of
+[emersion/go-imap#756](https://github.com/emersion/go-imap/pull/756).
 
 ## What a CONDSTORE / QRESYNC-aware OxiMail session looks like
 

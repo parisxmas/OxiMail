@@ -1,0 +1,93 @@
+# OxiMail + OxiDB, side by side on the same network.
+#
+# Run from the OxiMail repo root:
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+# What this gives you:
+#   - OxiDB at the internal hostname `oxidb` (port 4444, not exposed
+#     to the host — only oximail reaches it).
+#   - OxiMail listening on the host's 25/80/143/465/587/993/8080/9090.
+#   - Two named volumes — `oximail-acme` for the ACME cert cache so
+#     renewals survive container restarts, `oxidb-data` for the data
+#     directory.
+#
+# Required env (.env file next to this compose file, or `-e ...`):
+#   OXIMAIL_HOSTNAME=mail.example.com        # the FQDN the world sees
+#   OXIMAIL_ACME_HOSTS=mail.example.com      # comma-separated for SAN
+#   OXIMAIL_ACME_EMAIL=ops@example.com       # Let's Encrypt contact
+#   OXIMAIL_SRS_SECRET=<openssl rand -hex 32>
+#
+# Optional (sensible defaults exist for everything else, see README).
+
+services:
+  oxidb:
+    # Builds the OxiDB image from the upstream Dockerfile, pulled
+    # straight from GitHub so no sibling checkout is required.
+    build:
+      context: https://github.com/parisxmas/OxiDB.git#master
+    container_name: oximail-oxidb
+    restart: unless-stopped
+    environment:
+      - OXIDB_ADDR=0.0.0.0:4444
+      - OXIDB_DATA=/data
+      - OXIDB_POOL_SIZE=64
+    volumes:
+      - oxidb-data:/data
+    networks:
+      - oximail
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/4444 || exit 1"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+
+  oximail:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: oximail
+    restart: unless-stopped
+    depends_on:
+      oxidb:
+        condition: service_healthy
+    environment:
+      # Server identity + storage wiring.
+      - OXIMAIL_HOSTNAME=${OXIMAIL_HOSTNAME}
+      - OXIMAIL_OXIDB_HOST=oxidb
+      - OXIMAIL_OXIDB_PORT=4444
+      # ACME on by default. Replace with OXIMAIL_TLS_CERT / _KEY if
+      # you're running behind a TLS-terminating proxy or using your
+      # own certbot.
+      - OXIMAIL_ACME_HOSTS=${OXIMAIL_ACME_HOSTS:-}
+      - OXIMAIL_ACME_EMAIL=${OXIMAIL_ACME_EMAIL:-}
+      - OXIMAIL_ACME_CACHE=/var/lib/oximail/acme-cache
+      # Alias-forwarding key. Without it, aliases that point at
+      # remote addresses are refused with 550.
+      - OXIMAIL_SRS_SECRET=${OXIMAIL_SRS_SECRET:-}
+      # Publish an MTA-STS policy so other senders enforce TLS to us.
+      - OXIMAIL_MTASTS_MODE=${OXIMAIL_MTASTS_MODE:-enforce}
+      - OXIMAIL_MTASTS_MX=${OXIMAIL_MTASTS_MX:-${OXIMAIL_HOSTNAME}}
+      # Logs as JSON for log aggregators; switch to "text" for tail-friendly.
+      - OXIMAIL_LOG_FORMAT=${OXIMAIL_LOG_FORMAT:-json}
+      - OXIMAIL_LOG_LEVEL=${OXIMAIL_LOG_LEVEL:-info}
+    ports:
+      - "25:25"        # SMTP MX (inbound)
+      - "465:465"      # SMTPS submission
+      - "587:587"      # Submission STARTTLS
+      - "143:143"      # IMAP STARTTLS
+      - "993:993"      # IMAPS
+      - "80:80"        # ACME HTTP-01 challenge
+      - "8080:8080"    # Webmail HTTP+JSON API + SPA
+      - "9090:9090"    # /metrics, /healthz, /readyz
+    volumes:
+      - oximail-acme:/var/lib/oximail/acme-cache
+    networks:
+      - oximail
+
+volumes:
+  oxidb-data:
+  oximail-acme:
+
+networks:
+  oximail:
+    driver: bridge

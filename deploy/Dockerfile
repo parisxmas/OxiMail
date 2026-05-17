@@ -2,36 +2,25 @@
 #
 # OxiMail container image.
 #
-# Build context: the PARENT directory that contains the three sibling
-# checkouts side by side. OxiMail's go.mod has `replace` directives
-# pointing at ../docdb (OxiDB Go bindings) and ../go-imap (the
-# CONDSTORE/QRESYNC fork), so the build needs all three trees in
-# scope.
+# Build context: the OxiMail repo root (no sibling checkouts needed
+# now that go.mod fetches OxiDB and the go-imap CONDSTORE/QRESYNC
+# fork directly from GitHub).
 #
 # Build:
-#   cd $(dirname $(pwd))                  # parent of mailserver/
-#   docker build -t oximail \
-#     -f mailserver/deploy/Dockerfile .
+#   docker build -t oximail -f deploy/Dockerfile .
 #
-# Run (env vars documented in mailserver/README.md):
-#   docker run --rm \
-#     -p 25:25 -p 80:80 -p 143:143 -p 465:465 -p 587:587 \
-#     -p 993:993 -p 8080:8080 -p 9090:9090 \
-#     -e OXIMAIL_HOSTNAME=mail.example.com \
-#     -e OXIMAIL_OXIDB_HOST=oxidb \
-#     -e OXIMAIL_ACME_HOSTS=mail.example.com \
-#     -v oximail-acme:/var/lib/oximail/acme-cache \
-#     oximail
+# Run alongside OxiDB via deploy/docker-compose.yml:
+#   docker compose -f deploy/docker-compose.yml up -d
 
 # -----------------------------------------------------------------------
-# 1. Angular SPA bundle (no replace-directive constraints — self-contained)
+# 1. Angular SPA bundle
 # -----------------------------------------------------------------------
 FROM node:22-bookworm-slim AS node-builder
 WORKDIR /web
-COPY mailserver/web/package.json mailserver/web/package-lock.json* ./
+COPY web/package.json web/package-lock.json* ./
 RUN --mount=type=cache,target=/root/.npm \
     npm install --no-audit --no-fund
-COPY mailserver/web/ ./
+COPY web/ ./
 RUN npm run build
 
 # -----------------------------------------------------------------------
@@ -39,15 +28,15 @@ RUN npm run build
 # -----------------------------------------------------------------------
 FROM golang:1.25-bookworm AS go-builder
 WORKDIR /src
-# Pull in the three sibling trees so the replace directives in
-# mailserver/go.mod resolve.
-COPY mailserver/ ./mailserver/
-COPY docdb/      ./docdb/
-COPY go-imap/    ./go-imap/
-
-WORKDIR /src/mailserver
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
+COPY go.mod go.sum ./
+# Warm the module cache before copying source so a code-only change
+# does not re-download the world.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
+COPY . ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux \
     go build -trimpath -ldflags="-s -w" -o /out/oximail   ./cmd/oximail && \
     CGO_ENABLED=0 GOOS=linux \

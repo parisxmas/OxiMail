@@ -107,31 +107,41 @@ OXIMAIL_WEBMAIL_STATIC=web/dist/oximail-webmail/browser \
 ./oximail
 ```
 
-### Docker
+### Docker (one host, OxiMail + OxiDB together)
 
-Build context is the **parent directory** containing the three
-sibling checkouts (the `go.mod` `replace` directives point at
-`../docdb` and `../go-imap`):
+The Dockerfile is standalone — `go.mod` fetches OxiDB and the
+go-imap CONDSTORE/QRESYNC fork directly from GitHub, no sibling
+checkouts needed:
 
 ```sh
-~/source/$ ls
-mailserver/  docdb/  go-imap/
+git clone https://github.com/parisxmas/OxiMail
+cd OxiMail
 
-~/source/$ docker build -t oximail -f mailserver/deploy/Dockerfile .
+# Four env vars are required; everything else has a working default.
+cat > deploy/.env <<EOF
+OXIMAIL_HOSTNAME=mail.example.com
+OXIMAIL_ACME_HOSTS=mail.example.com
+OXIMAIL_ACME_EMAIL=ops@example.com
+OXIMAIL_SRS_SECRET=$(openssl rand -hex 32)
+EOF
 
-~/source/$ docker run -d --name oximail \
-  -p 25:25 -p 465:465 -p 587:587 -p 143:143 -p 993:993 \
-  -p 80:80 -p 8080:8080 -p 9090:9090 \
-  -e OXIMAIL_HOSTNAME=mail.example.com \
-  -e OXIMAIL_OXIDB_HOST=oxidb \
-  -e OXIMAIL_ACME_HOSTS=mail.example.com \
-  -e OXIMAIL_SRS_SECRET=$(openssl rand -hex 32) \
-  -v oximail-acme:/var/lib/oximail/acme-cache \
-  oximail
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml logs -f oximail
 ```
 
-Once the CONDSTORE/QRESYNC patch lands upstream and the `replace`
-directive in `go.mod` is dropped, this constraint goes away.
+The compose file (`deploy/docker-compose.yml`) builds the OxiDB
+image straight from its GitHub repo (`build.context:
+https://github.com/parisxmas/OxiDB.git#master`), runs both
+containers on a shared `oximail` bridge network so OxiMail reaches
+OxiDB at the hostname `oxidb:4444`, exposes the eight OxiMail ports
+on the host, and persists the ACME cert cache + the OxiDB data dir
+as named volumes (`oximail-acme`, `oxidb-data`).
+
+Building OxiMail by itself (without compose) is the same command:
+
+```sh
+docker build -t oximail -f deploy/Dockerfile .
+```
 
 ### systemd
 

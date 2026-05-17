@@ -7,8 +7,6 @@ github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XL
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/emersion/go-imap/v2 v2.0.0-beta.8 h1:5IXZK1E33DyeP526320J3RS7eFlCYGFgtbrfapqDPug=
-github.com/emersion/go-imap/v2 v2.0.0-beta.8/go.mod h1:dhoFe2Q0PwLrMD7oZw8ODuaD0vLYPe5uj2wcOMnvh48=
 github.com/emersion/go-message v0.18.2 h1:rl55SQdjd9oJcIoQNhubD2Acs1E6IzlZISRTK7x/Lpg=
 github.com/emersion/go-message v0.18.2/go.mod h1:XpJyL70LwRvq2a8rVbHXikPgKj8+aI0kGdHlg16ibYA=
 github.com/emersion/go-msgauth v0.7.0 h1:vj2hMn6KhFtW41kshIBTXvp6KgYSqpA/ZN9Pv4g1INc=
@@ -29,6 +27,12 @@ github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 h1:C3w9PqII01/Oq1c1nUAm88MOHcQC9l5mIlSMApZMrHA=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822/go.mod h1:+n7T8mK8HuQTcFwEeznm/DIxMOiR9yIdICNftLE1DvQ=
+github.com/parisxmas/OxiDB/go/oxidb v0.0.0-20260514204300-5967b75c0144 h1:DljjP2G02Y3sRxdQlg/i5OVQjZIp+e7MXC6woD4jbF4=
+github.com/parisxmas/OxiDB/go/oxidb v0.0.0-20260514204300-5967b75c0144/go.mod h1:89rU8x1NidBYMkHh4k2DwTwpvcn2pmqaCCZqVEMUCIU=
+github.com/parisxmas/OxiDB/go/oxiwire v0.0.0-20260514204300-5967b75c0144 h1:keJKDZqdnczkKwyJs1H412AmW3VeA3LpO+Fsb60xIk4=
+github.com/parisxmas/OxiDB/go/oxiwire v0.0.0-20260514204300-5967b75c0144/go.mod h1:8CoUJsz8PoPZ/eXsvTXbwDSKq66uB951Y1bzLE/NjcM=
+github.com/parisxmas/go-imap/v2 v2.0.0-beta.8.0.20260517135356-4b395c25f04d h1:uN92XpXCp7yvBWgWTLkn0xqjO/IqNJ0iORkAYU3tlls=
+github.com/parisxmas/go-imap/v2 v2.0.0-beta.8.0.20260517135356-4b395c25f04d/go.mod h1:dhoFe2Q0PwLrMD7oZw8ODuaD0vLYPe5uj2wcOMnvh48=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/prometheus/client_golang v1.23.2 h1:Je96obch5RDVy3FDMndoUsjAhG5Edi49h0RJWRi/o0o=
