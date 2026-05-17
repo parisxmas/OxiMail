@@ -117,16 +117,15 @@ func EnsureAccountCollections(db *oxidb.Client, accountID uint64) error {
 }
 
 // DropAccountCollections removes every per-account collection for
-// accountID. Called from DeleteAccount after the account doc is gone.
+// accountID. Called from DeleteAccount after the account doc is gone,
+// so the on-disk btree files actually get reclaimed (vs. just clearing
+// rows from a shared table). A missing collection (already dropped)
+// is silently accepted.
 //
-// Implementation: prefer DropCollection (reclaims the on-disk btree
-// files entirely) but fall back to clearing all docs if OxiDB rejects
-// the drop. OxiDB v0.0.0-20260514 currently fails DropCollection on
-// some collection shapes with an "io error: Not a directory" — until
-// that upstream bug is fixed, falling back keeps the cascade correct
-// (the data is gone, files just stick around as empty btrees, and
-// per-account collection ids are monotonic so the empty files are
-// never reused).
+// Requires the OxiDB DropCollection .btree-FILE-shape fix from
+// parisxmas/OxiDB#12 (merged as d04ac4db). Earlier OxiDB versions
+// fail with "io error: Not a directory" on the small per-account
+// collections.
 func DropAccountCollections(db *oxidb.Client, accountID uint64) error {
 	for _, coll := range []string{
 		MessagesColl(accountID),
@@ -135,16 +134,8 @@ func DropAccountCollections(db *oxidb.Client, accountID uint64) error {
 		SieveScriptsColl(accountID),
 		ExpungeLogColl(accountID),
 	} {
-		// Try DropCollection first — the ideal path.
-		if err := db.DropCollection(coll); err == nil {
-			continue
-		} else if isMissingCollection(err) {
-			continue
-		}
-		// Fall back: clear every row. Treats a missing collection as
-		// success since either way the rows are gone.
-		if _, err := db.Delete(coll, map[string]any{}); err != nil && !isMissingCollection(err) {
-			return fmt.Errorf("store: clear collection %q: %w", coll, err)
+		if err := db.DropCollection(coll); err != nil && !isMissingCollection(err) {
+			return fmt.Errorf("store: drop collection %q: %w", coll, err)
 		}
 	}
 	return nil
