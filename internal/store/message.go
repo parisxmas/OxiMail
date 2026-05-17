@@ -267,6 +267,10 @@ func (s *Store) modifyFlags(messageID uint64, build func(set map[string]any)) er
 	if err != nil {
 		return fmt.Errorf("store: modify flags of message %d: %w", messageID, err)
 	}
+	// Wake IMAP sessions IDLE'ing on this mailbox so they can
+	// surface the flag change (cross-connection STORE → FETCH
+	// FLAGS unilateral update).
+	notifier.Default.Notify(msg.MailboxID)
 	if doc == nil {
 		return ErrNotFound
 	}

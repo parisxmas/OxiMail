@@ -1164,6 +1164,153 @@ func TestIMAPIdle(t *testing.T) {
 	}
 }
 
+// TestIMAPLiveBroadcast covers cross-connection EXPUNGE and flag
+// changes reaching an IDLE'ing session:
+//   - When another connection (here, a direct store.DeleteMessage)
+//     expunges a message, the IDLE'ing client receives an EXPUNGE for
+//     the gone sequence number plus an updated EXISTS count.
+//   - When another connection changes a flag (here, store.AddFlags),
+//     the IDLE'ing client receives a FETCH FLAGS unilateral update
+//     reflecting the new set.
+//
+// Both are delivered through the existing notifier hub; this test
+// exercises the refresh() deltas added on top of the original
+// new-arrivals path.
+func TestIMAPLiveBroadcast(t *testing.T) {
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	hash, _ := store.HashPassword(testPassword)
+	acc, err := st.CreateAccount(testAddr, hash, 0)
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if err := st.EnsureDefaultMailboxes(acc.ID); err != nil {
+		t.Fatalf("ensure mailboxes: %v", err)
+	}
+	inbox, err := st.GetMailboxByName(acc.ID, "INBOX")
+	if err != nil {
+		t.Fatalf("get INBOX: %v", err)
+	}
+	// Seed two messages so we have something to expunge AND
+	// something to flag-mutate.
+	doomed, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+		Raw: []byte("From: <s@x>\r\nSubject: doomed\r\n\r\n"), Subject: "doomed", FromAddr: "s@x",
+	})
+	if err != nil {
+		t.Fatalf("seed doomed: %v", err)
+	}
+	survivor, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+		Raw: []byte("From: <s@x>\r\nSubject: survivor\r\n\r\n"), Subject: "survivor", FromAddr: "s@x",
+	})
+	if err != nil {
+		t.Fatalf("seed survivor: %v", err)
+	}
+
+	addr := startIMAP(t, st, nil, false)
+
+	// Channels for the three unilateral-data callback kinds.
+	expunged := make(chan uint32, 4)
+	flagsCh := make(chan []string, 4)
+	opts := &imapclient.Options{
+		UnilateralDataHandler: &imapclient.UnilateralDataHandler{
+			Expunge: func(seqNum uint32) {
+				select {
+				case expunged <- seqNum:
+				default:
+				}
+			},
+			Fetch: func(msg *imapclient.FetchMessageData) {
+				// FETCH FLAGS unilateral — surface the flag list.
+				// FetchMessageData streams items; we have to drain
+				// it to find the flags item.
+				for {
+					item := msg.Next()
+					if item == nil {
+						break
+					}
+					if fl, ok := item.(imapclient.FetchItemDataFlags); ok {
+						strs := make([]string, 0, len(fl.Flags))
+						for _, f := range fl.Flags {
+							strs = append(strs, string(f))
+						}
+						select {
+						case flagsCh <- strs:
+						default:
+						}
+					}
+				}
+			},
+		},
+	}
+	c, err := imapclient.DialInsecure(addr, opts)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	if err := c.Login(testAddr, testPassword).Wait(); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+
+	idle, err := c.Idle()
+	if err != nil {
+		t.Fatalf("idle: %v", err)
+	}
+
+	// (1) Cross-connection EXPUNGE: delete one of the seeded
+	// messages directly through the store. The IDLE'ing session
+	// should hear about it.
+	if err := st.DeleteMessage(doomed.ID); err != nil {
+		t.Fatalf("delete doomed: %v", err)
+	}
+	select {
+	case seqNum := <-expunged:
+		if seqNum != 1 {
+			t.Errorf("EXPUNGE reported seq=%d, want 1 (doomed was first)", seqNum)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("IDLE never received the EXPUNGE for the cross-connection delete")
+	}
+
+	// (2) Cross-connection STORE: add \Flagged to the survivor.
+	// The IDLE'ing session should see a FETCH FLAGS with the new
+	// flag set.
+	if err := st.AddFlags(survivor.ID, `\Flagged`); err != nil {
+		t.Fatalf("flag survivor: %v", err)
+	}
+	select {
+	case flags := <-flagsCh:
+		var sawFlagged bool
+		for _, f := range flags {
+			if f == `\Flagged` {
+				sawFlagged = true
+			}
+		}
+		if !sawFlagged {
+			t.Errorf("FETCH FLAGS = %v, want it to contain \\Flagged", flags)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("IDLE never received the FETCH FLAGS for the cross-connection STORE")
+	}
+
+	if err := idle.Close(); err != nil {
+		t.Fatalf("stop idle: %v", err)
+	}
+	if err := idle.Wait(); err != nil {
+		t.Fatalf("wait idle: %v", err)
+	}
+}
+
 // TestIMAPRateLimit covers the per-IP brute-force shield over LOGIN:
 // once the rate-limit budget is burned, further attempts from the same
 // client are rejected outright — even when the password is right.

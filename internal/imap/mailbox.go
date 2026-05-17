@@ -74,12 +74,23 @@ func (m *selectedMailbox) Close() {
 }
 
 // watch wakes on every cross-connection mailbox change, re-lists the
-// mailbox, folds any new arrivals into the snapshot, and queues an
-// EXISTS so the next Poll/Idle pushes it to the client.
+// mailbox, and reconciles the snapshot — handling three deltas so an
+// IDLE'ing client sees the full picture:
 //
-// It only handles new arrivals (the IDLE win that matters most). An
-// EXPUNGE or a flag change made by another connection is not
-// broadcast — discovering those still requires a fresh SELECT.
+//  1. New arrivals (UID >= uidNext, not yet in the snapshot) are
+//     appended and an EXISTS is queued.
+//  2. Snapshot UIDs missing from the latest list — i.e. expunged by
+//     another connection — are removed and EXPUNGE is queued.
+//  3. Snapshot messages whose mod-sequence has advanced past our
+//     local copy — i.e. another connection ran STORE — get their
+//     flags refreshed and FETCH FLAGS (+ MODSEQ) is queued.
+//
+// QRESYNC nuance: per RFC 7162 §3.7 a QRESYNC-enabled session is
+// supposed to see VANISHED instead of EXPUNGE even for cross-
+// connection expunges. The upstream tracker only emits EXPUNGE
+// today, so QRESYNC clients on this code path still get EXPUNGE for
+// cross-connection deletes. Most QRESYNC clients tolerate both, and
+// a fully QRESYNC-aware tracker is a separate upstream patch.
 func (m *selectedMailbox) watch() {
 	for {
 		select {
@@ -91,18 +102,51 @@ func (m *selectedMailbox) watch() {
 	}
 }
 
-// refresh re-lists the mailbox and appends any messages whose UID is
-// at or above our current uidNext. Lower UIDs are ignored — they would
-// mean an EXPUNGE happened elsewhere, which this iteration does not
-// propagate. A re-arriving UID we already have is also ignored.
+// refresh re-lists the mailbox and applies the three deltas described
+// on watch(). Held under m.mu so any session command runs against a
+// consistent snapshot.
 func (m *selectedMailbox) refresh() {
 	latest, err := m.store.ListMessages(m.dbID)
 	if err != nil {
 		log.Printf("imap: refresh mailbox %d: %v", m.dbID, err)
 		return
 	}
+	latestByUID := make(map[uint32]*store.Message, len(latest))
+	for i := range latest {
+		latestByUID[latest[i].UID] = &latest[i]
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// (2) Cross-connection EXPUNGE: snapshot UIDs that no longer
+	// exist. Walk back-to-front so the lower indices stay valid as
+	// we drop entries.
+	for i := len(m.msgs) - 1; i >= 0; i-- {
+		if _, ok := latestByUID[m.msgs[i].UID]; ok {
+			continue
+		}
+		m.tracker.QueueExpunge(uint32(i) + 1)
+		m.msgs = append(m.msgs[:i], m.msgs[i+1:]...)
+	}
+
+	// (3) Cross-connection STORE: surviving snapshot messages whose
+	// mod-sequence has moved past our local copy. We pass nil for
+	// the source session so this session sees the unilateral FETCH
+	// FLAGS (the change wasn't made here).
+	for i := range m.msgs {
+		local := &m.msgs[i]
+		fresh, ok := latestByUID[local.UID]
+		if !ok || fresh.ModSeq <= local.ModSeq {
+			continue
+		}
+		local.Flags = append(local.Flags[:0], fresh.Flags...)
+		local.ModSeq = fresh.ModSeq
+		seqNum := uint32(i) + 1
+		m.tracker.QueueMessageFlags(seqNum, imap.UID(local.UID), toIMAPFlags(local.Flags), nil)
+	}
+
+	// (1) New arrivals — same logic as before.
 	for i := range latest {
 		if latest[i].UID < m.uidNext {
 			continue
