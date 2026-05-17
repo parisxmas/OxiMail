@@ -442,6 +442,58 @@ func (s *Store) CopyMessage(messageID, destMailboxID uint64) (*Message, error) {
 	return dst, nil
 }
 
+// RestoreMessage inserts a message at its original UID + ModSeq +
+// Flags and writes the body to the blob bucket (when newBlob is
+// true; otherwise the blob is assumed to already be present from a
+// previous RestoreMessage call sharing the same key). Used by
+// `oximailctl restore` so a backed-up message lands at exactly the
+// state the backup captured, not at fresh allocator values.
+//
+// The _id field on msg is ignored; OxiDB assigns a fresh one. The
+// account's used_bytes counter is NOT updated — callers should run
+// a fresh quota accounting pass after a restore.
+func (s *Store) RestoreMessage(msg *Message, body []byte, newBlob bool) (*Message, error) {
+	clone := *msg
+	clone.ID = 0
+	if clone.Flags == nil {
+		clone.Flags = []string{}
+	}
+	if clone.ReceivedAt == "" {
+		clone.ReceivedAt = nowRFC3339()
+	}
+	if newBlob {
+		if _, err := s.db.PutObject(BlobBucket, clone.BodyBlob, body, "message/rfc822", nil); err != nil {
+			return nil, fmt.Errorf("store: restore message: write blob %q: %w", clone.BodyBlob, err)
+		}
+		if err := s.blobAddRef(clone.BodyBlob); err != nil {
+			_ = s.db.DeleteObject(BlobBucket, clone.BodyBlob)
+			return nil, err
+		}
+	} else {
+		// Blob already exists from a prior RestoreMessage (the
+		// backup carried two messages pointing at the same key);
+		// just bump the refcount.
+		if _, err := s.blobBumpRef(clone.BodyBlob); err != nil {
+			return nil, err
+		}
+	}
+	doc, err := encodeDoc(&clone)
+	if err != nil {
+		_, _ = s.blobDropRef(clone.BodyBlob)
+		return nil, err
+	}
+	resp, err := s.db.Insert(CollMessages, doc)
+	if err != nil {
+		_, _ = s.blobDropRef(clone.BodyBlob)
+		return nil, fmt.Errorf("store: restore message: insert: %w", err)
+	}
+	if clone.ID, err = insertedID(resp); err != nil {
+		_, _ = s.blobDropRef(clone.BodyBlob)
+		return nil, err
+	}
+	return &clone, nil
+}
+
 // DeleteMessage removes a message: the metadata document first, then its
 // body blob (an orphaned blob is just wasted disk; a document pointing
 // at a missing blob would be a broken read). The account's used-bytes

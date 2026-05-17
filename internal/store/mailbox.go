@@ -216,6 +216,34 @@ func (s *Store) NextUID(mailboxID uint64) (uint32, error) {
 	return uint32(next) - 1, nil
 }
 
+// RestoreMailbox inserts a mailbox document as-is, preserving the
+// caller's UIDValidity / UIDNext / HighestModSeq values. Used by
+// `oximailctl restore` to recreate a mailbox at the same state the
+// backup captured — clients that had cached the mailbox under the
+// old UIDValidity can resync cleanly rather than discarding their
+// view.
+//
+// The _id field on mb is ignored; OxiDB assigns a fresh one.
+func (s *Store) RestoreMailbox(mb *Mailbox) (*Mailbox, error) {
+	clone := *mb
+	clone.ID = 0
+	if clone.CreatedAt == "" {
+		clone.CreatedAt = nowRFC3339()
+	}
+	doc, err := encodeDoc(&clone)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.db.Insert(CollMailboxes, doc)
+	if err != nil {
+		return nil, fmt.Errorf("store: restore mailbox %q for account %d: %w", clone.Name, clone.AccountID, err)
+	}
+	if clone.ID, err = insertedID(resp); err != nil {
+		return nil, err
+	}
+	return &clone, nil
+}
+
 // MailboxStats is the per-mailbox counts the webmail mailbox-list
 // endpoint uses: total messages plus unseen (messages without
 // \Seen). Returned as a struct so the API stays stable when we

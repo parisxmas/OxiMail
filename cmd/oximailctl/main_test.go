@@ -234,6 +234,83 @@ func TestCLI(t *testing.T) {
 		}
 	})
 
+	t.Run("backup then restore round-trips an account", func(t *testing.T) {
+		// Provision: a fresh account, INBOX seeded with one message.
+		if _, code := cli("hunter2\n", "account", "add", "backup@example.test"); code != 0 {
+			t.Fatal("setup: account add failed")
+		}
+		acc, err := st.GetAccount("backup@example.test")
+		if err != nil {
+			t.Fatalf("setup: get account: %v", err)
+		}
+		inbox, _ := st.GetMailboxByName(acc.ID, "INBOX")
+		raw := []byte("From: <s@x>\r\nSubject: kept across restore\r\n\r\nbody\r\n")
+		seeded, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+			Raw: raw, Subject: "kept across restore", FromAddr: "s@x",
+		})
+		if err != nil {
+			t.Fatalf("seed inbox: %v", err)
+		}
+		// Add a vacation rule so the round-trip exercises that too.
+		if _, code := cli("", "vacation", "set", "-subject", "Away", "-body", "Back Monday.",
+			"backup@example.test"); code != 0 {
+			t.Fatal("setup: vacation set failed")
+		}
+
+		// Backup.
+		tarPath := t.TempDir() + "/backup@example.test.tar"
+		if out, code := cli("", "backup", "backup@example.test", tarPath); code != 0 ||
+			!strings.Contains(out, "backed up backup@example.test") {
+			t.Fatalf("backup: code=%d out=%q", code, out)
+		}
+
+		// Delete the account, confirm it's gone.
+		if _, code := cli("", "account", "delete", "backup@example.test"); code != 0 {
+			t.Fatal("setup: account delete failed")
+		}
+		if _, err := st.GetAccount("backup@example.test"); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("account still present after delete: %v", err)
+		}
+
+		// Restore.
+		if out, code := cli("", "restore", tarPath); code != 0 ||
+			!strings.Contains(out, "restored backup@example.test") {
+			t.Fatalf("restore: code=%d out=%q", code, out)
+		}
+
+		// The account exists again and the original password works.
+		if _, err := st.Authenticate("backup@example.test", "hunter2"); err != nil {
+			t.Errorf("authenticate after restore: %v", err)
+		}
+		acc2, err := st.GetAccount("backup@example.test")
+		if err != nil {
+			t.Fatalf("get account after restore: %v", err)
+		}
+		// The seeded message is back, with its body intact.
+		inbox2, _ := st.GetMailboxByName(acc2.ID, "INBOX")
+		msgs, _ := st.ListMessages(inbox2.ID)
+		if len(msgs) != 1 || msgs[0].Subject != "kept across restore" {
+			t.Fatalf("restored INBOX = %+v, want one 'kept across restore' message", msgs)
+		}
+		body, err := st.FetchBody(&msgs[0])
+		if err != nil {
+			t.Fatalf("fetch restored body: %v", err)
+		}
+		if !strings.Contains(string(body), "body") {
+			t.Errorf("restored body does not contain the seeded text: %q", body)
+		}
+		// The vacation rule is back too.
+		v, err := st.GetVacation(acc2.ID)
+		if err != nil || v.Subject != "Away" || v.Body != "Back Monday." {
+			t.Errorf("vacation rule missing after restore: v=%+v err=%v", v, err)
+		}
+		// And the same backup cannot be restored on top of the now-existing account.
+		if _, code := cli("", "restore", tarPath); code == 0 {
+			t.Error("restore of an existing account should have failed")
+		}
+		_ = seeded
+	})
+
 	t.Run("domain delete works after the accounts are gone", func(t *testing.T) {
 		if _, code := cli("", "domain", "add", "ephemeral.test"); code != 0 {
 			t.Fatal("setup: domain add failed")

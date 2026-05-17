@@ -21,6 +21,8 @@
 //	oximailctl sieve    get <address>
 //	oximailctl sieve    set <address>           script on stdin
 //	oximailctl sieve    clear <address>
+//	oximailctl backup  <address> <path.tar>     mailboxes + messages + blobs
+//	oximailctl restore <path.tar>               refuses if account exists
 package main
 
 import (
@@ -85,6 +87,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return c.vacation(args[1:])
 	case "sieve":
 		return c.sieve(args[1:])
+	case "backup":
+		return c.backup(args[1:])
+	case "restore":
+		return c.restore(args[1:])
 	default:
 		fmt.Fprintf(stderr, "oximailctl: unknown command %q\n", args[0])
 		usage(stderr)
@@ -166,6 +172,8 @@ usage:
   oximailctl sieve    get   <address>
   oximailctl sieve    set   <address>            # script on stdin
   oximailctl sieve    clear <address>
+  oximailctl backup  <address> <path.tar>        # tar of metadata + blobs
+  oximailctl restore <path.tar>                  # refuses if account exists
 
 It connects to OxiDB with the same OXIMAIL_* environment variables as
 the server — OXIMAIL_OXIDB_HOST, OXIMAIL_OXIDB_PORT.
