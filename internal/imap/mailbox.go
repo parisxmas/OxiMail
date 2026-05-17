@@ -288,6 +288,19 @@ func (m *selectedMailbox) fetch(w *imapserver.FetchWriter, numSet imap.NumSet, o
 		}
 	}
 
+	// RFC 7162 §3.2.10: UID FETCH ... (CHANGEDSINCE N VANISHED) asks
+	// the server to emit one VANISHED (EARLIER) line listing every
+	// UID in numSet that has been expunged since the floor. The
+	// per-message FETCH responses follow as normal. The framework's
+	// fetch.go has already validated that VANISHED only arrives on
+	// UID FETCH with a non-zero CHANGEDSINCE.
+	if options.Vanished {
+		uidSet, _ := numSet.(imap.UIDSet)
+		if err := m.emitVanishedSince(w, uidSet, options.ChangedSince); err != nil {
+			return err
+		}
+	}
+
 	var ferr error
 	m.forEach(numSet, func(seqNum uint32, msg *store.Message) {
 		if ferr != nil {
@@ -318,6 +331,38 @@ func (m *selectedMailbox) fetch(w *imapserver.FetchWriter, numSet imap.NumSet, o
 		ferr = m.writeMessage(rw, msg, options)
 	})
 	return ferr
+}
+
+// emitVanishedSince writes "* VANISHED (EARLIER) <uids>" for every UID
+// in want that has been expunged from this mailbox with mod-sequence
+// greater than sinceModSeq. An empty result emits nothing — the spec
+// is happy either way. A want set carrying "*" is staticised first so
+// the comparison is exact.
+func (m *selectedMailbox) emitVanishedSince(w *imapserver.FetchWriter, want imap.UIDSet, sinceModSeq uint64) error {
+	uids, err := m.store.ExpungedSince(m.dbID, sinceModSeq)
+	if err != nil {
+		return err
+	}
+	if len(uids) == 0 {
+		return nil
+	}
+	m.mu.Lock()
+	staticWant, _ := m.staticNumSetLocked(want).(imap.UIDSet)
+	m.mu.Unlock()
+	var matched imap.UIDSet
+	for _, u := range uids {
+		uid := imap.UID(u)
+		// An empty/absent want acts as "the whole UID space" — the
+		// most common form is "UID FETCH 1:* ...". An explicit set
+		// is honoured.
+		if len(staticWant) == 0 || staticWant.Contains(uid) {
+			matched.AddNum(uid)
+		}
+	}
+	if len(matched) == 0 {
+		return nil
+	}
+	return w.WriteVanished(matched)
 }
 
 // writeMessage writes one message's requested FETCH items. The raw body

@@ -971,6 +971,93 @@ func TestIMAPQResync(t *testing.T) {
 		// asserted.
 		_ = gotVanished
 	})
+
+	t.Run("UID FETCH (CHANGEDSINCE N VANISHED) reports expunged UIDs", func(t *testing.T) {
+		// Seed two fresh messages, then expunge one of them
+		// directly through the store (mirroring a delivery-side
+		// expunge). The QRESYNC client then runs
+		//   UID FETCH 1:* (FLAGS) (CHANGEDSINCE 0 VANISHED)
+		// and we assert the FetchCommand surfaces the vanished UID.
+		mb, err := st.GetMailboxByName(acc.ID, "INBOX")
+		if err != nil {
+			t.Fatalf("get INBOX: %v", err)
+		}
+		first, err := st.AppendMessage(mb.ID, store.IncomingMessage{
+			Raw: []byte("From: <a@x>\r\nSubject: keep\r\n\r\nx\r\n"), Subject: "keep", FromAddr: "a@x",
+		})
+		if err != nil {
+			t.Fatalf("seed keep: %v", err)
+		}
+		gone, err := st.AppendMessage(mb.ID, store.IncomingMessage{
+			Raw: []byte("From: <a@x>\r\nSubject: gone\r\n\r\nx\r\n"), Subject: "gone", FromAddr: "a@x",
+		})
+		if err != nil {
+			t.Fatalf("seed gone: %v", err)
+		}
+		if err := st.DeleteMessage(gone.ID); err != nil {
+			t.Fatalf("delete gone: %v", err)
+		}
+
+		c := dial(t, addr)
+		defer c.Close()
+		if err := c.Login(testAddr, testPassword).Wait(); err != nil {
+			t.Fatalf("login: %v", err)
+		}
+		if _, err := c.Enable(goimap.CapQResync).Wait(); err != nil {
+			t.Fatalf("enable: %v", err)
+		}
+		if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+			t.Fatalf("select: %v", err)
+		}
+		fc := c.Fetch(goimap.UIDSetNum(goimap.UID(first.UID), goimap.UID(gone.UID)), &goimap.FetchOptions{
+			Flags:        true,
+			ChangedSince: 0,
+			Vanished:     true,
+		})
+		if _, err := fc.Collect(); err != nil {
+			t.Fatalf("fetch: %v", err)
+		}
+		van := fc.VanishedUIDs()
+		if len(van) == 0 {
+			t.Fatalf("VanishedUIDs is empty; expected the expunged UID %d", gone.UID)
+		}
+		if !van.Contains(goimap.UID(gone.UID)) {
+			t.Errorf("VanishedUIDs = %v, want it to contain UID %d", van, gone.UID)
+		}
+	})
+
+	// (The "VANISHED without CHANGEDSINCE" BAD path can only be
+	// triggered from a hand-rolled IMAP client — the patched go-imap
+	// client always emits CHANGEDSINCE alongside VANISHED, even when
+	// the caller leaves ChangedSince at 0. The validation lives in
+	// readFetchModifiers; the seqnum-FETCH subtest below exercises
+	// the framework's other VANISHED guard end-to-end.)
+
+	t.Run("seqnum FETCH (VANISHED) is a BAD response", func(t *testing.T) {
+		c := dial(t, addr)
+		defer c.Close()
+		if err := c.Login(testAddr, testPassword).Wait(); err != nil {
+			t.Fatalf("login: %v", err)
+		}
+		if _, err := c.Enable(goimap.CapQResync).Wait(); err != nil {
+			t.Fatalf("enable: %v", err)
+		}
+		if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+			t.Fatalf("select: %v", err)
+		}
+		fc := c.Fetch(goimap.SeqSetNum(1), &goimap.FetchOptions{
+			Flags:        true,
+			ChangedSince: 1,
+			Vanished:     true,
+		})
+		_, err := fc.Collect()
+		if err == nil {
+			t.Fatal("seqnum FETCH (VANISHED) succeeded; want BAD")
+		}
+		if !strings.Contains(err.Error(), "UID FETCH") {
+			t.Errorf("error %q does not name the UID FETCH restriction", err)
+		}
+	})
 }
 
 // TestIMAPIdle covers cross-connection IDLE: a client IDLE'ing on INBOX

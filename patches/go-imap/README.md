@@ -15,10 +15,15 @@ new types in the `imap` package as well — `SelectOptions.QResync`,
 
 ### Server-side (imapserver)
 
-- `fetch.go` — parse `(CHANGEDSINCE N)` fetch modifier; recognise the
-  `MODSEQ` fetch data item; add `FetchResponseWriter.WriteModSeq(uint64)`
-  so sessions can emit the `MODSEQ (n)` wire token
-  (RFC 7162 §3.1.4, §3.2).
+- `fetch.go` — parse `(CHANGEDSINCE N)` and `VANISHED` fetch
+  modifiers; recognise the `MODSEQ` fetch data item; add
+  `FetchResponseWriter.WriteModSeq(uint64)` so sessions can emit
+  the `MODSEQ (n)` wire token (RFC 7162 §3.1.4, §3.2); add
+  `FetchWriter.WriteVanished(uids)` so sessions can emit the
+  `* VANISHED (EARLIER) <uids>` reply to a UID FETCH (CHANGEDSINCE
+  N VANISHED) (RFC 7162 §3.2.10). VANISHED is validated at parse
+  time: requires CHANGEDSINCE to have been present in the same
+  modifier list, and at the command level requires UID FETCH.
 - `store.go` — parse the `(UNCHANGEDSINCE N)` store modifier
   (RFC 7162 §3.1.3) and surface it on `StoreOptions.UnchangedSince`.
 - `search.go` — parse the `MODSEQ` search criterion in both the bare
@@ -57,9 +62,16 @@ new types in the `imap` package as well — `SelectOptions.QResync`,
   allowlist so `c.Enable(...)` does not refuse them.
 - `select.go` — emit `(QRESYNC ...)` when the caller populates
   `SelectOptions.QResync`.
+- `fetch.go` — emit `VANISHED` in the FETCH modifier list when
+  `FetchOptions.Vanished` is set; pair it with `CHANGEDSINCE`
+  unconditionally (even when the value is zero) so the request
+  passes the server-side validation we added in the same patch.
+  `FetchCommand` gains `VanishedUIDs()` so callers can read the
+  EARLIER UID set after `Close`/`Collect`.
 - `expunge.go` + `client.go` — dispatch the `* VANISHED` response.
   The `(EARLIER)` variant attaches to a pending SELECT
-  (`SelectData.Vanished`); the plain form is surfaced via
+  (`SelectData.Vanished`) OR to a pending FETCH
+  (`FetchCommand.VanishedUIDs`); the plain form is surfaced via
   `ExpungeCommand` and via a new `ExpungeCommand.VanishedUIDs()`
   accessor so callers can read the UID set off the command.
 
@@ -72,11 +84,7 @@ and QRESYNC to real clients. Out of scope, deliberately:
   session's job to emit — the patched framework just passes the
   StoreOptions through; the session decides which UIDs to refuse and
   returns `&imap.Error{Type: OK, Code: "MODIFIED <set>", ...}`.
-- The `FETCH ... (CHANGEDSINCE N VANISHED)` modifier (RFC 7162
-  §3.2.10) — bonus for QRESYNC; not implemented. Easy follow-up:
-  add `case "VANISHED":` to the modifier parser and a `Vanished
-  bool` field on FetchOptions.
-- The 'CLOSED' response code on the previous mailbox during a
+- The `CLOSED` response code on the previous mailbox during a
   CONDSTORE-enabled SELECT — already emitted in upstream's
   pre-existing `Previous mailbox is now closed` path.
 
