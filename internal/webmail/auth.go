@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"log"
 	"net/http"
 	"strings"
 
@@ -46,11 +47,31 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	// Normalise the address before the per-account limiter so case
+	// variants don't bypass the gate. We check this BEFORE the store
+	// lookup — an IP-rotating attacker who's already burned through
+	// the account's budget gets stalled here even if their next IP
+	// is fresh.
+	acctKey := strings.ToLower(strings.TrimSpace(req.Address))
+	if acctKey != "" && s.accountLimiter.Blocked(acctKey) {
+		observability.Logins.WithLabelValues("webmail", "fail").Inc()
+		writeError(w, http.StatusTooManyRequests, "too many failed attempts, try again later")
+		return
+	}
 	acc, err := s.store.Authenticate(req.Address, req.Password)
 	if err != nil {
 		// Authenticate collapses every failure to ErrAuthFailed, so we
 		// cannot — and should not — tell the client which part was wrong.
 		s.limiter.RecordFailure(ip)
+		if acctKey != "" {
+			s.accountLimiter.RecordFailure(acctKey)
+			// Surface a one-line warning the moment an account hits
+			// its threshold; helps operators notice targeted attacks
+			// in the logs without parsing Prometheus counters.
+			if s.accountLimiter.Blocked(acctKey) {
+				log.Printf("webmail: rate-limit triggered for account %q from %s", acctKey, ip)
+			}
+		}
 		observability.Logins.WithLabelValues("webmail", "fail").Inc()
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return

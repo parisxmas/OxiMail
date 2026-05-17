@@ -733,7 +733,14 @@ func TestWebmailCookieSession(t *testing.T) {
 // /api/login: after the default threshold of failed attempts, further
 // requests get 429 — even when the password is right — because the
 // limiter check runs before the store lookup.
-func TestWebmailRateLimit(t *testing.T) {
+// TestWebmailRateLimitPerAccount covers the tighter account-scoped
+// shield over POST /api/login: after 5 failed attempts at one address
+// the next attempt at that SAME address gets 429 — even from another
+// IP, which we cannot vary from a single test process but which is
+// the attack the per-account gate is meant to stop. The right
+// password also gets 429 because the limiter check fires before the
+// store lookup.
+func TestWebmailRateLimitPerAccount(t *testing.T) {
 	host, port := itest.StartOxiDB(t, itest.LazySync())
 	st, err := store.Open(host, port)
 	if err != nil {
@@ -754,17 +761,56 @@ func TestWebmailRateLimit(t *testing.T) {
 
 	base := startWebmail(t, st)
 
-	// Burn through the default budget of failed logins (10). Each call
-	// gets 401; the bucket fills up as a side effect.
-	for i := 0; i < 10; i++ {
+	// Five wrong attempts at the same address are allowed (each gets
+	// 401); the per-account bucket fills up as a side effect.
+	for i := 0; i < 5; i++ {
 		if status := post(t, base+"/api/login", "", loginBody("user@oximail.test", "wrong")); status != http.StatusUnauthorized {
 			t.Fatalf("login #%d: status = %d, want 401", i, status)
 		}
 	}
 
-	// The right password now gets 429 instead of 200.
+	// The 6th call — including with the right password — is refused
+	// with 429 because the per-account limiter fires before the store
+	// lookup. Address normalisation should make the case variant hit
+	// the same bucket.
 	if status := post(t, base+"/api/login", "", loginBody("user@oximail.test", "s3cret")); status != http.StatusTooManyRequests {
-		t.Fatalf("login with the right password after exhausting the budget: status = %d, want 429", status)
+		t.Fatalf("right password after exhausting per-account budget: status = %d, want 429", status)
+	}
+	if status := post(t, base+"/api/login", "", loginBody("USER@OXIMAIL.TEST", "wrong")); status != http.StatusTooManyRequests {
+		t.Fatalf("case-variant address after exhausting per-account budget: status = %d, want 429", status)
+	}
+}
+
+// TestWebmailRateLimitPerIP covers the broader per-IP shield: 10
+// failed attempts across DIFFERENT addresses from the same source IP
+// (the per-account gate is never tripped because every key is fresh)
+// exhausts the per-IP budget and the 11th call gets 429.
+func TestWebmailRateLimitPerIP(t *testing.T) {
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	base := startWebmail(t, st)
+
+	// 10 attempts at 10 different addresses. None of these accounts
+	// exist; the limiter still records each as a per-IP failure.
+	for i := 0; i < 10; i++ {
+		addr := fmt.Sprintf("none-%d@oximail.test", i)
+		if status := post(t, base+"/api/login", "", loginBody(addr, "x")); status != http.StatusUnauthorized {
+			t.Fatalf("login #%d (addr=%s): status = %d, want 401", i, addr, status)
+		}
+	}
+
+	// 11th from the same source is 429 regardless of which (still-fresh)
+	// account address it targets.
+	if status := post(t, base+"/api/login", "", loginBody("yet-another@oximail.test", "x")); status != http.StatusTooManyRequests {
+		t.Fatalf("11th attempt after exhausting per-IP budget: status = %d, want 429", status)
 	}
 }
 

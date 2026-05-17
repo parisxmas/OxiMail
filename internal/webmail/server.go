@@ -38,6 +38,14 @@ import (
 const (
 	readHeaderTimeout = 10 * time.Second
 	shutdownTimeout   = 10 * time.Second
+
+	// Per-account login limits — stricter than the per-IP gate. A
+	// legitimate operator typing their own password does not produce
+	// 5 wrong attempts; an attacker rotating source IPs against one
+	// mailbox does. With one failure draining in a minute, a full
+	// bucket clears in 5 minutes.
+	accountFailThreshold = 5
+	accountFailDecay     = time.Minute
 )
 
 // Server is the webmail HTTP listener.
@@ -46,8 +54,17 @@ type Server struct {
 	srv      *http.Server
 	store    *store.Store
 	sessions *sessionStore
-	limiter  *ratelimit.Limiter
-	mtasts   MTASTSPolicy
+	// limiter keys on the client IP — the broad shield against
+	// generic credential stuffing from a single host. Default
+	// thresholds (10 fail / ~60s).
+	limiter *ratelimit.Limiter
+	// accountLimiter keys on the lower-cased account address — the
+	// per-account shield against an attacker who rotates source IPs
+	// to brute-force one mailbox. Tighter than the IP limiter
+	// because legitimate users do not type 5 wrong passwords in 5
+	// minutes against their own address.
+	accountLimiter *ratelimit.Limiter
+	mtasts         MTASTSPolicy
 	// secure reports whether this server is serving HTTPS. It controls
 	// the Secure flag on session and CSRF cookies — a Secure cookie
 	// would never travel over a development plaintext listener and the
@@ -70,12 +87,13 @@ type MTASTSPolicy struct {
 // mtasts, when non-zero, enables the /.well-known/mta-sts.txt handler.
 func New(addr, staticDir string, st *store.Store, tlsConfig *tls.Config, mtasts MTASTSPolicy) *Server {
 	s := &Server{
-		addr:     addr,
-		store:    st,
-		sessions: newSessionStore(),
-		limiter:  ratelimit.NewDefault(),
-		secure:   tlsConfig != nil,
-		mtasts:   mtasts,
+		addr:           addr,
+		store:          st,
+		sessions:       newSessionStore(),
+		limiter:        ratelimit.NewDefault(),
+		accountLimiter: ratelimit.New(accountFailThreshold, accountFailDecay),
+		secure:         tlsConfig != nil,
+		mtasts:         mtasts,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", s.handleLogin)
@@ -140,6 +158,7 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 	go s.sessions.sweepLoop(ctx)
+	go s.limiterSweepLoop(ctx)
 
 	scheme := "http"
 	if s.srv.TLSConfig != nil {
@@ -154,6 +173,23 @@ func (s *Server) Start(ctx context.Context) error {
 			return nil
 		}
 		return err
+	}
+}
+
+// limiterSweepLoop drops stale entries from both rate-limit maps
+// every minute, so a long-running server's memory does not creep
+// upward with one bucket per never-returning client IP.
+func (s *Server) limiterSweepLoop(ctx context.Context) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.limiter.Sweep()
+			s.accountLimiter.Sweep()
+		}
 	}
 }
 
