@@ -1,27 +1,31 @@
 # OxiMail
 
-**OxiMail** is a production mail server in Go — SMTP (inbound +
-submission), IMAP, a webmail HTTP API with an Angular frontend, and a
-layered spam pipeline — backed entirely by **OxiDB**.
+A production mail server in Go — SMTP (inbound + submission), IMAP,
+a webmail HTTP API with an Angular SPA, and a layered spam pipeline
+— backed entirely by **OxiDB**.
 
-> Status: **early.** The store layer, the inbound SMTP (MX) server, the
-> IMAP server, the submission server (port 587), the outbound delivery
-> queue, TLS (STARTTLS + implicit TLS), and the webmail API + frontend
-> are built — mail can be received, read, sent, and relayed over
-> encrypted connections — each with tests. The spam pipeline's
-> three stages — connection-time (rate limiting, DNS blocklists,
-> greylisting), envelope (SPF/DKIM/DMARC), and content (Rspamd) — are
-> built. The webmail API does login, read, send, flag changes, move, and
-> delete — no search or attachment download yet. The `oximailctl` admin
-> CLI provisions domains, accounts, and aliases and generates per-domain
-> DKIM keys; outbound mail is DKIM-signed by the delivery queue, which
-> also returns a bounce to the sender on permanent failure. Observability
-> is wired up: structured logging via slog, Prometheus metrics, and
-> liveness / readiness probes. See "Roadmap" below.
+OxiMail speaks RFCs:
+
+- SMTP (5321), Submission (6409), STARTTLS, SMTPS, MTA-STS (8461).
+- IMAP4rev1 with **MOVE** (6851), **CONDSTORE** + **QRESYNC** (7162),
+  **IDLE** with cross-connection EXPUNGE / FETCH FLAGS broadcast,
+  UIDPLUS, ENABLE, UNSELECT, SASL PLAIN.
+- DKIM signing on outbound, DMARC enforcement (p=reject → 5xx,
+  p=quarantine → Junk), SPF on inbound, **SRS** alias forwarding,
+  **ARC** sealing on forwards, RFC 3464 DSN bounces, RFC 3834
+  vacation auto-responder, RFC 5228 **Sieve** filter at delivery.
+- ACME / Let's Encrypt auto-renewal (HTTP-01) and SIGHUP-driven
+  static-cert hot-reload as a fallback.
+- HTTP webmail API with HttpOnly session cookies + double-submit
+  CSRF for browser clients, bearer tokens for programmatic ones.
+
+The IMAP server uses a [forked
+go-imap/v2](./patches/go-imap/condstore-qresync.patch) with the
+CONDSTORE + QRESYNC server-side surface upstream is missing; the
+patch is ~940 lines, applies clean to `v2.0.0-beta.8`, and is in
+`patches/go-imap/` ready to submit upstream.
 
 ## Architecture
-
-The protocol surfaces sit on one storage layer:
 
 ```
         :25   SMTP (MX)   ─┐
@@ -29,219 +33,251 @@ The protocol surfaces sit on one storage layer:
         :465  SMTPS       ─┤
         :143  IMAP        ─┼─►  spam pipeline ──►  store ──►  OxiDB
         :993  IMAPS       ─┤                         ▲          ├─ collections   (canonical metadata)
-        :8080 Webmail API ─┘                         │          ├─ blob store    (message bodies)
-                            outbound queue ──────────┘          └─ OxiMem        (ephemeral state)
-        :9090 /metrics, /healthz, /readyz  (observability)
+        :8080 Webmail     ─┘                         │          ├─ blob store    (message bodies, refcounted)
+                            outbound queue ──────────┘          └─ OxiMem        (greylist, rate limits)
+        :9090 /metrics, /healthz, /readyz
+        :80   ACME HTTP-01 challenge (when OXIMAIL_ACME_HOSTS is set)
 ```
 
-STARTTLS is advertised on 25 / 587 / 143 when a certificate is
-configured; 465 / 993 are implicit-TLS listeners, started only then.
-The webmail API (`internal/webmail`) is an HTTP+JSON surface backed
-directly by the store — not via IMAP — for browser and mobile clients;
-it serves HTTPS when a certificate is configured. The webmail frontend
-(`web/`) is an Angular 21 SPA over that API; once built, the webmail
-server also serves it as static files.
+**Storage** uses all three OxiDB tiers:
 
-**Storage — OxiDB, all three tiers:**
+- *Collections* — `domains`, `accounts`, `aliases`, `mailboxes`,
+  `messages`, `outbound_queue`, `vacations`, `sieve_scripts`,
+  `expunge_log`, `blob_refs`. IMAP flags are a field on the
+  `messages` doc; flag changes are single-doc updates.
+- *Blob store* — RFC 5322 bodies, **reference-counted** so IMAP COPY
+  shares bodies across mailboxes instead of duplicating.
+- *OxiMem* — disposable greylisting tuples, per-IP rate-limit
+  counters, MTA-STS policy cache, vacation-reply suppressor.
 
-- **Collections** (canonical metadata): `domains`, `accounts`, `aliases`,
-  `mailboxes`, `messages`, `outbound_queue`. Per-message IMAP flags are a
-  field on the `messages` document, not a separate collection — the
-  document is small (the body is a blob ref), so a flag change is a
-  cheap single-document update.
-- **Blob store** (message bodies): bodies live here, not in the
-  `messages` documents — keeps documents small and stays clear of the
-  16 MiB wire-frame cap (larger bodies go via the S3 API).
-- **OxiMem** (ephemeral state): greylisting tuples, rate-limit counters,
-  DNSBL caches.
+**Spam pipeline**, cheapest checks first, short-circuiting:
 
-Design constraints OxiDB imposes, and how the server handles them:
+1. Connection-time — per-IP rate limit, DNS blocklist (`zen.spamhaus.org`
+   by default), greylisting.
+2. Envelope — SPF / DKIM / DMARC. `p=reject` → 550, `p=quarantine` →
+   `Junk` folder, anything else → INBOX.
+3. Content — Rspamd over HTTP when `OXIMAIL_RSPAMD_URL` is set;
+   fails open.
 
-- *No atomic cross-document transactions* → IMAP `UIDNEXT` is allocated
-  with `find_and_modify` (atomic single-doc read-modify-write); a crash
-  may burn a UID, which IMAP tolerates.
-- *No foreign keys / cascade* → referential cleanup (deleting an account
-  removes its mailboxes, messages, and body blobs) is the store layer's
-  job.
-- *FTS is eventually consistent* → IMAP `SEARCH` over body text may lag
-  delivery by a few seconds.
-
-**Spam — layered**, cheapest checks first, short-circuiting on the
-first non-Accept verdict:
-
-1. *connection-time* — rate limiting, DNS blocklists, greylisting.
-   **Built.** State is in memory (disposable: losing it just
-   re-greylists); a background sweeper bounds it.
-2. *envelope* — SPF / DKIM / DMARC. **Built.** Rejects only on a DMARC
-   `p=reject` failure (neither SPF nor DKIM passes, aligned with the
-   From domain); a `p=quarantine`, `p=none`, missing record, or DNS
-   error all accept. Fails open.
-3. *content* — Rspamd over HTTP. **Built**, and active when
-   `OXIMAIL_RSPAMD_URL` is set: the message is POSTed to Rspamd's
-   `/checkv2`, and its action maps to accept / greylist / reject. It
-   fails open — a Rspamd outage degrades filtering, it does not block
-   mail.
-
-`spam.Permissive()` builds a pipeline that accepts everything — for
-tests, and for operators who filter elsewhere.
+**Auth surfaces** all share a [per-IP leaky-bucket](./internal/ratelimit/)
+brute-force shield (default 10 failures / 60 s window). The webmail
+API uses HttpOnly cookies + a double-submit CSRF token for browser
+clients, and `Authorization: Bearer` for programmatic clients
+(integration tests, CLIs); CSRF is required only for cookie auth.
 
 ## Layout
 
 ```
-cmd/oximail/         server entry point — config, wiring, graceful shutdown
-cmd/oximailctl/      administration CLI — domains, accounts, aliases
-internal/config/     configuration, loaded from the environment
-internal/store/      the OxiDB-backed data layer
-internal/smtp/       inbound SMTP (MX) + submission
-internal/imap/       IMAP server
-internal/webmail/    HTTP+JSON API for browser / mobile clients
-internal/observability/  /metrics, /healthz, /readyz; slog setup
-internal/spam/       the layered spam pipeline
-internal/queue/      outbound delivery queue
-web/                 the webmail frontend — an Angular 21 SPA
+cmd/oximail/             server entry point — config, wiring, signals
+cmd/oximailctl/          admin CLI — domains, accounts, aliases, dkim,
+                                     vacation, sieve, backup, restore
+internal/store/          OxiDB-backed data layer
+internal/smtp/           inbound SMTP (MX) + submission, ARC sealing
+internal/imap/           IMAP server (incl. CONDSTORE, QRESYNC, IDLE)
+internal/webmail/        HTTP+JSON API + SPA static-file serving
+internal/observability/  /metrics, /healthz, /readyz, slog setup
+internal/spam/           layered spam pipeline
+internal/queue/          outbound delivery queue, DKIM signing
+internal/notifier/       cross-connection mailbox-change pub/sub
+internal/sieve/          RFC 5228 interpreter (used at delivery)
+internal/vacation/       RFC 3834 auto-responder + reply builder
+internal/srs/            Sender Rewriting Scheme for alias forwarding
+internal/mtasts/         MTA-STS policy lookup + cache
+internal/arc/            ARC sealing (RFC 8617 sealing side)
+internal/ratelimit/      leaky-bucket auth shield
+internal/config/         OXIMAIL_* env-var loader, TLS / ACME wiring
+internal/itest/          shared integration-test harness
+internal/notifier/       in-process mailbox-change pub/sub
+patches/go-imap/         CONDSTORE + QRESYNC patch for emersion/go-imap
+deploy/                  Dockerfile + systemd unit + example envs
+web/                     Angular 21 SPA over the webmail API
 ```
 
 ## Build & run
 
-```sh
-go build ./cmd/oximail
-OXIMAIL_OXIDB_HOST=127.0.0.1 OXIMAIL_OXIDB_PORT=4444 ./oximail
-```
-
-Configuration is via `OXIMAIL_*` environment variables — see
-`internal/config`. Every setting has a working default.
-
-To enable TLS, point `OXIMAIL_TLS_CERT` and `OXIMAIL_TLS_KEY` at a PEM
-certificate and key: STARTTLS is then advertised on 25 / 587 / 143, the
-implicit-TLS listeners (465 / 993) are started, and cleartext AUTH /
-LOGIN is refused. With no certificate set, the server runs without TLS
-and allows cleartext auth — fine for local development, not for a real
-deployment.
-
-To serve the webmail frontend, build it and point the server at the
-output:
+### From source
 
 ```sh
-cd web && npm install && npm run build      # -> web/dist/oximail-webmail/browser/
-OXIMAIL_WEBMAIL_STATIC=web/dist/oximail-webmail/browser ./oximail
+go build ./cmd/oximail ./cmd/oximailctl
+(cd web && npm install && npm run build)
+OXIMAIL_OXIDB_HOST=127.0.0.1 OXIMAIL_OXIDB_PORT=4444 \
+OXIMAIL_HOSTNAME=mail.example.com \
+OXIMAIL_TLS_CERT=/etc/oximail/tls.crt OXIMAIL_TLS_KEY=/etc/oximail/tls.key \
+OXIMAIL_WEBMAIL_STATIC=web/dist/oximail-webmail/browser \
+./oximail
 ```
 
-Without `OXIMAIL_WEBMAIL_STATIC` the webmail port serves the JSON API
-only. See `web/README.md` for the frontend.
+### Docker
 
-## Administration
-
-`oximailctl` provisions domains, accounts, and aliases directly against
-the store. It reads the same `OXIMAIL_OXIDB_*` environment variables as
-the server.
+Build context is the **parent directory** containing the three
+sibling checkouts (the `go.mod` `replace` directives point at
+`../docdb` and `../go-imap`):
 
 ```sh
-go build ./cmd/oximailctl
+~/source/$ ls
+mailserver/  docdb/  go-imap/
 
-oximailctl domain  add example.com
-oximailctl domain  dkim example.com              # generate a DKIM key; prints the DNS record
-echo 's3cret' | oximailctl account add -quota 1073741824 alice@example.com
-oximailctl alias   add sales@example.com alice@example.com,bob@example.com
-oximailctl account list
-oximailctl account delete alice@example.com      # also removes its mail
+~/source/$ docker build -t oximail -f mailserver/deploy/Dockerfile .
+
+~/source/$ docker run -d --name oximail \
+  -p 25:25 -p 465:465 -p 587:587 -p 143:143 -p 993:993 \
+  -p 80:80 -p 8080:8080 -p 9090:9090 \
+  -e OXIMAIL_HOSTNAME=mail.example.com \
+  -e OXIMAIL_OXIDB_HOST=oxidb \
+  -e OXIMAIL_ACME_HOSTS=mail.example.com \
+  -e OXIMAIL_SRS_SECRET=$(openssl rand -hex 32) \
+  -v oximail-acme:/var/lib/oximail/acme-cache \
+  oximail
 ```
 
-`account add` reads the password from stdin. `domain dkim` generates a
-signing key, stores it on the domain, and prints the public-key DNS TXT
-record to publish — once published, outbound mail from the domain is
-DKIM-signed by the delivery queue. Run `oximailctl help` for the full
-command list.
+Once the CONDSTORE/QRESYNC patch lands upstream and the `replace`
+directive in `go.mod` is dropped, this constraint goes away.
+
+### systemd
+
+`deploy/oximail.service` is a stock unit file. Drop an env file at
+`/etc/oximail/oximail.env` with the OXIMAIL_* vars and:
+
+```sh
+sudo install -m 0755 oximail /usr/local/bin/
+sudo install -m 0644 deploy/oximail.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now oximail
+```
+
+## Configuration
+
+Every setting has a working default. Set anything via `OXIMAIL_*`:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `OXIMAIL_HOSTNAME` | `localhost` | EHLO greeting, ARC d=, MTA-STS publish, mailbox HELO |
+| `OXIMAIL_SMTP_ADDR` / `OXIMAIL_SMTPS_ADDR` | `:25` / `:465` | Inbound MX + SMTPS |
+| `OXIMAIL_SUBMISSION_ADDR` | `:587` | Authenticated submission |
+| `OXIMAIL_IMAP_ADDR` / `OXIMAIL_IMAPS_ADDR` | `:143` / `:993` | IMAP plaintext + IMAPS |
+| `OXIMAIL_WEBMAIL_ADDR` | `:8080` | Webmail API + SPA |
+| `OXIMAIL_WEBMAIL_STATIC` | `""` | SPA build dir; empty = API only |
+| `OXIMAIL_METRICS_ADDR` | `:9090` | `/metrics`, `/healthz`, `/readyz` |
+| `OXIMAIL_LOG_FORMAT` / `OXIMAIL_LOG_LEVEL` | `text` / `info` | slog handler + level |
+| `OXIMAIL_TLS_CERT` / `OXIMAIL_TLS_KEY` | `""` | Static cert PEMs; SIGHUP reloads them |
+| `OXIMAIL_ACME_HOSTS` | `""` | Comma-separated; ACME on when set (overrides static) |
+| `OXIMAIL_ACME_CACHE` | `./acme-cache` | autocert disk cache |
+| `OXIMAIL_ACME_EMAIL` | `""` | ACME account contact |
+| `OXIMAIL_ACME_DIRECTORY_URL` | LE production | Override for LE staging |
+| `OXIMAIL_ACME_CHALLENGE_ADDR` | `:80` | HTTP-01 listener |
+| `OXIMAIL_OXIDB_HOST` / `OXIMAIL_OXIDB_PORT` | `127.0.0.1` / `4444` | OxiDB server |
+| `OXIMAIL_RSPAMD_URL` | `""` | Rspamd HTTP endpoint; empty disables stage 3 |
+| `OXIMAIL_SRS_SECRET` | `""` | Hex-encoded, ≥ 16 bytes raw, enables alias relay |
+| `OXIMAIL_SRS_MAX_AGE` | `21 * 24h` | Bounce-address lifetime |
+| `OXIMAIL_MTASTS_MODE` | `""` | `enforce` / `testing` / `none`; empty disables publish |
+| `OXIMAIL_MTASTS_MX` | `OXIMAIL_HOSTNAME` | Comma-separated MX patterns in published policy |
+| `OXIMAIL_MTASTS_MAX_AGE` | `86400s` | Policy lifetime |
+
+## DNS records to publish
+
+For `mail.example.com` running OxiMail with the defaults:
+
+```
+; A/AAAA — mail.example.com points at the OxiMail host.
+mail.example.com.        IN A   203.0.113.10
+
+; MX — example.com routes mail through mail.example.com.
+example.com.             IN MX  10 mail.example.com.
+
+; SPF — only mail.example.com is allowed to send for example.com.
+example.com.             IN TXT "v=spf1 mx -all"
+
+; DKIM — published by `oximailctl domain dkim example.com`,
+; selector defaults to `oximail`.
+oximail._domainkey.example.com. IN TXT "v=DKIM1; k=rsa; p=<base64 from oximailctl>"
+
+; DMARC — start at p=quarantine so OxiMail files failures to Junk;
+; tighten to p=reject once reports look clean.
+_dmarc.example.com.      IN TXT "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com"
+
+; MTA-STS — operator-published DNS record + an HTTPS-served policy
+; file at https://mta-sts.example.com/.well-known/mta-sts.txt
+; (OxiMail serves it when OXIMAIL_MTASTS_MODE is set).
+_mta-sts.example.com.    IN TXT "v=STSv1; id=20260517T120000Z"
+mta-sts.example.com.     IN A   203.0.113.10
+
+; TLS-RPT — optional; OxiMail does not publish TLS reports itself
+; yet, but receiving them works (route to a hosted account).
+_smtp._tls.example.com.  IN TXT "v=TLSRPTv1; rua=mailto:tls-rpt@example.com"
+```
+
+## First message — walkthrough
+
+```sh
+# 1. provision a hosted domain
+oximailctl domain add example.com
+
+# 2. generate a DKIM key, publish the printed DNS TXT record
+oximailctl domain dkim example.com
+
+# 3. provision an account; the password is read from stdin
+echo 'hunter2' | oximailctl account add -quota 1073741824 alice@example.com
+
+# 4. (optional) set an out-of-office reply
+oximailctl vacation set -subject 'Away' -body 'Back Monday.' alice@example.com
+
+# 5. (optional) set a sieve filter
+echo 'if header :contains "Subject" "report" { fileinto "Reports"; }' \
+  | oximailctl sieve set alice@example.com
+
+# 6. connect with any IMAP client to mail.example.com:993, log in
+#    as alice@example.com / hunter2, or open the webmail at
+#    https://mail.example.com:8080/
+
+# 7. backup an account; refuses to overwrite an existing one on restore
+oximailctl backup  alice@example.com /backup/alice.tar
+oximailctl restore /backup/alice.tar
+```
 
 ## Observability
 
-OxiMail exposes a dedicated HTTP port (`OXIMAIL_METRICS_ADDR`, default
-`:9090`) for ops:
+A dedicated port (`OXIMAIL_METRICS_ADDR`, default `:9090`):
 
 - `GET /metrics` — Prometheus exposition: `oximail_smtp_messages_total`
-  by verdict, `oximail_queue_deliveries_total` by result,
-  `oximail_queue_due_messages`, `oximail_logins_total` by protocol and
-  result.
+  by verdict (accept, quarantine, reject, greylist),
+  `oximail_queue_deliveries_total`, `oximail_queue_due_messages`,
+  `oximail_logins_total` by protocol + result.
 - `GET /healthz` — liveness; always 200 if the binary is up.
-- `GET /readyz` — readiness; 200 when the store is reachable, 503
-  otherwise.
+- `GET /readyz` — readiness; 200 when OxiDB is reachable, 503 otherwise.
 
-Logging is structured via `log/slog`. `OXIMAIL_LOG_FORMAT=json` switches
-the handler to JSON for log aggregators; `OXIMAIL_LOG_LEVEL` accepts
-`debug` / `info` / `warn` / `error`. Legacy `log.Print` calls are
-routed through slog automatically.
+Logging is `log/slog`. `OXIMAIL_LOG_FORMAT=json` switches the handler
+to JSON for aggregators; `OXIMAIL_LOG_LEVEL` accepts `debug|info|warn|error`.
 
 ## Testing
 
-`go test ./...` runs the fast unit tests — `internal/config` (TLS
-config loading) and `internal/spam` (the connection-time stage, with an
-injectable clock and DNS resolver, so no network or `oxidb-server` is
-needed).
+Unit tests:
 
-The integration tests boot a throwaway `oxidb-server` and exercise a
-layer end to end:
+```sh
+go test ./...
+```
 
-- **store** — schema, entity CRUD, cascade delete, concurrent UID
-  allocation.
-- **smtp** — a real SMTP client delivering into a mailbox, recipient
-  rejection, (submission) authenticated send splitting local delivery
-  from queued relay, and STARTTLS / implicit-TLS submission.
-- **imap** — a real IMAP client doing LOGIN, AUTHENTICATE (SASL PLAIN),
-  LIST, SELECT, FETCH, STORE, APPEND, EXPUNGE, SEARCH, COPY, and
-  CREATE / RENAME / DELETE — over plaintext and over STARTTLS / IMAPS.
-- **webmail** — a real HTTP client doing login, mailbox / message
-  listing, fetching a parsed message, sending, flag changes, move and
-  delete, and the auth / cross-account access rejections.
-- **queue** — the worker delivering a queued message to a throwaway
-  remote MX, and deferring one when the MX is unreachable.
-- **oximailctl** — the admin CLI provisioning a domain, an account
-  (then authenticating as it), and an alias, then deleting them.
-- **observability** — `/healthz`, `/readyz` against a working and a
-  closed store, and a counter increment reflected in `/metrics`.
-
-They are gated behind a build tag:
+Integration tests boot a throwaway `oxidb-server` (set `OXIDB_BIN`
+or place the binary at the sibling docdb checkout's
+`target/{release,debug}/oxidb-server`):
 
 ```sh
 go test -tags=integration ./...
 ```
 
-The shared harness (`internal/itest`) finds the server binary at
-`$OXIDB_BIN`, or at the sibling OxiDB checkout's
-`target/{release,debug}/oxidb-server`; if neither exists the tests are
-skipped.
+## What's not yet implemented
 
-## Roadmap
+The roadmap is long but a few items are explicit gaps:
 
-1. ~~Store layer — collection schema, entity types and operations, and
-   an integration test against a live `oxidb-server`.~~ *Done.*
-2. ~~Inbound SMTP (MX) on `emersion/go-smtp` — spam-pipeline call,
-   recipient resolution, delivery into mailboxes.~~ *Done.*
-3. ~~IMAP on `emersion/go-imap/v2` — LOGIN, AUTHENTICATE (SASL PLAIN),
-   LIST, SELECT, STATUS, FETCH, STORE, APPEND, EXPUNGE, SEARCH, COPY,
-   CREATE / DELETE / RENAME / SUBSCRIBE.~~ *Done.*
-4. ~~Submission (port 587) + the outbound delivery queue — SMTP AUTH,
-   local/remote recipient split, MX delivery with retry/backoff.~~
-   *Done.*
-5. ~~TLS — STARTTLS on 25 / 587 / 143, implicit TLS on 465 / 993,
-   cleartext auth refused once a certificate is configured.~~ *Done.*
-6. ~~Spam pipeline — connection-time (rate limiting, DNS blocklists,
-   greylisting), envelope (SPF / DKIM / DMARC), and content (Rspamd)
-   stages.~~ *Done.*
-7. Webmail — *backend API done (login, mailbox / message listing,
-   parsed message fetch, send, flag changes, move, delete) and an
-   Angular 21 SPA frontend (`web/`) over it.* Still to do: search,
-   attachment download, and HTML compose.
-8. ~~Administration — `oximailctl` CLI for domains, accounts, and
-   aliases, plus per-domain DKIM key generation.~~ *Done.* Still to do:
-   a password-change command, and domain delete.
-9. ~~Outbound DKIM signing — the delivery queue signs each message with
-   the sender domain's key.~~ *Done.*
-10. ~~Bounce messages — the queue returns an RFC 3464 delivery-status
-    notification to the sender on a permanent failure or exhausted
-    retries; never bounces a null-sender message.~~ *Done.*
-11. ~~Observability — structured logging via `log/slog`, Prometheus
-    metrics (`/metrics`), and liveness / readiness probes on a
-    dedicated `:9090`.~~ *Done.*
+- **JMAP** (RFC 8620/8621). A useful subset is months; the webmail
+  HTTP API is JMAP-shaped but not JMAP-compliant.
+- **ARC chain validation** (the verify side). OxiMail seals on
+  forward; verifying inbound chains is a separate effort.
+- **TLS-RPT aggregate reporting** (sender side). Operators can
+  *receive* TLS-RPT reports today by routing `tls-rpt@…` to a hosted
+  account; aggregate reporting from us as a sender is unimplemented.
+- **CardDAV / CalDAV.** Out of scope.
+- **POP3.** Strictly less capable than IMAP; intentionally not done.
 
-All roadmap items are done. Remaining loose ends — small, opt-in — are
-listed under each item's "Still to do" (the webmail polish, the CLI's
-password-change / domain delete).
+## License
+
+See [LICENSE](./LICENSE).
