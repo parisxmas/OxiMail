@@ -1,4 +1,4 @@
-import { Component, OnInit, inject, signal } from '@angular/core';
+import { Component, OnDestroy, OnInit, inject, signal } from '@angular/core';
 import { DatePipe } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
 
@@ -93,7 +93,7 @@ import {
               @if (msg.to.length) {
                 <div><strong>To:</strong> {{ msg.to.join(', ') }}</div>
               }
-              @if (msg.cc.length) {
+              @if (msg.cc?.length) {
                 <div><strong>Cc:</strong> {{ msg.cc.join(', ') }}</div>
               }
               <div class="date">{{ msg.date | date: 'medium' }}</div>
@@ -354,7 +354,14 @@ import {
     }
   `,
 })
-export class MailboxComponent implements OnInit {
+// Auto-refresh cadence for the open mailbox + folder counts. 10s strikes
+// a balance between feeling live and the load it puts on the server
+// (one /mailboxes + one /messages call per tab per cadence). A future
+// upgrade would push these from the server via SSE/WebSocket keyed off
+// the IMAP tracker's mailbox-update events instead of polling.
+const REFRESH_INTERVAL_MS = 10_000;
+
+export class MailboxComponent implements OnInit, OnDestroy {
   protected readonly api = inject(ApiService);
   private readonly router = inject(Router);
 
@@ -374,10 +381,62 @@ export class MailboxComponent implements OnInit {
   readonly downloading = signal<number>(-1);
   // search-input debounce timer; cleared on every keystroke.
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
+  // Background poll that pulls fresh mailbox counts + list contents
+  // every REFRESH_INTERVAL_MS so a user staring at the inbox sees a
+  // new message without hitting reload. Cleared on destroy and paused
+  // while the tab is hidden (no point keeping the connection warm to
+  // a tab the user isn't looking at).
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly onVisibilityChange = () => {
+    if (document.hidden) {
+      this.stopPolling();
+    } else {
+      // Catch up immediately on tab refocus, then resume polling.
+      this.quietRefresh();
+      this.startPolling();
+    }
+  };
 
   ngOnInit(): void {
     this.refreshMailboxes();
     this.loadMessages();
+    this.startPolling();
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
+  }
+
+  ngOnDestroy(): void {
+    this.stopPolling();
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+  }
+
+  private startPolling(): void {
+    if (this.pollTimer !== null || document.hidden) {
+      return;
+    }
+    this.pollTimer = setInterval(() => this.quietRefresh(), REFRESH_INTERVAL_MS);
+  }
+
+  private stopPolling(): void {
+    if (this.pollTimer !== null) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+  }
+
+  // quietRefresh pulls fresh mailbox + message-list data without
+  // toggling the loading spinner — the user is not waiting on this, so
+  // the UI must not flicker. It also no-ops while a compose modal is
+  // open so we don't yank the underlying list out from under it.
+  private quietRefresh(): void {
+    if (this.composing()) {
+      return;
+    }
+    this.api.mailboxes().subscribe({
+      next: (boxes) => this.mailboxes.set(boxes),
+    });
+    this.api.messages(this.selected(), this.query()).subscribe({
+      next: (msgs) => this.messages.set(msgs),
+    });
   }
 
   selectMailbox(name: string): void {

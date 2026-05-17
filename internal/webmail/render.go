@@ -144,11 +144,14 @@ func stripTags(s string) string {
 
 // addressStrings parses a header field as an address list and returns
 // the addresses formatted as strings; a missing or malformed field
-// yields nil.
+// yields an empty (non-nil) slice. Returning [] instead of nil keeps
+// the JSON serialisation stable — clients can rely on `to` and `cc`
+// always being arrays, never null, so a `msg.cc.length` check on the
+// SPA side never throws on an empty header.
 func addressStrings(h mail.Header, key string) []string {
 	addrs, err := h.AddressList(key)
 	if err != nil || len(addrs) == 0 {
-		return nil
+		return []string{}
 	}
 	out := make([]string, len(addrs))
 	for i, a := range addrs {
