@@ -5,11 +5,6 @@ import { QuillEditorComponent } from 'ngx-quill';
 
 import { ApiService } from '../api.service';
 
-// localStorage key for the compose "expanded" preference. Mirrors the
-// pattern from the mailbox splitter — a returning user gets their
-// last layout back.
-const STORAGE_KEY_EXPANDED = 'oximail.composeExpanded';
-
 // ComposeSeed pre-populates the dialog: reply / forward callers fill
 // the threading fields, draft-resume callers fill the id.
 export interface ComposeSeed {
@@ -345,18 +340,15 @@ export class ComposeComponent {
   protected readonly icons = { Send, Save, X, Pilcrow, Code2, Maximize2, Minimize2 };
 
   // Expanded mode — large centered modal vs. the default bottom-right
-  // panel. Restored from localStorage so a user who prefers the
-  // full-screen composer gets it on every open.
-  readonly expanded = signal<boolean>(this.loadExpanded());
+  // panel. The initial value is context-driven (see ngOnInit): a
+  // fresh "Compose" gets the expanded canvas because you usually
+  // have something to say; a reply / forward / draft-resume opens
+  // compact because you're acting in a thread you can already see.
+  // The user can still flip mid-flow with the toolbar button.
+  readonly expanded = signal<boolean>(false);
 
   toggleExpanded(): void {
-    const next = !this.expanded();
-    this.expanded.set(next);
-    try { localStorage.setItem(STORAGE_KEY_EXPANDED, next ? '1' : '0'); } catch { /* ignore */ }
-  }
-
-  private loadExpanded(): boolean {
-    try { return localStorage.getItem(STORAGE_KEY_EXPANDED) === '1'; } catch { return false; }
+    this.expanded.set(!this.expanded());
   }
 
   // Style passed to <quill-editor>. The compact mode locks the inner
@@ -379,6 +371,13 @@ export class ComposeComponent {
       this.inReplyTo = s.inReplyTo ?? '';
       this.references = s.references ?? [];
       this.draftId = s.draftId ?? 0;
+      // A reply / forward / draft-resume opens compact — the user
+      // can already see the thread underneath.
+      this.expanded.set(false);
+    } else {
+      // A fresh "Compose" opens expanded — the user came to write,
+      // give them the canvas.
+      this.expanded.set(true);
     }
   }
 
