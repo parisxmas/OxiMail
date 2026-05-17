@@ -17,6 +17,10 @@ export interface MessageSummary {
   size: number;
   flags: string[];
   seen: boolean;
+  // Optional short body preview, populated only when the listing was
+  // requested with ?snippets=1 (computed server-side from the message
+  // body, capped at ~140 chars). Absent on listings that opted out.
+  snippet?: string;
 }
 
 export interface Attachment {

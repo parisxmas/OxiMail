@@ -1,6 +1,26 @@
 import { Component, OnDestroy, OnInit, inject, signal } from '@angular/core';
 import { DatePipe } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
+import {
+  LucideAngularModule,
+  Archive,
+  ChevronLeft,
+  Edit3,
+  Folder,
+  Forward,
+  Inbox,
+  LogOut,
+  Mail,
+  MailOpen,
+  Reply,
+  ReplyAll,
+  Search,
+  Send,
+  Settings,
+  ShieldAlert,
+  Star,
+  Trash2,
+} from 'lucide-angular';
 
 import { ApiService } from '../api.service';
 import { ComposeComponent, ComposeSeed } from '../compose/compose.component';
@@ -21,48 +41,64 @@ const REFRESH_INTERVAL_MS = 10_000;
 
 @Component({
   selector: 'oximail-mailbox',
-  imports: [DatePipe, ComposeComponent, RouterLink],
+  imports: [DatePipe, ComposeComponent, RouterLink, LucideAngularModule],
   template: `
     <div class="app" [attr.data-view]="view()">
       <!-- Folder sidebar -->
       <aside class="folders">
         <div class="me" [title]="api.address()">{{ api.address() }}</div>
-        <button class="primary compose-btn" (click)="openCompose()">
+        <button class="compose-btn primary icon-text" (click)="openCompose()">
+          <i-lucide [img]="icons.Edit3" [size]="16"></i-lucide>
           Compose
         </button>
         @for (mb of mailboxes(); track mb.name) {
           <button
-            class="folder"
+            class="folder icon-text"
             [class.active]="mb.name === selected()"
             (click)="selectMailbox(mb.name)"
           >
+            <i-lucide [img]="folderIcon(mb.name)" [size]="16"></i-lucide>
             <span class="folder-name">{{ mb.name }}</span>
             @if (mb.unseen > 0) {
               <span class="badge">{{ mb.unseen }}</span>
             }
           </button>
         }
-        <a class="settings" routerLink="/settings">Settings</a>
-        <button class="logout" (click)="logout()">Sign out</button>
+        <a class="settings icon-text" routerLink="/settings">
+          <i-lucide [img]="icons.Settings" [size]="16"></i-lucide>
+          Settings
+        </a>
+        <button class="logout icon-text" (click)="logout()">
+          <i-lucide [img]="icons.LogOut" [size]="16"></i-lucide>
+          Sign out
+        </button>
       </aside>
 
       <!-- Message list -->
       <section class="list">
         <header>
           <button
-            class="back mobile-only"
+            class="back mobile-only icon-btn"
             type="button"
             (click)="view.set('folders')"
             aria-label="Back to folders"
-          >‹</button>
-          <span>{{ selected() }}</span>
-          <input
-            class="search"
-            type="search"
-            placeholder="Search…"
-            [value]="query()"
-            (input)="onSearchInput($event)"
-          />
+          >
+            <i-lucide [img]="icons.ChevronLeft" [size]="20"></i-lucide>
+          </button>
+          <span class="title icon-text">
+            <i-lucide [img]="folderIcon(selected())" [size]="16"></i-lucide>
+            {{ selected() }}
+          </span>
+          <div class="search-wrap">
+            <i-lucide class="search-icon" [img]="icons.Search" [size]="14"></i-lucide>
+            <input
+              class="search"
+              type="search"
+              placeholder="Search…"
+              [value]="query()"
+              (input)="onSearchInput($event)"
+            />
+          </div>
         </header>
         @if (loadingList()) {
           <p class="hint">Loading…</p>
@@ -76,9 +112,17 @@ const REFRESH_INTERVAL_MS = 10_000;
               [class.active]="m.id === openMessage()?.id"
               (click)="open(m.id)"
             >
-              <div class="row-from">{{ m.from || '(unknown sender)' }}</div>
-              <div class="row-subject">{{ m.subject || '(no subject)' }}</div>
-              <div class="row-date">{{ m.date | date: 'short' }}</div>
+              <span class="avatar" [style.background]="avatarColor(m.from)">{{ initials(m.from) }}</span>
+              <div class="row-main">
+                <div class="row-top">
+                  <span class="row-from">{{ senderName(m.from) }}</span>
+                  <span class="row-date">{{ m.date | date: 'shortDate' }}</span>
+                </div>
+                <div class="row-subject">{{ m.subject || '(no subject)' }}</div>
+                @if (m.snippet) {
+                  <div class="row-snippet">{{ m.snippet }}</div>
+                }
+              </div>
             </button>
           }
         }
@@ -89,42 +133,67 @@ const REFRESH_INTERVAL_MS = 10_000;
         @if (openMessage(); as msg) {
           <div class="reader-head">
             <button
-              class="back mobile-only"
+              class="back mobile-only icon-btn"
               type="button"
               (click)="view.set('list')"
               aria-label="Back to list"
-            >‹ Back</button>
+            >
+              <i-lucide [img]="icons.ChevronLeft" [size]="20"></i-lucide>
+            </button>
             <h2>{{ msg.subject || '(no subject)' }}</h2>
-            <div class="meta">
-              <div><strong>From:</strong> {{ msg.from }}</div>
-              @if (msg.to.length) {
-                <div><strong>To:</strong> {{ msg.to.join(', ') }}</div>
-              }
-              @if (msg.cc?.length) {
-                <div><strong>Cc:</strong> {{ msg.cc.join(', ') }}</div>
-              }
-              <div class="date">{{ msg.date | date: 'medium' }}</div>
+            <div class="reader-meta">
+              <span class="avatar large" [style.background]="avatarColor(msg.from)">{{ initials(msg.from) }}</span>
+              <div class="meta">
+                <div class="meta-from">{{ msg.from }}</div>
+                @if (msg.to?.length) {
+                  <div class="meta-line">to {{ msg.to.join(', ') }}</div>
+                }
+                @if (msg.cc?.length) {
+                  <div class="meta-line">cc {{ msg.cc.join(', ') }}</div>
+                }
+                <div class="meta-line date">{{ msg.date | date: 'medium' }}</div>
+              </div>
             </div>
             <div class="actions">
-              <button (click)="reply(msg, false)">Reply</button>
-              <button (click)="reply(msg, true)">Reply all</button>
-              <button (click)="forward(msg)">Forward</button>
-              <button (click)="toggleFlagged(msg)">
-                {{ isFlagged(msg) ? 'Unflag' : 'Flag' }}
+              <button class="icon-btn" type="button" (click)="reply(msg, false)" title="Reply" aria-label="Reply">
+                <i-lucide [img]="icons.Reply" [size]="18"></i-lucide>
               </button>
-              <button (click)="markUnread(msg)">Mark unread</button>
-              <button (click)="moveToTrash(msg)">Move to Trash</button>
-              <button class="danger" (click)="remove(msg)">Delete</button>
+              <button class="icon-btn" type="button" (click)="reply(msg, true)" title="Reply all" aria-label="Reply all">
+                <i-lucide [img]="icons.ReplyAll" [size]="18"></i-lucide>
+              </button>
+              <button class="icon-btn" type="button" (click)="forward(msg)" title="Forward" aria-label="Forward">
+                <i-lucide [img]="icons.Forward" [size]="18"></i-lucide>
+              </button>
+              <span class="divider"></span>
+              <button
+                class="icon-btn"
+                type="button"
+                (click)="toggleFlagged(msg)"
+                [title]="isFlagged(msg) ? 'Unflag' : 'Flag'"
+                [attr.aria-label]="isFlagged(msg) ? 'Unflag' : 'Flag'"
+                [class.flagged]="isFlagged(msg)"
+              >
+                <i-lucide [img]="icons.Star" [size]="18"></i-lucide>
+              </button>
+              <button class="icon-btn" type="button" (click)="markUnread(msg)" title="Mark unread" aria-label="Mark unread">
+                <i-lucide [img]="icons.MailOpen" [size]="18"></i-lucide>
+              </button>
+              <button class="icon-btn" type="button" (click)="moveToTrash(msg)" title="Move to Trash" aria-label="Move to Trash">
+                <i-lucide [img]="icons.Archive" [size]="18"></i-lucide>
+              </button>
+              <button class="icon-btn danger" type="button" (click)="remove(msg)" title="Delete" aria-label="Delete">
+                <i-lucide [img]="icons.Trash2" [size]="18"></i-lucide>
+              </button>
             </div>
           </div>
           <div class="reader-body">
-            @if (msg.text) {
-              <pre class="text-body">{{ msg.text }}</pre>
-            } @else if (msg.html) {
+            @if (msg.html) {
               <!-- Angular sanitizes [innerHTML]; a production client
                    should render email HTML in a sandboxed iframe with a
                    strict CSP. -->
               <div class="html-body" [innerHTML]="msg.html"></div>
+            } @else if (msg.text) {
+              <pre class="text-body">{{ msg.text }}</pre>
             } @else {
               <p class="hint">(empty message)</p>
             }
@@ -176,14 +245,15 @@ const REFRESH_INTERVAL_MS = 10_000;
       .app[data-view='folders'] .folders { display: flex; }
       .app[data-view='list'] .list { display: flex; flex-direction: column; }
       .app[data-view='reader'] .reader { display: flex; }
-      .mobile-only {
+      .mobile-only.icon-btn {
         display: inline-flex;
         align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
         background: transparent;
         border: none;
-        font-size: 18px;
         color: var(--text-muted);
-        padding: 4px 8px;
         margin-right: 4px;
       }
     }
@@ -195,94 +265,187 @@ const REFRESH_INTERVAL_MS = 10_000;
     .folders {
       display: flex;
       flex-direction: column;
-      gap: 4px;
-      padding: 12px;
+      gap: 2px;
+      padding: 14px 10px;
       background: var(--bg-muted);
     }
     .me {
       font-size: 12px;
       color: var(--text-muted);
-      padding: 2px 4px 8px;
+      padding: 2px 6px 10px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
     .compose-btn {
-      margin-bottom: 8px;
+      margin-bottom: 10px;
+      padding: 9px 14px;
+      font-weight: 600;
+      border-radius: 8px;
+      justify-content: center;
+    }
+    .icon-text {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
     }
     .folder {
       display: flex;
-      justify-content: space-between;
       align-items: center;
+      gap: 8px;
       text-align: left;
       border: none;
       background: transparent;
-      padding: 7px 8px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      color: var(--text);
+      transition: background 100ms ease;
+      cursor: pointer;
+    }
+    .folder:hover {
+      background: var(--bg-sunken);
     }
     .folder.active {
       background: var(--bg-sunken);
       font-weight: 600;
+      color: var(--accent);
+    }
+    .folder .folder-name {
+      flex: 1;
     }
     .badge {
       background: var(--accent);
       color: var(--accent-text);
       border-radius: 10px;
-      padding: 0 7px;
+      padding: 1px 8px;
       font-size: 11px;
+      font-weight: 600;
     }
     .settings {
       margin-top: auto;
       color: var(--text-muted);
       text-decoration: none;
-      padding: 7px 8px;
+      padding: 8px 10px;
       font-size: 13px;
+      border-radius: 6px;
+      transition: background 100ms ease;
+    }
+    .settings:hover {
+      background: var(--bg-sunken);
     }
     .logout {
       border: none;
       background: transparent;
       color: var(--text-muted);
       text-align: left;
-      padding: 7px 8px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      transition: background 100ms ease;
+      cursor: pointer;
     }
-    .list header,
-    .reader-head h2 {
-      margin: 0;
+    .logout:hover {
+      background: var(--bg-sunken);
     }
     .list header {
       position: sticky;
       top: 0;
       background: var(--bg);
-      padding: 12px;
+      padding: 12px 14px;
       border-bottom: 1px solid var(--border);
       font-weight: 600;
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
+      z-index: 1;
+    }
+    .list header .title {
+      font-size: 14px;
+      text-transform: capitalize;
+    }
+    .reader-head h2 {
+      margin: 0 0 12px;
+      font-size: 18px;
+      font-weight: 600;
+    }
+    .search-wrap {
+      position: relative;
+      flex: 1;
+      max-width: 220px;
+    }
+    .search-icon {
+      position: absolute;
+      left: 8px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--text-muted);
+      pointer-events: none;
     }
     .search {
-      flex: 1;
-      padding: 4px 8px;
+      width: 100%;
+      padding: 5px 8px 5px 26px;
       font-size: 12px;
       font-weight: normal;
+      border-radius: 6px;
     }
+    /* Message-list rows: avatar | sender+subject+snippet | date.
+       Hover gives a subtle nudge; active is the selected message. */
     .row {
       display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 2px 8px;
+      grid-template-columns: auto 1fr;
+      gap: 10px;
       width: 100%;
       text-align: left;
       border: none;
       border-bottom: 1px solid var(--border);
       border-radius: 0;
       background: transparent;
-      padding: 10px 12px;
+      padding: 12px 14px;
+      cursor: pointer;
+      transition: background 80ms ease;
+    }
+    .row:hover {
+      background: var(--bg-muted);
     }
     .row.active {
       background: var(--bg-sunken);
     }
-    .row-from {
-      color: var(--text-muted);
+    .avatar {
+      display: inline-grid;
+      place-items: center;
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      color: white;
       font-size: 13px;
+      font-weight: 600;
+      flex-shrink: 0;
+      user-select: none;
+    }
+    .avatar.large {
+      width: 44px;
+      height: 44px;
+      font-size: 15px;
+    }
+    .row-main {
+      min-width: 0;
+    }
+    .row-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+    }
+    .row-from {
+      color: var(--text);
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .row-date {
+      color: var(--text-muted);
+      font-size: 11px;
+      flex-shrink: 0;
     }
     .row.unread .row-from,
     .row.unread .row-subject {
@@ -290,17 +453,19 @@ const REFRESH_INTERVAL_MS = 10_000;
       font-weight: 600;
     }
     .row-subject {
-      grid-column: 1;
+      font-size: 13px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      margin-top: 2px;
     }
-    .row-date {
-      grid-row: 1 / span 2;
-      grid-column: 2;
-      align-self: center;
-      color: var(--text-muted);
+    .row-snippet {
       font-size: 12px;
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin-top: 2px;
     }
     .reader {
       display: flex;
@@ -308,23 +473,69 @@ const REFRESH_INTERVAL_MS = 10_000;
       overflow-y: auto;
     }
     .reader-head {
-      padding: 16px;
+      padding: 18px 20px;
       border-bottom: 1px solid var(--border);
     }
+    .reader-meta {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      margin: 10px 0;
+    }
     .meta {
-      margin: 8px 0;
+      flex: 1;
       font-size: 13px;
       color: var(--text-muted);
     }
+    .meta-from {
+      color: var(--text);
+      font-weight: 500;
+      font-size: 14px;
+    }
+    .meta-line {
+      margin-top: 2px;
+    }
     .meta .date {
       margin-top: 4px;
+      font-size: 12px;
     }
+    /* Action toolbar — icon buttons with a subtle hover, divider
+       between thread actions and message-state actions. */
     .actions {
       display: flex;
-      gap: 8px;
+      gap: 2px;
+      margin-top: 8px;
+      align-items: center;
     }
-    .actions .danger {
+    .icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      border: none;
+      background: transparent;
+      border-radius: 6px;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: background 100ms ease, color 100ms ease;
+    }
+    .icon-btn:hover {
+      background: var(--bg-sunken);
+      color: var(--text);
+    }
+    .icon-btn.flagged {
+      color: #f5a623;
+    }
+    .icon-btn.danger:hover {
+      background: rgba(220, 53, 69, 0.1);
       color: var(--danger);
+    }
+    .divider {
+      width: 1px;
+      height: 20px;
+      background: var(--border);
+      margin: 0 6px;
     }
     .reader-body {
       padding: 16px;
@@ -364,6 +575,14 @@ const REFRESH_INTERVAL_MS = 10_000;
 export class MailboxComponent implements OnInit, OnDestroy {
   protected readonly api = inject(ApiService);
   private readonly router = inject(Router);
+
+  // Icon set exposed to the template — one place to pin which icons
+  // are imported above. Adding a new icon means adding it both to
+  // the import list and to this map.
+  protected readonly icons = {
+    Archive, ChevronLeft, Edit3, Forward, Inbox, LogOut, MailOpen,
+    Reply, ReplyAll, Search, Send, Settings, Star, Trash2,
+  };
 
   readonly mailboxes = signal<Mailbox[]>([]);
   readonly selected = signal<string>('INBOX');
@@ -590,6 +809,56 @@ export class MailboxComponent implements OnInit, OnDestroy {
       void this.router.navigate(['/login']);
     };
     this.api.logout().subscribe({ next: done, error: done });
+  }
+
+  // folderIcon maps an IMAP mailbox name to a Lucide icon. Standard
+  // folder names (case-insensitive) get a recognisable icon; anything
+  // else falls back to a generic folder.
+  protected folderIcon(name: string) {
+    switch (name.toUpperCase()) {
+      case 'INBOX': return Inbox;
+      case 'SENT': return Send;
+      case 'DRAFTS': return Edit3;
+      case 'TRASH': return Trash2;
+      case 'JUNK': return ShieldAlert;
+      case 'ARCHIVE': return Archive;
+      default: return Folder;
+    }
+  }
+
+  // senderName extracts the human-readable part of an RFC 5322 From
+  // header — "Alice <alice@x>" -> "Alice", or the address if no name
+  // is present.
+  protected senderName(from: string): string {
+    if (!from) return '(unknown sender)';
+    const m = from.match(/^\s*"?([^"<]+?)"?\s*<.+>$/);
+    return m ? m[1].trim() : from.replace(/[<>]/g, '');
+  }
+
+  // initials returns one or two letters for the sender avatar. We
+  // pick the first letter of the first two whitespace-separated tokens
+  // of senderName; if there's only one token we fall back to its first
+  // letter alone.
+  protected initials(from: string): string {
+    const name = this.senderName(from);
+    const parts = name.split(/[\s.@]+/).filter(Boolean);
+    if (parts.length === 0) return '?';
+    if (parts.length === 1) return parts[0][0].toUpperCase();
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+
+  // avatarColor maps a sender to a stable HSL background so the same
+  // sender always gets the same colour across reloads. Hash the
+  // senderName for hue selection; saturation + lightness are fixed
+  // to a palette that reads on both light and dark themes.
+  protected avatarColor(from: string): string {
+    const name = this.senderName(from);
+    let hash = 0;
+    for (let i = 0; i < name.length; i++) {
+      hash = (hash * 31 + name.charCodeAt(i)) | 0;
+    }
+    const hue = Math.abs(hash) % 360;
+    return `hsl(${hue}, 55%, 48%)`;
   }
 
   private refreshMailboxes(): void {

@@ -46,7 +46,9 @@ func (s *Server) handleMailboxes(w http.ResponseWriter, _ *http.Request, acc *st
 }
 
 // messageSummary is one message in a mailbox listing — metadata only,
-// no body.
+// no body. Snippet is populated only when the list call asks for it
+// (`?snippets=1`); the default listing skips the per-message body
+// fetch so a large mailbox stays fast.
 type messageSummary struct {
 	ID      uint64   `json:"id"`
 	UID     uint32   `json:"uid"`
@@ -56,6 +58,7 @@ type messageSummary struct {
 	Size    int64    `json:"size"`
 	Flags   []string `json:"flags"`
 	Seen    bool     `json:"seen"`
+	Snippet string   `json:"snippet,omitempty"`
 }
 
 // handleListMessages lists a mailbox's messages, newest first.
@@ -79,19 +82,46 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request, acc 
 	// first.
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	limit := parseLimit(r)
+	wantSnippets := r.URL.Query().Get("snippets") == "1"
 	out := make([]messageSummary, 0, len(msgs))
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := &msgs[i]
 		if query != "" && !s.matchesQuery(m, query) {
 			continue
 		}
-		out = append(out, summarize(m))
+		sum := summarize(m)
+		if wantSnippets {
+			sum.Snippet = s.computeSnippet(m)
+		}
+		out = append(out, sum)
 		if limit > 0 && len(out) >= limit {
 			break
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
+
+// computeSnippet pulls a short text-only preview from the message body
+// — at most snippetMax runes, with leading/trailing whitespace
+// collapsed. Returns "" if the body can't be fetched (the list view
+// is best-effort and a failed snippet just shows no preview).
+func (s *Server) computeSnippet(m *store.Message) string {
+	raw, err := s.store.FetchBody(m)
+	if err != nil {
+		return ""
+	}
+	t := strings.Join(strings.Fields(renderText(raw)), " ")
+	if len([]rune(t)) <= snippetMax {
+		return t
+	}
+	r := []rune(t)
+	return string(r[:snippetMax]) + "…"
+}
+
+// snippetMax bounds the preview returned by computeSnippet. Picked
+// to fit on a single line of the mailbox-list row at the SPA's
+// default font size without forcing the layout to scroll.
+const snippetMax = 140
 
 // matchesQuery reports whether m's metadata or body contains query.
 // Subject and From are cheap (in memory); the body is fetched only when

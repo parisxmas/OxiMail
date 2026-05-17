@@ -69,10 +69,15 @@ export class ApiService {
   }
 
   messages(mailbox: string, query = '') {
-    let url = `/api/mailboxes/${encodeURIComponent(mailbox)}/messages`;
+    // Always opt in to body snippets — the SPA renders them in the
+    // list row, and the per-message body fetch cost is acceptable
+    // for a personal mailbox. For larger mailboxes, the server caps
+    // the listing via ?limit and snippets honour that cap too.
+    const params = new URLSearchParams({ snippets: '1' });
     if (query) {
-      url += `?q=${encodeURIComponent(query)}`;
+      params.set('q', query);
     }
+    const url = `/api/mailboxes/${encodeURIComponent(mailbox)}/messages?${params}`;
     return this.http.get<MessageSummary[]>(url);
   }
 
