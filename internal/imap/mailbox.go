@@ -25,6 +25,7 @@ import (
 type selectedMailbox struct {
 	store *store.Store
 
+	accountID   uint64 // owner; required to route every per-account store call
 	dbID        uint64
 	name        string
 	uidValidity uint32
@@ -45,13 +46,14 @@ type selectedMailbox struct {
 }
 
 func newSelectedMailbox(st *store.Store, mb *store.Mailbox) (*selectedMailbox, error) {
-	msgs, err := st.ListMessages(mb.ID)
+	msgs, err := st.ListMessages(mb.AccountID, mb.ID)
 	if err != nil {
 		return nil, err
 	}
 	tracker := imapserver.NewMailboxTracker(uint32(len(msgs)))
 	m := &selectedMailbox{
 		store:       st,
+		accountID:   mb.AccountID,
 		dbID:        mb.ID,
 		name:        mb.Name,
 		uidNext:     mb.UIDNext,
@@ -104,7 +106,7 @@ func (m *selectedMailbox) watch() {
 // on watch(). Held under m.mu so any session command runs against a
 // consistent snapshot.
 func (m *selectedMailbox) refresh() {
-	latest, err := m.store.ListMessages(m.dbID)
+	latest, err := m.store.ListMessages(m.accountID, m.dbID)
 	if err != nil {
 		log.Printf("imap: refresh mailbox %d: %v", m.dbID, err)
 		return
@@ -369,7 +371,7 @@ func (m *selectedMailbox) fetch(w *imapserver.FetchWriter, numSet imap.NumSet, o
 			return
 		}
 		if markSeen && !hasFlag(msg.Flags, string(imap.FlagSeen)) {
-			if err := m.store.AddFlags(msg.ID, string(imap.FlagSeen)); err != nil {
+			if err := m.store.AddFlags(m.accountID, msg.ID, string(imap.FlagSeen)); err != nil {
 				ferr = err
 				return
 			}
@@ -377,7 +379,7 @@ func (m *selectedMailbox) fetch(w *imapserver.FetchWriter, numSet imap.NumSet, o
 			// AddFlags bumped the message's mod-seq; the local copy
 			// has the previous value. Refresh by re-reading from the
 			// store so subsequent WriteModSeq emits the new value.
-			if fresh, err := m.store.GetMessage(msg.ID); err == nil {
+			if fresh, err := m.store.GetMessage(m.accountID, msg.ID); err == nil {
 				msg.ModSeq = fresh.ModSeq
 			}
 			m.tracker.QueueMessageFlags(seqNum, imap.UID(msg.UID), toIMAPFlags(msg.Flags), nil)
@@ -394,7 +396,7 @@ func (m *selectedMailbox) fetch(w *imapserver.FetchWriter, numSet imap.NumSet, o
 // is happy either way. A want set carrying "*" is staticised first so
 // the comparison is exact.
 func (m *selectedMailbox) emitVanishedSince(w *imapserver.FetchWriter, want imap.UIDSet, sinceModSeq uint64) error {
-	uids, err := m.store.ExpungedSince(m.dbID, sinceModSeq)
+	uids, err := m.store.ExpungedSince(m.accountID, m.dbID, sinceModSeq)
 	if err != nil {
 		return err
 	}
@@ -519,7 +521,7 @@ func (m *selectedMailbox) storeFlags(w *imapserver.FetchWriter, numSet imap.NumS
 		msg.Flags = newFlags
 		// applyFlags bumped the message's modseq; refresh the local
 		// copy so the post-store FETCH echoes the new value.
-		if fresh, err := m.store.GetMessage(msg.ID); err == nil {
+		if fresh, err := m.store.GetMessage(m.accountID, msg.ID); err == nil {
 			msg.ModSeq = fresh.ModSeq
 		}
 		m.tracker.QueueMessageFlags(seqNum, imap.UID(msg.UID), toIMAPFlags(newFlags), m.session)
@@ -565,17 +567,17 @@ func (m *selectedMailbox) applyFlags(msg *store.Message, sf *imap.StoreFlags) ([
 	flags := flagsToStrings(sf.Flags)
 	switch sf.Op {
 	case imap.StoreFlagsSet:
-		if err := m.store.SetFlags(msg.ID, flags); err != nil {
+		if err := m.store.SetFlags(m.accountID, msg.ID, flags); err != nil {
 			return nil, err
 		}
 		return flags, nil
 	case imap.StoreFlagsAdd:
-		if err := m.store.AddFlags(msg.ID, flags...); err != nil {
+		if err := m.store.AddFlags(m.accountID, msg.ID, flags...); err != nil {
 			return nil, err
 		}
 		return unionFlags(msg.Flags, flags), nil
 	case imap.StoreFlagsDel:
-		if err := m.store.RemoveFlags(msg.ID, flags...); err != nil {
+		if err := m.store.RemoveFlags(m.accountID, msg.ID, flags...); err != nil {
 			return nil, err
 		}
 		return minusFlags(msg.Flags, flags), nil
@@ -595,7 +597,7 @@ func (m *selectedMailbox) copy(numSet imap.NumSet, dest *store.Mailbox) (*imap.C
 		if copyErr != nil {
 			return
 		}
-		copied, err := m.store.CopyMessage(msg.ID, dest.ID)
+		copied, err := m.store.CopyMessage(m.accountID, msg.ID, dest.ID)
 		if err != nil {
 			copyErr = err
 			return
@@ -633,7 +635,7 @@ func (m *selectedMailbox) move(w *imapserver.MoveWriter, numSet imap.NumSet, des
 		if moveErr != nil {
 			return
 		}
-		newMsg, err := m.store.MoveMessage(msg.ID, dest.ID)
+		newMsg, err := m.store.MoveMessage(m.accountID, msg.ID, dest.ID)
 		if err != nil {
 			moveErr = err
 			return
@@ -719,7 +721,7 @@ func (m *selectedMailbox) expunge(w *imapserver.ExpungeWriter, uids *imap.UIDSet
 		if !hasFlag(msg.Flags, string(imap.FlagDeleted)) {
 			continue
 		}
-		if err := m.store.DeleteMessage(msg.ID); err != nil {
+		if err := m.store.DeleteMessage(m.accountID, msg.ID); err != nil {
 			return err
 		}
 		if qresync {

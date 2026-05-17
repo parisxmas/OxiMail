@@ -16,7 +16,7 @@ type SieveScript struct {
 // GetSieveScript returns the script bound to an account, or
 // ErrNotFound if none is set.
 func (s *Store) GetSieveScript(accountID uint64) (*SieveScript, error) {
-	m, err := s.db.FindOne(CollSieveScripts, map[string]any{"account_id": accountID})
+	m, err := s.db.FindOne(SieveScriptsColl(accountID), map[string]any{"account_id": accountID})
 	if err != nil {
 		return nil, fmt.Errorf("store: get sieve script for account %d: %w", accountID, err)
 	}
@@ -38,7 +38,7 @@ func (s *Store) SetSieveScript(accountID uint64, source string) (*SieveScript, e
 	}
 	if existing != nil {
 		doc, err := s.db.FindAndModify(
-			CollSieveScripts,
+			SieveScriptsColl(accountID),
 			map[string]any{"_id": existing.ID},
 			map[string]any{"$set": map[string]any{
 				"source":     source,
@@ -62,7 +62,7 @@ func (s *Store) SetSieveScript(accountID uint64, source string) (*SieveScript, e
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.db.Insert(CollSieveScripts, doc)
+	resp, err := s.db.Insert(SieveScriptsColl(accountID), doc)
 	if err != nil {
 		return nil, fmt.Errorf("store: create sieve script for account %d: %w", accountID, err)
 	}
@@ -74,7 +74,7 @@ func (s *Store) SetSieveScript(accountID uint64, source string) (*SieveScript, e
 
 // DeleteSieveScript removes the script.
 func (s *Store) DeleteSieveScript(accountID uint64) error {
-	if _, err := s.db.Delete(CollSieveScripts, map[string]any{"account_id": accountID}); err != nil {
+	if _, err := s.db.Delete(SieveScriptsColl(accountID), map[string]any{"account_id": accountID}); err != nil {
 		return fmt.Errorf("store: delete sieve script for account %d: %w", accountID, err)
 	}
 	return nil

@@ -35,24 +35,21 @@ import (
 	"github.com/parisxmas/OxiDB/go/oxidb"
 )
 
-// Collection names — the single source of truth for the schema. Every
-// query in this package refers to a collection through one of these.
+// Collection names for the SHARED collections — these stay global
+// because they are inherently cross-account. Per-account collections
+// (mailboxes / messages / vacations / sieve_scripts / expunge_log) are
+// named per-account via the helpers in collections.go; their on-disk
+// files appear as e.g. `messages_acct_2.btree`, one per account.
 const (
 	CollDomains       = "domains"
 	CollAccounts      = "accounts"
 	CollAliases       = "aliases"
-	CollMailboxes     = "mailboxes"
-	CollMessages      = "messages"
 	CollOutboundQueue = "outbound_queue"
-	CollVacations     = "vacations"
-	CollSieveScripts  = "sieve_scripts"
-	// CollExpungeLog records every expunged UID per mailbox with the
-	// mod-sequence at which it disappeared. QRESYNC reads it to
-	// answer "what UIDs vanished since mod-sequence M".
-	CollExpungeLog = "expunge_log"
 	// CollBlobRefs holds {blob_key, count} rows used by IMAP COPY to
 	// share one body blob across many message documents. The body is
-	// only removed when the last referrer is deleted.
+	// only removed when the last referrer is deleted. Stays global so
+	// the same physical blob can be referenced by recipients in
+	// different accounts without per-account duplication.
 	CollBlobRefs = "blob_refs"
 )
 

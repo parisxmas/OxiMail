@@ -69,7 +69,7 @@ func TestWebmail(t *testing.T) {
 		"\r\n" +
 		"\x00\x01\x02\x03ATTACH\r\n" +
 		"--BOUND--\r\n")
-	seeded, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+	seeded, err := st.AppendMessage(acc.ID, inbox.ID, store.IncomingMessage{
 		Raw: rawMsg, Subject: "Hello webmail", MessageID: "wm-1@elsewhere.test",
 		FromAddr: "sender@elsewhere.test",
 	})
@@ -270,7 +270,7 @@ func TestWebmail(t *testing.T) {
 		if err != nil {
 			t.Fatalf("get other INBOX: %v", err)
 		}
-		recvd, err := st.ListMessages(otherInbox.ID)
+		recvd, err := st.ListMessages(other.ID, otherInbox.ID)
 		if err != nil {
 			t.Fatalf("list other INBOX: %v", err)
 		}
@@ -282,7 +282,7 @@ func TestWebmail(t *testing.T) {
 		if err != nil {
 			t.Fatalf("get Sent: %v", err)
 		}
-		if sentMsgs, _ := st.ListMessages(sent.ID); len(sentMsgs) != 1 {
+		if sentMsgs, _ := st.ListMessages(acc.ID, sent.ID); len(sentMsgs) != 1 {
 			t.Fatalf("Sent has %d messages, want 1", len(sentMsgs))
 		}
 	})
@@ -304,7 +304,7 @@ func TestWebmail(t *testing.T) {
 		// The recipient's INBOX has the message and its raw form is
 		// multipart/alternative carrying both representations.
 		otherInbox, _ := st.GetMailboxByName(other.ID, "INBOX")
-		recvd, _ := st.ListMessages(otherInbox.ID)
+		recvd, _ := st.ListMessages(other.ID, otherInbox.ID)
 		var rich *store.Message
 		for i := range recvd {
 			if recvd[i].Subject == "Rich email" {
@@ -346,7 +346,7 @@ func TestWebmail(t *testing.T) {
 		// Find the reply in the recipient's INBOX and confirm both
 		// threading headers are present.
 		otherInbox, _ := st.GetMailboxByName(other.ID, "INBOX")
-		recvd, _ := st.ListMessages(otherInbox.ID)
+		recvd, _ := st.ListMessages(other.ID, otherInbox.ID)
 		var reply *store.Message
 		for i := range recvd {
 			if recvd[i].Subject == "Re: Hello webmail" {
@@ -391,7 +391,7 @@ func TestWebmail(t *testing.T) {
 		if err != nil {
 			t.Fatalf("get Drafts: %v", err)
 		}
-		msgs, err := st.ListMessages(drafts.ID)
+		msgs, err := st.ListMessages(acc.ID, drafts.ID)
 		if err != nil {
 			t.Fatalf("list Drafts: %v", err)
 		}
@@ -419,7 +419,7 @@ func TestWebmail(t *testing.T) {
 		if second.ID == first.ID {
 			t.Error("second draft kept the same message id; want a fresh one (the previous was deleted)")
 		}
-		msgs, _ = st.ListMessages(drafts.ID)
+		msgs, _ = st.ListMessages(acc.ID, drafts.ID)
 		if len(msgs) != 1 {
 			t.Fatalf("Drafts has %d messages after the second save, want 1 (overwrite, not append)", len(msgs))
 		}
@@ -554,7 +554,7 @@ func TestWebmail(t *testing.T) {
 			t.Error("seen = false after adding \\Seen")
 		}
 		// Verify it was persisted, not just echoed.
-		m, err := st.GetMessage(seeded.ID)
+		m, err := st.GetMessage(acc.ID, seeded.ID)
 		if err != nil {
 			t.Fatalf("get message: %v", err)
 		}
@@ -569,7 +569,7 @@ func TestWebmail(t *testing.T) {
 		if status := postJSON(t, url, token, body, nil); status != http.StatusOK {
 			t.Fatalf("status = %d, want 200", status)
 		}
-		m, err := st.GetMessage(seeded.ID)
+		m, err := st.GetMessage(acc.ID, seeded.ID)
 		if err != nil {
 			t.Fatalf("get message: %v", err)
 		}
@@ -587,7 +587,7 @@ func TestWebmail(t *testing.T) {
 		if status := del(t, url, token); status != http.StatusNoContent {
 			t.Fatalf("status = %d, want 204", status)
 		}
-		if _, err := st.GetMessage(seeded.ID); !errors.Is(err, store.ErrNotFound) {
+		if _, err := st.GetMessage(acc.ID, seeded.ID); !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("message still present after delete: err = %v", err)
 		}
 	})

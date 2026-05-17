@@ -11,14 +11,23 @@ import (
 // relies on. OxiDB auto-creates collections on first insert, but indexes
 // must be declared. It is safe to call on every startup: an index that
 // already exists is treated as success.
+//
+// Per-account collections (messages_acct_<id>, …) are NOT created here
+// — they're created when the account is created (CreateAccount calls
+// EnsureAccountCollections). A startup migration in MigratePerAccount
+// catches any pre-existing accounts whose data still lives in the old
+// shared `messages` / `mailboxes` / … collections.
 func EnsureSchema(s *Store) error {
-	// Create the collections up front so index creation has something to
-	// attach to (OxiDB otherwise only materializes a collection on its
-	// first insert).
+	// Create the SHARED collections up front so index creation has
+	// something to attach to. The legacy per-account collection names
+	// ("messages", "mailboxes", "vacations", "sieve_scripts",
+	// "expunge_log") are NOT pre-created here — if a fresh install
+	// only sees the new layout, those names never get materialised.
+	// They are created on demand by MigratePerAccount when migrating
+	// an existing install that has data under the old names.
 	for _, coll := range []string{
 		CollDomains, CollAccounts, CollAliases,
-		CollMailboxes, CollMessages, CollOutboundQueue,
-		CollVacations, CollSieveScripts, CollExpungeLog, CollBlobRefs,
+		CollOutboundQueue, CollBlobRefs,
 	} {
 		if err := ensureCollection(s.db, coll); err != nil {
 			return err
@@ -35,46 +44,34 @@ func EnsureSchema(s *Store) error {
 	if err := ensureUnique(s.db, CollAliases, "address"); err != nil {
 		return err
 	}
-	if err := ensureUnique(s.db, CollVacations, "account_id"); err != nil {
-		return err
-	}
-	if err := ensureUnique(s.db, CollSieveScripts, "account_id"); err != nil {
-		return err
-	}
 	if err := ensureUnique(s.db, CollBlobRefs, "blob_key"); err != nil {
 		return err
 	}
 
-	// Lookup indexes for the hot query paths.
+	// Lookup indexes for the hot query paths on the SHARED collections.
 	for _, ix := range []struct {
 		coll, field string
 	}{
 		{CollAccounts, "domain"},
 		{CollAliases, "domain"},
-		{CollMailboxes, "account_id"},
-		{CollMessages, "mailbox_id"},
-		{CollMessages, "account_id"},
 		{CollOutboundQueue, "status"},
 		{CollOutboundQueue, "next_retry_at"},
-		{CollExpungeLog, "mailbox_id"},
 	} {
 		if err := ensureIndex(s.db, ix.coll, ix.field); err != nil {
 			return err
 		}
 	}
 
-	// Composite indexes for the multi-field hot paths: IMAP fetch by
-	// (mailbox, UID), and mailbox lookup by (account, folder name).
-	if err := ensureComposite(s.db, CollMessages, []string{"mailbox_id", "uid"}); err != nil {
-		return err
-	}
-	if err := ensureComposite(s.db, CollMailboxes, []string{"account_id", "name"}); err != nil {
-		return err
-	}
-
 	// The blob bucket for message bodies (idempotent).
 	if err := s.db.CreateBucket(BlobBucket); err != nil && !isAlreadyExists(err) {
 		return fmt.Errorf("store: create blob bucket %q: %w", BlobBucket, err)
+	}
+
+	// Make sure every existing account has its per-account collections
+	// + indexes in place, and that any data left in the old shared
+	// `messages` / `mailboxes` / … collections is moved over.
+	if err := MigratePerAccount(s); err != nil {
+		return fmt.Errorf("store: per-account migration: %w", err)
 	}
 	return nil
 }

@@ -23,7 +23,7 @@ type Vacation struct {
 // GetVacation returns the auto-responder rule for an account.
 // ErrNotFound means "no rule configured" — auto-reply is off.
 func (s *Store) GetVacation(accountID uint64) (*Vacation, error) {
-	m, err := s.db.FindOne(CollVacations, map[string]any{"account_id": accountID})
+	m, err := s.db.FindOne(VacationsColl(accountID), map[string]any{"account_id": accountID})
 	if err != nil {
 		return nil, fmt.Errorf("store: get vacation for account %d: %w", accountID, err)
 	}
@@ -45,7 +45,7 @@ func (s *Store) SetVacation(accountID uint64, enabled bool, subject, body string
 	}
 	if existing != nil {
 		doc, err := s.db.FindAndModify(
-			CollVacations,
+			VacationsColl(accountID),
 			map[string]any{"_id": existing.ID},
 			map[string]any{"$set": map[string]any{
 				"enabled":       enabled,
@@ -79,7 +79,7 @@ func (s *Store) SetVacation(accountID uint64, enabled bool, subject, body string
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.db.Insert(CollVacations, doc)
+	resp, err := s.db.Insert(VacationsColl(accountID), doc)
 	if err != nil {
 		return nil, fmt.Errorf("store: create vacation for account %d: %w", accountID, err)
 	}
@@ -92,7 +92,7 @@ func (s *Store) SetVacation(accountID uint64, enabled bool, subject, body string
 // DeleteVacation removes the rule, turning the auto-responder off.
 // Deleting an absent rule is not an error.
 func (s *Store) DeleteVacation(accountID uint64) error {
-	if _, err := s.db.Delete(CollVacations, map[string]any{"account_id": accountID}); err != nil {
+	if _, err := s.db.Delete(VacationsColl(accountID), map[string]any{"account_id": accountID}); err != nil {
 		return fmt.Errorf("store: delete vacation for account %d: %w", accountID, err)
 	}
 	return nil

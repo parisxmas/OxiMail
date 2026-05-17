@@ -108,7 +108,7 @@ func (c *cmdContext) backup(args []string) int {
 	seenBlobs := map[string]bool{}
 	for i := range mailboxes {
 		mb := &mailboxes[i]
-		msgs, err := c.store.ListMessages(mb.ID)
+		msgs, err := c.store.ListMessages(acc.ID, mb.ID)
 		if err != nil {
 			return c.fail("list messages in %q: %v", mb.Name, err)
 		}

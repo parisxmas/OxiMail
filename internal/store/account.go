@@ -184,6 +184,13 @@ func (s *Store) CreateAccount(address, passwordHash string, quotaBytes int64) (*
 	if a.ID, err = insertedID(resp); err != nil {
 		return nil, err
 	}
+	// Materialise the per-account collections (messages, mailboxes,
+	// vacations, sieve_scripts, expunge_log) up front so subsequent
+	// inserts have indexes ready and so a fresh `du` of the data
+	// directory makes the new account visible immediately.
+	if err := EnsureAccountCollections(s.db, a.ID); err != nil {
+		return nil, fmt.Errorf("store: ensure per-account collections for %q: %w", address, err)
+	}
 	return a, nil
 }
 
@@ -264,20 +271,20 @@ func (s *Store) ListAccounts(domain string) ([]Account, error) {
 // DeleteAccount removes an account and everything that hangs off it.
 //
 // OxiDB has no foreign keys or cascading deletes, so this layer performs
-// the cascade by hand: every message's body blob is removed, then the
-// message documents, then the mailboxes, then the account itself. The
-// body blobs go first — an orphaned blob is mere wasted disk, whereas a
-// message document pointing at a missing blob is a broken read.
+// the cascade by hand: every message's body blob is decref'd (so a
+// blob shared with another recipient survives), then the per-account
+// collections themselves are DROPPED — that reclaims the on-disk
+// btree files entirely, vs. just clearing rows out of a shared table.
+// Finally the account doc is removed from the global accounts
+// collection.
 func (s *Store) DeleteAccount(id uint64) error {
-	msgs, err := s.db.Find(CollMessages, map[string]any{"account_id": id}, nil)
-	if err != nil {
+	msgs, err := s.db.Find(MessagesColl(id), map[string]any{}, nil)
+	if err != nil && !isMissingCollection(err) {
 		return fmt.Errorf("store: delete account %d: list messages: %w", id, err)
 	}
 	// Drop one refcount per message doc; the blob disappears when
 	// the count hits zero. A blob that is also referenced by another
-	// account (which OxiMail never produces today, but the refcount
-	// model permits) survives until that other account drops it
-	// too.
+	// account survives until that other account drops it too.
 	for _, m := range msgs {
 		if key, ok := m["body_blob"].(string); ok && key != "" {
 			if _, err := s.blobDropRef(key); err != nil {
@@ -285,11 +292,10 @@ func (s *Store) DeleteAccount(id uint64) error {
 			}
 		}
 	}
-	if _, err := s.db.Delete(CollMessages, map[string]any{"account_id": id}); err != nil {
-		return fmt.Errorf("store: delete account %d: remove messages: %w", id, err)
-	}
-	if _, err := s.db.Delete(CollMailboxes, map[string]any{"account_id": id}); err != nil {
-		return fmt.Errorf("store: delete account %d: remove mailboxes: %w", id, err)
+	// DropCollection on each per-account collection — the on-disk
+	// btree files actually go away.
+	if err := DropAccountCollections(s.db, id); err != nil {
+		return fmt.Errorf("store: delete account %d: drop per-account collections: %w", id, err)
 	}
 	if _, err := s.db.Delete(CollAccounts, map[string]any{"_id": id}); err != nil {
 		return fmt.Errorf("store: delete account %d: remove account: %w", id, err)

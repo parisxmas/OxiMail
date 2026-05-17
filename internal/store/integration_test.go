@@ -188,7 +188,7 @@ func TestStore(t *testing.T) {
 				defer wg.Done()
 				got := make([]uint32, 0, perWriter)
 				for j := 0; j < perWriter; j++ {
-					uid, err := st.NextUID(mb.ID)
+					uid, err := st.NextUID(mb.AccountID, mb.ID)
 					if err != nil {
 						t.Errorf("NextUID: %v", err)
 						return
@@ -236,7 +236,7 @@ func TestStore(t *testing.T) {
 		}
 
 		raw1 := []byte("From: a@b.test\r\nSubject: First\r\n\r\nhello one")
-		m1, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+		m1, err := st.AppendMessage(acc.ID, inbox.ID, store.IncomingMessage{
 			Raw: raw1, MessageID: "<1@b.test>", Subject: "First", FromAddr: "a@b.test",
 		})
 		if err != nil {
@@ -245,7 +245,7 @@ func TestStore(t *testing.T) {
 		if m1.UID != 1 || m1.SizeBytes != int64(len(raw1)) || m1.AccountID != acc.ID {
 			t.Fatalf("unexpected message 1: %+v", m1)
 		}
-		m2, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+		m2, err := st.AppendMessage(acc.ID, inbox.ID, store.IncomingMessage{
 			Raw: []byte("From: c@d.test\r\nSubject: Second\r\n\r\nhello two"), Subject: "Second",
 		})
 		if err != nil {
@@ -255,7 +255,7 @@ func TestStore(t *testing.T) {
 			t.Fatalf("message 2 UID = %d, want 2", m2.UID)
 		}
 
-		got, err := st.GetMessage(m1.ID)
+		got, err := st.GetMessage(acc.ID, m1.ID)
 		if err != nil {
 			t.Fatalf("get message: %v", err)
 		}
@@ -270,7 +270,7 @@ func TestStore(t *testing.T) {
 			t.Fatalf("fetched body does not round-trip: got %q want %q", body, raw1)
 		}
 
-		list, err := st.ListMessages(inbox.ID)
+		list, err := st.ListMessages(acc.ID, inbox.ID)
 		if err != nil {
 			t.Fatalf("list messages: %v", err)
 		}
@@ -282,30 +282,30 @@ func TestStore(t *testing.T) {
 	t.Run("flags", func(t *testing.T) {
 		acc, _ := st.CreateAccount("flags@flag.test", "h", 0)
 		mb, _ := st.CreateMailbox(acc.ID, "INBOX")
-		m, err := st.AppendMessage(mb.ID, store.IncomingMessage{Raw: []byte("x")})
+		m, err := st.AppendMessage(acc.ID, mb.ID, store.IncomingMessage{Raw: []byte("x")})
 		if err != nil {
 			t.Fatalf("append: %v", err)
 		}
 
-		if err := st.AddFlags(m.ID, `\Seen`); err != nil {
+		if err := st.AddFlags(acc.ID, m.ID, `\Seen`); err != nil {
 			t.Fatalf("add flag: %v", err)
 		}
-		if err := st.AddFlags(m.ID, `\Flagged`, `\Answered`); err != nil {
+		if err := st.AddFlags(acc.ID, m.ID, `\Flagged`, `\Answered`); err != nil {
 			t.Fatalf("add flags: %v", err)
 		}
-		if got := flagsOf(t, st, m.ID); !hasAll(got, `\Seen`, `\Flagged`, `\Answered`) {
+		if got := flagsOf(t, st, acc.ID, m.ID); !hasAll(got, `\Seen`, `\Flagged`, `\Answered`) {
 			t.Fatalf("after AddFlags: %v", got)
 		}
-		if err := st.RemoveFlags(m.ID, `\Seen`); err != nil {
+		if err := st.RemoveFlags(acc.ID, m.ID, `\Seen`); err != nil {
 			t.Fatalf("remove flag: %v", err)
 		}
-		if got := flagsOf(t, st, m.ID); hasAll(got, `\Seen`) {
+		if got := flagsOf(t, st, acc.ID, m.ID); hasAll(got, `\Seen`) {
 			t.Fatalf("after RemoveFlags \\Seen still present: %v", got)
 		}
-		if err := st.SetFlags(m.ID, []string{`\Draft`}); err != nil {
+		if err := st.SetFlags(acc.ID, m.ID, []string{`\Draft`}); err != nil {
 			t.Fatalf("set flags: %v", err)
 		}
-		if got := flagsOf(t, st, m.ID); len(got) != 1 || got[0] != `\Draft` {
+		if got := flagsOf(t, st, acc.ID, m.ID); len(got) != 1 || got[0] != `\Draft` {
 			t.Fatalf("after SetFlags = %v, want [\\Draft]", got)
 		}
 	})
@@ -313,14 +313,14 @@ func TestStore(t *testing.T) {
 	t.Run("delete message removes the body blob", func(t *testing.T) {
 		acc, _ := st.CreateAccount("del@delete.test", "h", 0)
 		mb, _ := st.CreateMailbox(acc.ID, "INBOX")
-		m, err := st.AppendMessage(mb.ID, store.IncomingMessage{Raw: []byte("to be deleted")})
+		m, err := st.AppendMessage(acc.ID, mb.ID, store.IncomingMessage{Raw: []byte("to be deleted")})
 		if err != nil {
 			t.Fatalf("append: %v", err)
 		}
-		if err := st.DeleteMessage(m.ID); err != nil {
+		if err := st.DeleteMessage(acc.ID, m.ID); err != nil {
 			t.Fatalf("delete message: %v", err)
 		}
-		if _, err := st.GetMessage(m.ID); !errors.Is(err, store.ErrNotFound) {
+		if _, err := st.GetMessage(acc.ID, m.ID); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("get deleted message: err = %v, want ErrNotFound", err)
 		}
 		if _, err := st.FetchBody(m); err == nil {
@@ -350,7 +350,7 @@ func TestStore(t *testing.T) {
 		}
 		// INBOX is empty.
 		inbox, _ := st.GetMailboxByName(acc.ID, "INBOX")
-		if msgs, _ := st.ListMessages(inbox.ID); len(msgs) != 0 {
+		if msgs, _ := st.ListMessages(acc.ID, inbox.ID); len(msgs) != 0 {
 			t.Errorf("INBOX has %d messages, want 0 (the Junk delivery should not have leaked here)", len(msgs))
 		}
 	})
@@ -366,13 +366,13 @@ func TestStore(t *testing.T) {
 		inbox, _ := st.GetMailboxByName(acc.ID, "INBOX")
 		archive, _ := st.GetMailboxByName(acc.ID, "Archive")
 		raw := []byte("From: <a@x>\r\nSubject: shared\r\n\r\nshared body\r\n")
-		src, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+		src, err := st.AppendMessage(acc.ID, inbox.ID, store.IncomingMessage{
 			Raw: raw, Subject: "shared", FromAddr: "a@x",
 		})
 		if err != nil {
 			t.Fatalf("append: %v", err)
 		}
-		dst, err := st.CopyMessage(src.ID, archive.ID)
+		dst, err := st.CopyMessage(acc.ID, src.ID, archive.ID)
 		if err != nil {
 			t.Fatalf("copy: %v", err)
 		}
@@ -381,7 +381,7 @@ func TestStore(t *testing.T) {
 		}
 		// Delete the source: dst still points at the shared blob, so
 		// FetchBody on dst must still succeed.
-		if err := st.DeleteMessage(src.ID); err != nil {
+		if err := st.DeleteMessage(acc.ID, src.ID); err != nil {
 			t.Fatalf("delete src: %v", err)
 		}
 		body, err := st.FetchBody(dst)
@@ -393,7 +393,7 @@ func TestStore(t *testing.T) {
 		}
 		// Delete the destination too — refcount hits zero, blob
 		// goes away.
-		if err := st.DeleteMessage(dst.ID); err != nil {
+		if err := st.DeleteMessage(acc.ID, dst.ID); err != nil {
 			t.Fatalf("delete dst: %v", err)
 		}
 		if _, err := st.FetchBody(dst); err == nil {
@@ -412,7 +412,7 @@ func TestStore(t *testing.T) {
 		inbox, _ := st.GetMailboxByName(acc.ID, "INBOX")
 		var saved *store.Message
 		for i := 0; i < 3; i++ {
-			m, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+			m, err := st.AppendMessage(acc.ID, inbox.ID, store.IncomingMessage{
 				Raw: []byte(fmt.Sprintf("message %d", i)),
 			})
 			if err != nil {
@@ -430,7 +430,7 @@ func TestStore(t *testing.T) {
 		if boxes, err := st.ListMailboxes(acc.ID); err != nil || len(boxes) != 0 {
 			t.Fatalf("mailboxes not cascaded: %d (%v)", len(boxes), err)
 		}
-		if msgs, err := st.ListMessages(inbox.ID); err != nil || len(msgs) != 0 {
+		if msgs, err := st.ListMessages(acc.ID, inbox.ID); err != nil || len(msgs) != 0 {
 			t.Fatalf("messages not cascaded: %d (%v)", len(msgs), err)
 		}
 		if _, err := st.FetchBody(saved); err == nil {
@@ -507,9 +507,9 @@ func TestStore(t *testing.T) {
 }
 
 // flagsOf re-reads a message and returns its flags.
-func flagsOf(t *testing.T, st *store.Store, id uint64) []string {
+func flagsOf(t *testing.T, st *store.Store, accountID, id uint64) []string {
 	t.Helper()
-	m, err := st.GetMessage(id)
+	m, err := st.GetMessage(accountID, id)
 	if err != nil {
 		t.Fatalf("get message %d: %v", id, err)
 	}

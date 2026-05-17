@@ -333,7 +333,7 @@ func TestCLI(t *testing.T) {
 		}
 		inbox, _ := st.GetMailboxByName(acc.ID, "INBOX")
 		raw := []byte("From: <s@x>\r\nSubject: kept across restore\r\n\r\nbody\r\n")
-		seeded, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+		seeded, err := st.AppendMessage(acc.ID, inbox.ID, store.IncomingMessage{
 			Raw: raw, Subject: "kept across restore", FromAddr: "s@x",
 		})
 		if err != nil {
@@ -376,7 +376,7 @@ func TestCLI(t *testing.T) {
 		}
 		// The seeded message is back, with its body intact.
 		inbox2, _ := st.GetMailboxByName(acc2.ID, "INBOX")
-		msgs, _ := st.ListMessages(inbox2.ID)
+		msgs, _ := st.ListMessages(acc2.ID, inbox2.ID)
 		if len(msgs) != 1 || msgs[0].Subject != "kept across restore" {
 			t.Fatalf("restored INBOX = %+v, want one 'kept across restore' message", msgs)
 		}

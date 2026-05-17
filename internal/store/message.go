@@ -63,17 +63,17 @@ func newBlobKey() (string, error) {
 // allocated first (a burned UID is harmless — IMAP tolerates gaps), then
 // the body blob, then the document; if the document insert fails the
 // blob is removed, so no orphan is left.
-func (s *Store) AppendMessage(mailboxID uint64, in IncomingMessage) (*Message, error) {
-	mb, err := s.GetMailbox(mailboxID)
+func (s *Store) AppendMessage(accountID, mailboxID uint64, in IncomingMessage) (*Message, error) {
+	mb, err := s.GetMailbox(accountID, mailboxID)
 	if err != nil {
 		return nil, fmt.Errorf("store: append to mailbox %d: %w", mailboxID, err)
 	}
 
-	uid, err := s.NextUID(mailboxID)
+	uid, err := s.NextUID(accountID, mailboxID)
 	if err != nil {
 		return nil, err
 	}
-	modSeq, err := s.NextModSeq(mailboxID)
+	modSeq, err := s.NextModSeq(accountID, mailboxID)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func (s *Store) AppendMessage(mailboxID uint64, in IncomingMessage) (*Message, e
 		_ = s.db.DeleteObject(BlobBucket, key)
 		return nil, err
 	}
-	resp, err := s.db.Insert(CollMessages, doc)
+	resp, err := s.db.Insert(MessagesColl(mb.AccountID), doc)
 	if err != nil {
 		_ = s.db.DeleteObject(BlobBucket, key) // no orphan blob
 		return nil, fmt.Errorf("store: append to mailbox %d: insert message: %w", mailboxID, err)
@@ -162,14 +162,20 @@ func (s *Store) DeliverTo(accountID uint64, folder string, in IncomingMessage) (
 	if err != nil {
 		return nil, fmt.Errorf("store: deliver to account %d (%s): %w", accountID, folder, err)
 	}
-	return s.AppendMessage(mb.ID, in)
+	return s.AppendMessage(accountID, mb.ID, in)
 }
 
-// GetMessage looks a message up by its OxiDB id.
-func (s *Store) GetMessage(id uint64) (*Message, error) {
-	m, err := s.db.FindOne(CollMessages, map[string]any{"_id": id})
+// GetMessage looks a message up by its OxiDB id within an account's
+// collection. The account scope is mandatory: per-account collections
+// each have their own _id sequence, so the same numeric id can exist
+// in two different accounts' messages collections.
+func (s *Store) GetMessage(accountID, id uint64) (*Message, error) {
+	m, err := s.db.FindOne(MessagesColl(accountID), map[string]any{"_id": id})
 	if err != nil {
-		return nil, fmt.Errorf("store: get message %d: %w", id, err)
+		if isMissingCollection(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("store: get message %d (account %d): %w", id, accountID, err)
 	}
 	if m == nil {
 		return nil, ErrNotFound
@@ -182,9 +188,12 @@ func (s *Store) GetMessage(id uint64) (*Message, error) {
 }
 
 // ListMessages returns a mailbox's messages, ordered by ascending UID.
-func (s *Store) ListMessages(mailboxID uint64) ([]Message, error) {
-	rows, err := s.db.Find(CollMessages, map[string]any{"mailbox_id": mailboxID}, nil)
+func (s *Store) ListMessages(accountID, mailboxID uint64) ([]Message, error) {
+	rows, err := s.db.Find(MessagesColl(accountID), map[string]any{"mailbox_id": mailboxID}, nil)
 	if err != nil {
+		if isMissingCollection(err) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("store: list messages in mailbox %d: %w", mailboxID, err)
 	}
 	out := make([]Message, 0, len(rows))
@@ -209,35 +218,35 @@ func (s *Store) FetchBody(m *Message) ([]byte, error) {
 }
 
 // SetFlags replaces a message's IMAP flags wholesale (IMAP STORE FLAGS).
-func (s *Store) SetFlags(messageID uint64, flags []string) error {
+func (s *Store) SetFlags(accountID, messageID uint64, flags []string) error {
 	if flags == nil {
 		flags = []string{}
 	}
-	return s.modifyFlags(messageID, func(set map[string]any) {
+	return s.modifyFlags(accountID, messageID, func(set map[string]any) {
 		set["flags"] = flags
 	})
 }
 
 // AddFlags adds flags to a message (IMAP STORE +FLAGS).
-func (s *Store) AddFlags(messageID uint64, flags ...string) error {
-	msg, err := s.GetMessage(messageID)
+func (s *Store) AddFlags(accountID, messageID uint64, flags ...string) error {
+	msg, err := s.GetMessage(accountID, messageID)
 	if err != nil {
 		return err
 	}
 	merged := unionStrings(msg.Flags, flags)
-	return s.modifyFlags(messageID, func(set map[string]any) {
+	return s.modifyFlags(accountID, messageID, func(set map[string]any) {
 		set["flags"] = merged
 	})
 }
 
 // RemoveFlags removes flags from a message (IMAP STORE -FLAGS).
-func (s *Store) RemoveFlags(messageID uint64, flags ...string) error {
-	msg, err := s.GetMessage(messageID)
+func (s *Store) RemoveFlags(accountID, messageID uint64, flags ...string) error {
+	msg, err := s.GetMessage(accountID, messageID)
 	if err != nil {
 		return err
 	}
 	pruned := minusStrings(msg.Flags, flags)
-	return s.modifyFlags(messageID, func(set map[string]any) {
+	return s.modifyFlags(accountID, messageID, func(set map[string]any) {
 		set["flags"] = pruned
 	})
 }
@@ -252,19 +261,19 @@ func (s *Store) RemoveFlags(messageID uint64, flags ...string) error {
 // the new flag value land in one find_and_modify call. OxiDB does
 // not promise atomicity across multiple operators in a single
 // document update.
-func (s *Store) modifyFlags(messageID uint64, build func(set map[string]any)) error {
-	msg, err := s.GetMessage(messageID)
+func (s *Store) modifyFlags(accountID, messageID uint64, build func(set map[string]any)) error {
+	msg, err := s.GetMessage(accountID, messageID)
 	if err != nil {
 		return err
 	}
-	modSeq, err := s.NextModSeq(msg.MailboxID)
+	modSeq, err := s.NextModSeq(accountID, msg.MailboxID)
 	if err != nil {
 		return err
 	}
 	set := map[string]any{"modseq": modSeq}
 	build(set)
 	doc, err := s.db.FindAndModify(
-		CollMessages,
+		MessagesColl(accountID),
 		map[string]any{"_id": messageID},
 		map[string]any{"$set": set},
 	)
@@ -321,15 +330,15 @@ func minusStrings(a, b []string) []string {
 // per-mailbox). The body blob is untouched — only the document's
 // mailbox and UID change. It backs the webmail "move" action and, in
 // time, IMAP MOVE.
-func (s *Store) MoveMessage(messageID, destMailboxID uint64) (*Message, error) {
-	msg, err := s.GetMessage(messageID)
+func (s *Store) MoveMessage(accountID, messageID, destMailboxID uint64) (*Message, error) {
+	msg, err := s.GetMessage(accountID, messageID)
 	if err != nil {
 		return nil, err
 	}
 	if msg.MailboxID == destMailboxID {
 		return msg, nil // already there
 	}
-	dest, err := s.GetMailbox(destMailboxID)
+	dest, err := s.GetMailbox(accountID, destMailboxID)
 	if err != nil {
 		return nil, err
 	}
@@ -337,16 +346,16 @@ func (s *Store) MoveMessage(messageID, destMailboxID uint64) (*Message, error) {
 		return nil, fmt.Errorf("store: move message %d: destination mailbox belongs to another account", messageID)
 	}
 
-	uid, err := s.NextUID(destMailboxID)
+	uid, err := s.NextUID(accountID, destMailboxID)
 	if err != nil {
 		return nil, err
 	}
-	modSeq, err := s.NextModSeq(destMailboxID)
+	modSeq, err := s.NextModSeq(accountID, destMailboxID)
 	if err != nil {
 		return nil, err
 	}
 	doc, err := s.db.FindAndModify(
-		CollMessages,
+		MessagesColl(accountID),
 		map[string]any{"_id": messageID},
 		map[string]any{"$set": map[string]any{
 			"mailbox_id": destMailboxID,
@@ -378,12 +387,12 @@ func (s *Store) MoveMessage(messageID, destMailboxID uint64) (*Message, error) {
 //
 // The blob is only physically removed when the LAST referrer is
 // deleted (see DeleteMessage → blobDropRef).
-func (s *Store) CopyMessage(messageID, destMailboxID uint64) (*Message, error) {
-	src, err := s.GetMessage(messageID)
+func (s *Store) CopyMessage(accountID, messageID, destMailboxID uint64) (*Message, error) {
+	src, err := s.GetMessage(accountID, messageID)
 	if err != nil {
 		return nil, err
 	}
-	dest, err := s.GetMailbox(destMailboxID)
+	dest, err := s.GetMailbox(accountID, destMailboxID)
 	if err != nil {
 		return nil, err
 	}
@@ -396,12 +405,12 @@ func (s *Store) CopyMessage(messageID, destMailboxID uint64) (*Message, error) {
 	if _, err := s.blobBumpRef(src.BodyBlob); err != nil {
 		return nil, fmt.Errorf("store: copy message %d: %w", messageID, err)
 	}
-	uid, err := s.NextUID(destMailboxID)
+	uid, err := s.NextUID(accountID, destMailboxID)
 	if err != nil {
 		_, _ = s.blobDropRef(src.BodyBlob)
 		return nil, err
 	}
-	modSeq, err := s.NextModSeq(destMailboxID)
+	modSeq, err := s.NextModSeq(accountID, destMailboxID)
 	if err != nil {
 		_, _ = s.blobDropRef(src.BodyBlob)
 		return nil, err
@@ -429,7 +438,7 @@ func (s *Store) CopyMessage(messageID, destMailboxID uint64) (*Message, error) {
 		_, _ = s.blobDropRef(src.BodyBlob)
 		return nil, err
 	}
-	resp, err := s.db.Insert(CollMessages, doc)
+	resp, err := s.db.Insert(MessagesColl(src.AccountID), doc)
 	if err != nil {
 		_, _ = s.blobDropRef(src.BodyBlob)
 		return nil, fmt.Errorf("store: copy message %d: insert: %w", messageID, err)
@@ -482,7 +491,7 @@ func (s *Store) RestoreMessage(msg *Message, body []byte, newBlob bool) (*Messag
 		_, _ = s.blobDropRef(clone.BodyBlob)
 		return nil, err
 	}
-	resp, err := s.db.Insert(CollMessages, doc)
+	resp, err := s.db.Insert(MessagesColl(clone.AccountID), doc)
 	if err != nil {
 		_, _ = s.blobDropRef(clone.BodyBlob)
 		return nil, fmt.Errorf("store: restore message: insert: %w", err)
@@ -499,19 +508,19 @@ func (s *Store) RestoreMessage(msg *Message, body []byte, newBlob bool) (*Messag
 // at a missing blob would be a broken read). The account's used-bytes
 // counter is decremented best-effort, and the (UID, mod-seq) pair is
 // appended to the expunge log so QRESYNC clients can later resync.
-func (s *Store) DeleteMessage(id uint64) error {
-	msg, err := s.GetMessage(id)
+func (s *Store) DeleteMessage(accountID, id uint64) error {
+	msg, err := s.GetMessage(accountID, id)
 	if err != nil {
 		return err
 	}
 	// RFC 7162 §2.1.2: EXPUNGE bumps the mailbox mod-seq. The bumped
 	// value is what we record on the expunge log so QRESYNC's
 	// "since modseq M" comparison is exact.
-	modSeq, err := s.NextModSeq(msg.MailboxID)
+	modSeq, err := s.NextModSeq(accountID, msg.MailboxID)
 	if err != nil {
 		return err
 	}
-	if _, err := s.db.Delete(CollMessages, map[string]any{"_id": id}); err != nil {
+	if _, err := s.db.Delete(MessagesColl(accountID), map[string]any{"_id": id}); err != nil {
 		return fmt.Errorf("store: delete message %d: %w", id, err)
 	}
 	// Drop our refcount on the body; the blob is physically removed
@@ -521,7 +530,7 @@ func (s *Store) DeleteMessage(id uint64) error {
 	if _, err := s.blobDropRef(msg.BodyBlob); err != nil {
 		return fmt.Errorf("store: delete message %d: %w", id, err)
 	}
-	if err := s.recordExpunge(msg.MailboxID, msg.UID, modSeq); err != nil {
+	if err := s.recordExpunge(accountID, msg.MailboxID, msg.UID, modSeq); err != nil {
 		// A log gap means QRESYNC clients won't be told this UID
 		// went away — they'll discover it on their own. Log and
 		// move on; do not fail the delete.

@@ -158,7 +158,7 @@ func (s *session) Select(name string, opts *imap.SelectOptions) (*imap.SelectDat
 	// happens here (Vanished stays empty, NumMessages and friends
 	// are the fresh truth).
 	if opts != nil && opts.QResync != nil && opts.QResync.UIDValidity == data.UIDValidity {
-		uids, err := s.store.ExpungedSince(mb.ID, opts.QResync.ModSeq)
+		uids, err := s.store.ExpungedSince(s.account.ID, mb.ID, opts.QResync.ModSeq)
 		if err != nil {
 			return nil, err
 		}
@@ -232,7 +232,7 @@ func (s *session) Delete(name string) error {
 		s.mbox.Close()
 		s.mbox = nil
 	}
-	return s.store.DeleteMailbox(mb.ID)
+	return s.store.DeleteMailbox(s.account.ID, mb.ID)
 }
 
 func (s *session) Rename(name, newName string, _ *imap.RenameOptions) error {
@@ -263,7 +263,7 @@ func (s *session) Rename(name, newName string, _ *imap.RenameOptions) error {
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	return s.store.RenameMailbox(mb.ID, newName)
+	return s.store.RenameMailbox(s.account.ID, mb.ID, newName)
 }
 
 func (s *session) Subscribe(name string) error {
@@ -282,7 +282,7 @@ func (s *session) setSubscribed(name string, subscribed bool) error {
 	if err != nil {
 		return err
 	}
-	return s.store.SetMailboxSubscribed(mb.ID, subscribed)
+	return s.store.SetMailboxSubscribed(s.account.ID, mb.ID, subscribed)
 }
 
 func (s *session) List(w *imapserver.ListWriter, ref string, patterns []string, options *imap.ListOptions) error {
@@ -345,7 +345,7 @@ func (s *session) Status(name string, options *imap.StatusOptions) (*imap.Status
 	needsList := options.NumUnseen || options.NumDeleted || options.Size
 	var msgs []store.Message
 	if needsList {
-		msgs, err = s.store.ListMessages(mb.ID)
+		msgs, err = s.store.ListMessages(s.account.ID, mb.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -357,7 +357,7 @@ func (s *session) Status(name string, options *imap.StatusOptions) (*imap.Status
 		if needsList {
 			n = uint32(len(msgs))
 		} else {
-			count, err := s.store.CountMessages(mb.ID)
+			count, err := s.store.CountMessages(s.account.ID, mb.ID)
 			if err != nil {
 				return nil, err
 			}
@@ -427,7 +427,7 @@ func (s *session) Append(name string, r imap.LiteralReader, options *imap.Append
 		in.InternalDate = options.Time
 	}
 
-	msg, err := s.store.AppendMessage(mb.ID, in)
+	msg, err := s.store.AppendMessage(s.account.ID, mb.ID, in)
 	if err != nil {
 		return nil, err
 	}

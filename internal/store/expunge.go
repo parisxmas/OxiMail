@@ -18,7 +18,7 @@ type ExpungeRecord struct {
 // QRESYNC SELECT compute the "what UIDs disappeared since
 // mod-sequence M" answer without re-asking other sessions or
 // reconstructing state from a journal.
-func (s *Store) recordExpunge(mailboxID uint64, uid uint32, modSeq uint64) error {
+func (s *Store) recordExpunge(accountID, mailboxID uint64, uid uint32, modSeq uint64) error {
 	rec := &ExpungeRecord{
 		MailboxID: mailboxID,
 		UID:       uid,
@@ -28,7 +28,7 @@ func (s *Store) recordExpunge(mailboxID uint64, uid uint32, modSeq uint64) error
 	if err != nil {
 		return err
 	}
-	if _, err := s.db.Insert(CollExpungeLog, doc); err != nil {
+	if _, err := s.db.Insert(ExpungeLogColl(accountID), doc); err != nil {
 		return fmt.Errorf("store: record expunge of UID %d in mailbox %d: %w", uid, mailboxID, err)
 	}
 	return nil
@@ -37,9 +37,12 @@ func (s *Store) recordExpunge(mailboxID uint64, uid uint32, modSeq uint64) error
 // ExpungedSince returns the UIDs that have been expunged from a
 // mailbox with mod-sequence greater than sinceModSeq, ordered by UID.
 // Used by QRESYNC SELECT to populate VANISHED (EARLIER).
-func (s *Store) ExpungedSince(mailboxID uint64, sinceModSeq uint64) ([]uint32, error) {
-	rows, err := s.db.Find(CollExpungeLog, map[string]any{"mailbox_id": mailboxID}, nil)
+func (s *Store) ExpungedSince(accountID, mailboxID uint64, sinceModSeq uint64) ([]uint32, error) {
+	rows, err := s.db.Find(ExpungeLogColl(accountID), map[string]any{"mailbox_id": mailboxID}, nil)
 	if err != nil {
+		if isMissingCollection(err) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("store: list expunges for mailbox %d: %w", mailboxID, err)
 	}
 	out := make([]uint32, 0, len(rows))

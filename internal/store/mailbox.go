@@ -31,6 +31,13 @@ type Mailbox struct {
 // messages quarantined by the spam pipeline (DMARC p=quarantine, etc.).
 var defaultMailboxes = []string{"INBOX", "Sent", "Drafts", "Trash", "Archive", "Junk"}
 
+// All mailbox-level operations take accountID as the first parameter
+// so the call site is what selects the correct per-account collection
+// — see internal/store/collections.go for the layout. The _id values
+// OxiDB assigns are per-collection, not global, so a function that
+// only knew the mailbox_id could never reliably route to the right
+// collection.
+
 // CreateMailbox creates a folder for an account. UIDNext starts at 1 and
 // UIDValidity is set once, to the creation time.
 func (s *Store) CreateMailbox(accountID uint64, name string) (*Mailbox, error) {
@@ -47,7 +54,7 @@ func (s *Store) CreateMailbox(accountID uint64, name string) (*Mailbox, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.db.Insert(CollMailboxes, doc)
+	resp, err := s.db.Insert(MailboxesColl(accountID), doc)
 	if err != nil {
 		return nil, fmt.Errorf("store: create mailbox %q for account %d: %w", name, accountID, err)
 	}
@@ -57,11 +64,16 @@ func (s *Store) CreateMailbox(accountID uint64, name string) (*Mailbox, error) {
 	return mb, nil
 }
 
-// GetMailbox looks a mailbox up by its OxiDB id.
-func (s *Store) GetMailbox(id uint64) (*Mailbox, error) {
-	m, err := s.db.FindOne(CollMailboxes, map[string]any{"_id": id})
+// GetMailbox looks a mailbox up by its OxiDB id, within an account's
+// collection. Returns ErrNotFound if no mailbox with that id exists
+// for accountID.
+func (s *Store) GetMailbox(accountID, id uint64) (*Mailbox, error) {
+	m, err := s.db.FindOne(MailboxesColl(accountID), map[string]any{"_id": id})
 	if err != nil {
-		return nil, fmt.Errorf("store: get mailbox %d: %w", id, err)
+		if isMissingCollection(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("store: get mailbox %d (account %d): %w", id, accountID, err)
 	}
 	if m == nil {
 		return nil, ErrNotFound
@@ -75,8 +87,11 @@ func (s *Store) GetMailbox(id uint64) (*Mailbox, error) {
 
 // GetMailboxByName looks up one of an account's folders by name.
 func (s *Store) GetMailboxByName(accountID uint64, name string) (*Mailbox, error) {
-	m, err := s.db.FindOne(CollMailboxes, map[string]any{"account_id": accountID, "name": name})
+	m, err := s.db.FindOne(MailboxesColl(accountID), map[string]any{"account_id": accountID, "name": name})
 	if err != nil {
+		if isMissingCollection(err) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("store: get mailbox %q for account %d: %w", name, accountID, err)
 	}
 	if m == nil {
@@ -91,8 +106,11 @@ func (s *Store) GetMailboxByName(accountID uint64, name string) (*Mailbox, error
 
 // ListMailboxes returns all of an account's folders.
 func (s *Store) ListMailboxes(accountID uint64) ([]Mailbox, error) {
-	rows, err := s.db.Find(CollMailboxes, map[string]any{"account_id": accountID}, nil)
+	rows, err := s.db.Find(MailboxesColl(accountID), map[string]any{}, nil)
 	if err != nil {
+		if isMissingCollection(err) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("store: list mailboxes for account %d: %w", accountID, err)
 	}
 	out := make([]Mailbox, 0, len(rows))
@@ -127,9 +145,9 @@ func (s *Store) EnsureDefaultMailboxes(accountID uint64) error {
 // DeleteMailbox removes a mailbox and every message in it. The body
 // blobs go first — orphaned blobs are wasted disk, but a message
 // document pointing at a missing blob is a broken read.
-func (s *Store) DeleteMailbox(mailboxID uint64) error {
-	msgs, err := s.db.Find(CollMessages, map[string]any{"mailbox_id": mailboxID}, nil)
-	if err != nil {
+func (s *Store) DeleteMailbox(accountID, mailboxID uint64) error {
+	msgs, err := s.db.Find(MessagesColl(accountID), map[string]any{"mailbox_id": mailboxID}, nil)
+	if err != nil && !isMissingCollection(err) {
 		return fmt.Errorf("store: delete mailbox %d: list messages: %w", mailboxID, err)
 	}
 	for _, m := range msgs {
@@ -139,10 +157,10 @@ func (s *Store) DeleteMailbox(mailboxID uint64) error {
 			}
 		}
 	}
-	if _, err := s.db.Delete(CollMessages, map[string]any{"mailbox_id": mailboxID}); err != nil {
+	if _, err := s.db.Delete(MessagesColl(accountID), map[string]any{"mailbox_id": mailboxID}); err != nil {
 		return fmt.Errorf("store: delete mailbox %d: remove messages: %w", mailboxID, err)
 	}
-	if _, err := s.db.Delete(CollMailboxes, map[string]any{"_id": mailboxID}); err != nil {
+	if _, err := s.db.Delete(MailboxesColl(accountID), map[string]any{"_id": mailboxID}); err != nil {
 		return fmt.Errorf("store: delete mailbox %d: remove mailbox: %w", mailboxID, err)
 	}
 	return nil
@@ -150,9 +168,9 @@ func (s *Store) DeleteMailbox(mailboxID uint64) error {
 
 // RenameMailbox updates a mailbox's name. The IMAP layer is responsible
 // for checking that the new name does not already exist for the account.
-func (s *Store) RenameMailbox(mailboxID uint64, newName string) error {
+func (s *Store) RenameMailbox(accountID, mailboxID uint64, newName string) error {
 	doc, err := s.db.FindAndModify(
-		CollMailboxes,
+		MailboxesColl(accountID),
 		map[string]any{"_id": mailboxID},
 		map[string]any{"$set": map[string]any{"name": newName}},
 	)
@@ -167,9 +185,9 @@ func (s *Store) RenameMailbox(mailboxID uint64, newName string) error {
 
 // SetMailboxSubscribed updates a mailbox's IMAP subscription state
 // (the SUBSCRIBE / UNSUBSCRIBE commands).
-func (s *Store) SetMailboxSubscribed(mailboxID uint64, subscribed bool) error {
+func (s *Store) SetMailboxSubscribed(accountID, mailboxID uint64, subscribed bool) error {
 	doc, err := s.db.FindAndModify(
-		CollMailboxes,
+		MailboxesColl(accountID),
 		map[string]any{"_id": mailboxID},
 		map[string]any{"$set": map[string]any{"subscribed": subscribed}},
 	)
@@ -195,9 +213,9 @@ func (s *Store) SetMailboxSubscribed(mailboxID uint64, subscribed bool) error {
 // A crash between allocating a UID and inserting the message simply
 // burns that UID; IMAP explicitly tolerates gaps in the UID sequence, so
 // that is harmless.
-func (s *Store) NextUID(mailboxID uint64) (uint32, error) {
+func (s *Store) NextUID(accountID, mailboxID uint64) (uint32, error) {
 	doc, err := s.db.FindAndModify(
-		CollMailboxes,
+		MailboxesColl(accountID),
 		map[string]any{"_id": mailboxID},
 		map[string]any{"$inc": map[string]any{"uidnext": 1}},
 	)
@@ -207,8 +225,6 @@ func (s *Store) NextUID(mailboxID uint64) (uint32, error) {
 	if doc == nil {
 		return 0, fmt.Errorf("store: mailbox %d not found", mailboxID)
 	}
-	// `$inc` returns the post-increment value; the UID we just allocated
-	// is the value immediately before it. JSON numbers decode as float64.
 	next, ok := doc["uidnext"].(float64)
 	if !ok || next < 1 {
 		return 0, fmt.Errorf("store: mailbox %d has invalid uidnext %v", mailboxID, doc["uidnext"])
@@ -234,7 +250,7 @@ func (s *Store) RestoreMailbox(mb *Mailbox) (*Mailbox, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.db.Insert(CollMailboxes, doc)
+	resp, err := s.db.Insert(MailboxesColl(clone.AccountID), doc)
 	if err != nil {
 		return nil, fmt.Errorf("store: restore mailbox %q for account %d: %w", clone.Name, clone.AccountID, err)
 	}
@@ -256,9 +272,12 @@ type MailboxStats struct {
 // CountMessages returns the number of messages in a mailbox via the
 // OxiDB Count aggregate — cheaper than a full ListMessages when the
 // caller does not need each document.
-func (s *Store) CountMessages(mailboxID uint64) (int, error) {
-	n, err := s.db.Count(CollMessages, map[string]any{"mailbox_id": mailboxID})
+func (s *Store) CountMessages(accountID, mailboxID uint64) (int, error) {
+	n, err := s.db.Count(MessagesColl(accountID), map[string]any{"mailbox_id": mailboxID})
 	if err != nil {
+		if isMissingCollection(err) {
+			return 0, nil
+		}
 		return 0, fmt.Errorf("store: count messages in mailbox %d: %w", mailboxID, err)
 	}
 	return n, nil
@@ -270,8 +289,8 @@ func (s *Store) CountMessages(mailboxID uint64) (int, error) {
 // operator, so unseen is still derived by walking the message
 // metadata. Total uses the Count aggregate so callers that only need
 // the total (e.g. STATUS MESSAGES) get the fast path.
-func (s *Store) Stats(mailboxID uint64) (MailboxStats, error) {
-	msgs, err := s.ListMessages(mailboxID)
+func (s *Store) Stats(accountID, mailboxID uint64) (MailboxStats, error) {
+	msgs, err := s.ListMessages(accountID, mailboxID)
 	if err != nil {
 		return MailboxStats{}, err
 	}
@@ -300,9 +319,9 @@ func (s *Store) Stats(mailboxID uint64) (MailboxStats, error) {
 // RFC 7162 §2.1.2 requires the mod-sequence to be a positive 63-bit
 // integer that never decreases. Burning one on a crash is harmless,
 // same as for UID.
-func (s *Store) NextModSeq(mailboxID uint64) (uint64, error) {
+func (s *Store) NextModSeq(accountID, mailboxID uint64) (uint64, error) {
 	doc, err := s.db.FindAndModify(
-		CollMailboxes,
+		MailboxesColl(accountID),
 		map[string]any{"_id": mailboxID},
 		map[string]any{"$inc": map[string]any{"highest_modseq": 1}},
 	)

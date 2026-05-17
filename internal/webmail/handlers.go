@@ -29,7 +29,7 @@ func (s *Server) handleMailboxes(w http.ResponseWriter, _ *http.Request, acc *st
 	}
 	out := make([]mailboxSummary, 0, len(boxes))
 	for _, mb := range boxes {
-		stats, err := s.store.Stats(mb.ID)
+		stats, err := s.store.Stats(acc.ID, mb.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "could not count messages")
 			return
@@ -72,7 +72,7 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request, acc 
 		writeError(w, http.StatusInternalServerError, "could not open mailbox")
 		return
 	}
-	msgs, err := s.store.ListMessages(mb.ID)
+	msgs, err := s.store.ListMessages(acc.ID, mb.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not list messages")
 		return
@@ -196,11 +196,11 @@ func (s *Server) handleFlags(w http.ResponseWriter, r *http.Request, acc *store.
 	var err error
 	switch req.Op {
 	case "add":
-		err = s.store.AddFlags(m.ID, req.Flags...)
+		err = s.store.AddFlags(acc.ID, m.ID, req.Flags...)
 	case "remove":
-		err = s.store.RemoveFlags(m.ID, req.Flags...)
+		err = s.store.RemoveFlags(acc.ID, m.ID, req.Flags...)
 	case "set":
-		err = s.store.SetFlags(m.ID, req.Flags)
+		err = s.store.SetFlags(acc.ID, m.ID, req.Flags)
 	default:
 		writeError(w, http.StatusBadRequest, `op must be "add", "remove", or "set"`)
 		return
@@ -209,7 +209,7 @@ func (s *Server) handleFlags(w http.ResponseWriter, r *http.Request, acc *store.
 		writeError(w, http.StatusInternalServerError, "could not update flags")
 		return
 	}
-	updated, err := s.store.GetMessage(m.ID)
+	updated, err := s.store.GetMessage(acc.ID, m.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not reload message")
 		return
@@ -242,7 +242,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, acc *store.A
 		writeError(w, http.StatusInternalServerError, "could not open destination mailbox")
 		return
 	}
-	moved, err := s.store.MoveMessage(m.ID, dest.ID)
+	moved, err := s.store.MoveMessage(acc.ID, m.ID, dest.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not move message")
 		return
@@ -256,7 +256,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, acc *store
 	if !ok {
 		return
 	}
-	if err := s.store.DeleteMessage(m.ID); err != nil {
+	if err := s.store.DeleteMessage(acc.ID, m.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not delete message")
 		return
 	}
@@ -366,7 +366,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, acc *store.A
 	// File a copy into Sent — best-effort; the message is already on its
 	// way, so a Sent-folder hiccup must not fail the send.
 	if sent, err := s.store.GetMailboxByName(acc.ID, "Sent"); err == nil {
-		if _, err := s.store.AppendMessage(sent.ID, in); err != nil {
+		if _, err := s.store.AppendMessage(acc.ID, sent.ID, in); err != nil {
 			log.Printf("webmail: save to Sent for %s: %v", acc.Address, err)
 		}
 	}
@@ -420,11 +420,11 @@ func (s *Server) handleSaveDraft(w http.ResponseWriter, r *http.Request, acc *st
 	// Overwriting an existing draft: delete the old document first so
 	// the user sees one (newer) entry in Drafts rather than many.
 	if req.ID != 0 {
-		if prev, err := s.store.GetMessage(req.ID); err == nil && prev.AccountID == acc.ID && prev.MailboxID == drafts.ID {
-			_ = s.store.DeleteMessage(prev.ID)
+		if prev, err := s.store.GetMessage(acc.ID, req.ID); err == nil && prev.AccountID == acc.ID && prev.MailboxID == drafts.ID {
+			_ = s.store.DeleteMessage(acc.ID, prev.ID)
 		}
 	}
-	saved, err := s.store.AppendMessage(drafts.ID, in)
+	saved, err := s.store.AppendMessage(acc.ID, drafts.ID, in)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not save draft")
 		return
@@ -443,7 +443,7 @@ func (s *Server) loadOwnedMessage(w http.ResponseWriter, r *http.Request, acc *s
 		writeError(w, http.StatusBadRequest, "invalid message id")
 		return nil, false
 	}
-	m, err := s.store.GetMessage(id)
+	m, err := s.store.GetMessage(acc.ID, id)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && m.AccountID != acc.ID) {
 		writeError(w, http.StatusNotFound, "no such message")
 		return nil, false
