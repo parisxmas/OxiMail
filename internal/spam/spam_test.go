@@ -211,6 +211,22 @@ func TestGreylisterFoldsIPv4Subnet(t *testing.T) {
 	}
 }
 
+// A zero greylist delay short-circuits to Accept on first contact —
+// the operator's way of disabling greylisting entirely without
+// removing the call site.
+func TestGreylisterZeroDelayAcceptsImmediately(t *testing.T) {
+	g := newGreylister(0)
+	if v := g.check("1.2.3.4", "a@b.test"); v != Accept {
+		t.Errorf("greylister with delay=0, first contact = %v, want Accept", v)
+	}
+	if v := g.check("5.6.7.8", "another@b.test"); v != Accept {
+		t.Errorf("greylister with delay=0, second tuple = %v, want Accept", v)
+	}
+	if len(g.tuples) != 0 {
+		t.Errorf("greylister with delay=0 wrote %d tuples to its map; should write none", len(g.tuples))
+	}
+}
+
 func TestGreylistKey(t *testing.T) {
 	cases := map[string]string{
 		"209.85.208.47":       "209.85.208.0/24",
@@ -247,7 +263,7 @@ func TestGreylisterSweep(t *testing.T) {
 
 func TestPipelineCheck(t *testing.T) {
 	clk := newFakeClock()
-	p := New("", nil)
+	p := New("", nil, -1) // -1 → default greylist delay
 	p.rateLimit.now = clk.now
 	p.greylist.now = clk.now
 	p.dnsbl.lookup = notListed

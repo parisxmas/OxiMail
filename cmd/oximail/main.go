@@ -82,7 +82,7 @@ func main() {
 
 	// Components, in start order. The implicit-TLS surfaces are only
 	// brought up when a certificate is configured.
-	pipeline := spam.New(cfg.RspamdURL, cfg.DNSBLZones)
+	pipeline := spam.New(cfg.RspamdURL, cfg.DNSBLZones, cfg.GreylistDelay)
 	components := []named{
 		{"observability", observability.New(cfg.MetricsAddr, st)},
 		{"spam", pipeline},

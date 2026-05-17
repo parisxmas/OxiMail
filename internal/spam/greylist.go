@@ -57,6 +57,10 @@ func newGreylister(delay time.Duration) *greylister {
 // up. The subnet sizes match what RFC 5321 §4.4 callers tend to
 // allocate in practice and what greylisting tools like postgrey use.
 func (g *greylister) check(ip, mailFrom string) Verdict {
+	if g.delay == 0 {
+		// Greylisting disabled by config — accept every first contact.
+		return Accept
+	}
 	key := greylistKey(ip) + "\x00" + mailFrom
 
 	g.mu.Lock()

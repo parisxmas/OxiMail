@@ -69,16 +69,20 @@ type Pipeline struct {
 
 // New builds the pipeline. An empty rspamdURL disables the content
 // (Rspamd) stage; a nil dnsblZones uses the default list, an explicit
-// empty slice disables DNSBL queries entirely. The connection-time
-// rate limit and greylister always run.
-func New(rspamdURL string, dnsblZones []string) *Pipeline {
+// empty slice disables DNSBL queries entirely. A zero greylistDelay
+// short-circuits greylisting (it accepts on first contact instead);
+// a negative value uses the package default.
+func New(rspamdURL string, dnsblZones []string, greylistDelay time.Duration) *Pipeline {
 	if dnsblZones == nil {
 		dnsblZones = defaultDNSBLZones
+	}
+	if greylistDelay < 0 {
+		greylistDelay = defaultGreylistDelay
 	}
 	p := &Pipeline{
 		rateLimit: newRateLimiter(defaultRateLimit, defaultRateWindow),
 		dnsbl:     newDNSBLChecker(dnsblZones),
-		greylist:  newGreylister(defaultGreylistDelay),
+		greylist:  newGreylister(greylistDelay),
 		envelope:  newEnvelopeChecker(),
 	}
 	if rspamdURL != "" {

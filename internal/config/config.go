@@ -95,6 +95,15 @@ type Config struct {
 	// as "unable to classify". Set to empty to disable DNSBL entirely.
 	DNSBLZones []string
 
+	// GreylistDelay is how long a (sender-IP-/24, MAIL FROM) tuple
+	// must wait between its first delivery attempt and the retry that
+	// gets accepted. Default 1 minute. Set to 0 to disable greylisting
+	// entirely — a reasonable choice for low-volume personal servers
+	// where the spam-mitigation benefit is small compared to the
+	// rejection cost when a sender (e.g. Gmail) rotates outbound IPs
+	// across /24s and each retry triggers a fresh greylist.
+	GreylistDelay time.Duration
+
 	// MTASTSMode publishes an MTA-STS policy (RFC 8461) when set.
 	// Valid values: "enforce", "testing", "none". An empty value
 	// disables the /.well-known/mta-sts.txt handler.
@@ -146,6 +155,7 @@ func Load() Config {
 		OxiDBPort:      envInt("OXIMAIL_OXIDB_PORT", 4444),
 		RspamdURL:      env("OXIMAIL_RSPAMD_URL", ""),
 		DNSBLZones:     splitCSV(envOrDefault("OXIMAIL_DNSBL_ZONES", "zen.spamhaus.org")),
+		GreylistDelay:  envDuration("OXIMAIL_GREYLIST_DELAY", time.Minute),
 		SRSSecret:      env("OXIMAIL_SRS_SECRET", ""),
 		SRSMaxAge:      envDuration("OXIMAIL_SRS_MAX_AGE", 21*24*time.Hour),
 		MTASTSMode:     env("OXIMAIL_MTASTS_MODE", ""),
