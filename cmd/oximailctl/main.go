@@ -7,7 +7,8 @@
 //	oximailctl domain  add <domain>
 //	oximailctl domain  list
 //	oximailctl domain  delete <domain>               refuses if any accounts remain
-//	oximailctl domain  dkim [-selector S] <domain>   generate a signing key
+//	oximailctl domain  dkim [-selector S] [-force] <domain>  generate a signing key
+//	oximailctl domain  dkim-show <domain>            print the existing key's TXT record
 //	oximailctl account add [-quota N] <address>      password read from stdin
 //	oximailctl account list [-domain <domain>]
 //	oximailctl account delete <address>
@@ -158,7 +159,8 @@ usage:
   oximailctl domain  add <domain>
   oximailctl domain  list
   oximailctl domain  delete <domain>
-  oximailctl domain  dkim [-selector S] <domain>
+  oximailctl domain  dkim [-selector S] [-force] <domain>
+  oximailctl domain  dkim-show <domain>             # read-only: print existing TXT record
   oximailctl account add [-quota N] <address>      password read from stdin
   oximailctl account list [-domain <domain>]
   oximailctl account delete <address>

@@ -144,6 +144,94 @@ func TestCLI(t *testing.T) {
 		}
 	})
 
+	t.Run("domain dkim refuses to overwrite without -force", func(t *testing.T) {
+		// dkim.test had a key generated in the earlier subtest. Re-running
+		// dkim must fail (without modifying the key), and the failure must
+		// point the operator at -force and at dkim-show.
+		before, err := st.GetDomain("dkim.test")
+		if err != nil {
+			t.Fatalf("get domain: %v", err)
+		}
+		out, code := cli("", "domain", "dkim", "dkim.test")
+		if code == 0 {
+			t.Fatalf("domain dkim re-run succeeded silently: %q", out)
+		}
+		if !strings.Contains(out, "-force") || !strings.Contains(out, "dkim-show") {
+			t.Errorf("error message should mention -force and dkim-show: %q", out)
+		}
+		after, err := st.GetDomain("dkim.test")
+		if err != nil {
+			t.Fatalf("get domain (after): %v", err)
+		}
+		if after.DKIMPrivateKey != before.DKIMPrivateKey {
+			t.Error("key changed despite the command refusing")
+		}
+	})
+
+	t.Run("domain dkim -force replaces the key", func(t *testing.T) {
+		before, err := st.GetDomain("dkim.test")
+		if err != nil {
+			t.Fatalf("get domain: %v", err)
+		}
+		out, code := cli("", "domain", "dkim", "-force", "-selector", "s2", "dkim.test")
+		if code != 0 {
+			t.Fatalf("dkim -force: code %d, output %q", code, out)
+		}
+		if !strings.Contains(out, "regenerated") || !strings.Contains(out, "s2._domainkey.dkim.test") {
+			t.Errorf("dkim -force output is missing expected lines: %q", out)
+		}
+		after, err := st.GetDomain("dkim.test")
+		if err != nil {
+			t.Fatalf("get domain (after): %v", err)
+		}
+		if after.DKIMPrivateKey == before.DKIMPrivateKey {
+			t.Error("key did not change after -force")
+		}
+		if after.DKIMSelector != "s2" {
+			t.Errorf("selector did not update: got %q, want %q", after.DKIMSelector, "s2")
+		}
+	})
+
+	t.Run("domain dkim-show prints the existing record (bit-identical to dkim)", func(t *testing.T) {
+		// Fresh domain so we control the exact key we're comparing to.
+		if _, code := cli("", "domain", "add", "show.test"); code != 0 {
+			t.Fatal("setup: domain add failed")
+		}
+		genOut, code := cli("", "domain", "dkim", "show.test")
+		if code != 0 {
+			t.Fatalf("dkim: code %d, output %q", code, genOut)
+		}
+		// The TXT-record line is the one starting with "<selector>._domainkey".
+		genTXT := findTXTLine(t, genOut, "oximail._domainkey.show.test")
+		showOut, code := cli("", "domain", "dkim-show", "show.test")
+		if code != 0 {
+			t.Fatalf("dkim-show: code %d, output %q", code, showOut)
+		}
+		showTXT := strings.TrimSpace(showOut)
+		if showTXT != genTXT {
+			t.Errorf("dkim-show output differs from the generation-time TXT:\n  gen : %q\n  show: %q", genTXT, showTXT)
+		}
+	})
+
+	t.Run("domain dkim-show errors when no key exists", func(t *testing.T) {
+		if _, code := cli("", "domain", "add", "no-dkim.test"); code != 0 {
+			t.Fatal("setup: domain add failed")
+		}
+		out, code := cli("", "domain", "dkim-show", "no-dkim.test")
+		if code == 0 {
+			t.Errorf("dkim-show on key-less domain succeeded: %q", out)
+		}
+		if !strings.Contains(out, "no DKIM key") {
+			t.Errorf("error message should say 'no DKIM key': %q", out)
+		}
+	})
+
+	t.Run("domain dkim-show errors on unknown domain", func(t *testing.T) {
+		if out, code := cli("", "domain", "dkim-show", "no-such-domain.test"); code == 0 {
+			t.Errorf("dkim-show on missing domain succeeded: %q", out)
+		}
+	})
+
 	t.Run("account passwd updates the password", func(t *testing.T) {
 		if _, code := cli("first\n", "account", "add", "passwd-user@example.test"); code != 0 {
 			t.Fatal("setup: account add failed")
@@ -322,4 +410,22 @@ func TestCLI(t *testing.T) {
 			t.Errorf("domain still present after delete: err = %v", err)
 		}
 	})
+}
+
+// findTXTLine returns the line in out whose first whitespace-separated
+// token equals the expected owner-name (e.g. "oximail._domainkey.dkim.test").
+// It fails the test if no such line is present. Used to extract the
+// DKIM TXT record from multi-line CLI output for comparison against
+// dkim-show.
+func findTXTLine(t *testing.T, out, owner string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		s := strings.TrimSpace(line)
+		// The DKIM TXT line uses an absolute owner-name (trailing dot).
+		if strings.HasPrefix(s, owner+".") {
+			return s
+		}
+	}
+	t.Fatalf("no TXT line starting with %q in output:\n%s", owner, out)
+	return ""
 }
