@@ -29,24 +29,16 @@ func (s *Server) handleMailboxes(w http.ResponseWriter, _ *http.Request, acc *st
 	}
 	out := make([]mailboxSummary, 0, len(boxes))
 	for _, mb := range boxes {
-		// TODO: a per-mailbox count is one query each — fine for a
-		// scaffold, but a count aggregate would scale better.
-		msgs, err := s.store.ListMessages(mb.ID)
+		stats, err := s.store.Stats(mb.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "could not count messages")
 			return
 		}
-		unseen := 0
-		for i := range msgs {
-			if !hasFlag(msgs[i].Flags, `\Seen`) {
-				unseen++
-			}
-		}
 		out = append(out, mailboxSummary{
 			Name:       mb.Name,
 			Subscribed: mb.Subscribed,
-			Total:      len(msgs),
-			Unseen:     unseen,
+			Total:      stats.Total,
+			Unseen:     stats.Unseen,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

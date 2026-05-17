@@ -337,14 +337,32 @@ func (s *session) Status(name string, options *imap.StatusOptions) (*imap.Status
 	if err != nil {
 		return nil, err
 	}
-	msgs, err := s.store.ListMessages(mb.ID)
-	if err != nil {
-		return nil, err
+
+	// Only enumerate every message when the client asked for an
+	// option that needs per-message data (Unseen / Deleted / Size).
+	// The common case — a phone polling STATUS MESSAGES / UIDNEXT
+	// / HIGHESTMODSEQ once a minute — gets to skip the scan.
+	needsList := options.NumUnseen || options.NumDeleted || options.Size
+	var msgs []store.Message
+	if needsList {
+		msgs, err = s.store.ListMessages(mb.ID)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	data := &imap.StatusData{Mailbox: name}
 	if options.NumMessages {
-		n := uint32(len(msgs))
+		var n uint32
+		if needsList {
+			n = uint32(len(msgs))
+		} else {
+			count, err := s.store.CountMessages(mb.ID)
+			if err != nil {
+				return nil, err
+			}
+			n = uint32(count)
+		}
 		data.NumMessages = &n
 	}
 	if options.UIDNext {

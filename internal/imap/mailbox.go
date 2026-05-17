@@ -543,7 +543,7 @@ func (m *selectedMailbox) storeFlags(w *imapserver.FetchWriter, numSet imap.NumS
 	if len(modified) > 0 {
 		return &imap.Error{
 			Type: imap.StatusResponseTypeOK,
-			Code: imap.ResponseCode("MODIFIED " + modified.String()),
+			Code: imap.ResponseCode(string(imap.ResponseCodeModified) + " " + modified.String()),
 			Text: "Some messages have changed since UNCHANGEDSINCE",
 		}
 	}

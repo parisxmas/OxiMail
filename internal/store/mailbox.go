@@ -216,6 +216,53 @@ func (s *Store) NextUID(mailboxID uint64) (uint32, error) {
 	return uint32(next) - 1, nil
 }
 
+// MailboxStats is the per-mailbox counts the webmail mailbox-list
+// endpoint uses: total messages plus unseen (messages without
+// \Seen). Returned as a struct so the API stays stable when we
+// later add e.g. recent or quota-used numbers.
+type MailboxStats struct {
+	Total  int
+	Unseen int
+}
+
+// CountMessages returns the number of messages in a mailbox via the
+// OxiDB Count aggregate — cheaper than a full ListMessages when the
+// caller does not need each document.
+func (s *Store) CountMessages(mailboxID uint64) (int, error) {
+	n, err := s.db.Count(CollMessages, map[string]any{"mailbox_id": mailboxID})
+	if err != nil {
+		return 0, fmt.Errorf("store: count messages in mailbox %d: %w", mailboxID, err)
+	}
+	return n, nil
+}
+
+// Stats returns the total + unseen counts for a mailbox.
+//
+// OxiDB does not currently expose a "flags does NOT contain X" query
+// operator, so unseen is still derived by walking the message
+// metadata. Total uses the Count aggregate so callers that only need
+// the total (e.g. STATUS MESSAGES) get the fast path.
+func (s *Store) Stats(mailboxID uint64) (MailboxStats, error) {
+	msgs, err := s.ListMessages(mailboxID)
+	if err != nil {
+		return MailboxStats{}, err
+	}
+	stats := MailboxStats{Total: len(msgs)}
+	for i := range msgs {
+		seen := false
+		for _, f := range msgs[i].Flags {
+			if f == `\Seen` {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			stats.Unseen++
+		}
+	}
+	return stats, nil
+}
+
 // NextModSeq atomically bumps a mailbox's HighestModSeq and returns
 // the new value. Like NextUID, every increment lands as one
 // find_and_modify so concurrent flag changes cannot lose a bump. The

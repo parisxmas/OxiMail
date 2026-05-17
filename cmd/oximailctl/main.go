@@ -30,6 +30,8 @@ import (
 	"os"
 	"strings"
 
+	"golang.org/x/term"
+
 	"github.com/parisxmas/OxiMail/internal/config"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
@@ -102,20 +104,45 @@ func (c *cmdContext) misuse(line string) int {
 	return 2
 }
 
-// readPassword prompts on stderr and reads a single line from stdin.
-//
-// TODO: turn off terminal echo (golang.org/x/term) for interactive use.
+// readPassword prompts on stderr and reads one password from stdin.
+// When stdin is a real terminal the input is masked via x/term so
+// the password does not appear on screen. When stdin is a pipe or a
+// file (e.g. tests, automation), the function falls back to a plain
+// line read — masking is meaningless there and would just confuse a
+// caller that piped a password in.
 func (c *cmdContext) readPassword() (string, error) {
 	fmt.Fprint(c.stderr, "Password: ")
-	line, err := bufio.NewReader(c.stdin).ReadString('\n')
-	if err != nil && line == "" {
+	pw, err := readPasswordFrom(c.stdin)
+	if err != nil {
 		return "", fmt.Errorf("reading password: %w", err)
 	}
-	pw := strings.TrimRight(line, "\r\n")
 	if pw == "" {
 		return "", fmt.Errorf("password must not be empty")
 	}
 	return pw, nil
+}
+
+// readPasswordFrom reads one password from r. If r is *os.File and
+// refers to a terminal, term.ReadPassword is used (echo off + line
+// terminated by Enter); otherwise a plain ReadString is used. The
+// helper sits at package scope so tests can drive it with a
+// non-terminal Reader without going through cmdContext.
+func readPasswordFrom(r io.Reader) (string, error) {
+	if f, ok := r.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		b, err := term.ReadPassword(int(f.Fd()))
+		if err != nil {
+			return "", err
+		}
+		// term.ReadPassword strips the newline; print one ourselves
+		// so the next prompt appears on its own line.
+		fmt.Fprintln(os.Stderr)
+		return string(b), nil
+	}
+	line, err := bufio.NewReader(r).ReadString('\n')
+	if err != nil && line == "" {
+		return "", err
+	}
+	return strings.TrimRight(line, "\r\n"), nil
 }
 
 func usage(w io.Writer) {
