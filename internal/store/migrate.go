@@ -105,8 +105,14 @@ func MigratePerAccount(s *Store) error {
 			log.Printf("store: legacy collection %q still has %d row(s); not dropping yet", legacy, left)
 			continue
 		}
+		// Drop the now-empty legacy collection. OxiDB
+		// v0.0.0-20260514 has a DropCollection bug ("io error: Not a
+		// directory") on some collection shapes; treat that as
+		// non-fatal — the data is already gone, the file just sticks
+		// around as an empty btree. Logging it once per startup is
+		// loud enough to nag the operator without breaking the boot.
 		if err := s.db.DropCollection(legacy); err != nil && !isMissingCollection(err) {
-			return fmt.Errorf("drop legacy collection %s: %w", legacy, err)
+			log.Printf("store: drop legacy collection %s: %v (non-fatal; data already migrated, empty btree remains)", legacy, err)
 		}
 	}
 	return nil
