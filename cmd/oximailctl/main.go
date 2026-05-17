@@ -92,6 +92,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return c.backup(args[1:])
 	case "restore":
 		return c.restore(args[1:])
+	case "mailbox":
+		return c.mailbox(args[1:])
 	default:
 		fmt.Fprintf(stderr, "oximailctl: unknown command %q\n", args[0])
 		usage(stderr)

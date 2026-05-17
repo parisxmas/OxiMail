@@ -49,25 +49,25 @@ func MigratePerAccount(s *Store) error {
 	// resumes from wherever we left off; rows we already moved are
 	// idempotently re-inserted because OxiDB matches on _id).
 	movedAny := false
-	moved, err := migrateLegacyCollection(s, legacyCollMailboxes, MailboxesColl)
+	moved, err := migrateLegacyCollection(s, legacyCollMailboxes, MailboxesColl, naturalKeyName)
 	if err != nil {
 		return fmt.Errorf("migrate %s: %w", legacyCollMailboxes, err)
 	}
 	movedAny = movedAny || moved > 0
 
-	moved, err = migrateLegacyCollection(s, legacyCollMessages, MessagesColl)
+	moved, err = migrateLegacyCollection(s, legacyCollMessages, MessagesColl, naturalKeyMailboxUID)
 	if err != nil {
 		return fmt.Errorf("migrate %s: %w", legacyCollMessages, err)
 	}
 	movedAny = movedAny || moved > 0
 
-	moved, err = migrateLegacyCollection(s, legacyCollVacations, VacationsColl)
+	moved, err = migrateLegacyCollection(s, legacyCollVacations, VacationsColl, naturalKeyAccount)
 	if err != nil {
 		return fmt.Errorf("migrate %s: %w", legacyCollVacations, err)
 	}
 	movedAny = movedAny || moved > 0
 
-	moved, err = migrateLegacyCollection(s, legacyCollSieveScripts, SieveScriptsColl)
+	moved, err = migrateLegacyCollection(s, legacyCollSieveScripts, SieveScriptsColl, naturalKeyAccount)
 	if err != nil {
 		return fmt.Errorf("migrate %s: %w", legacyCollSieveScripts, err)
 	}
@@ -120,7 +120,21 @@ func MigratePerAccount(s *Store) error {
 // Rows without an account_id, or with an account_id that points at
 // no account, are left in place — operator-visible evidence that
 // something is off, and a safety net against silently dropping data.
-func migrateLegacyCollection(s *Store, legacy string, target func(uint64) string) (int, error) {
+//
+// Idempotency: `naturalKey` (when non-nil) extracts a per-document
+// uniqueness key (e.g. "name" for mailboxes; "" to insert
+// unconditionally). On each row we first check whether a doc with the
+// same natural key already exists in the destination — if it does, we
+// just delete the legacy copy without inserting a duplicate. This
+// guards against the failure mode that produced 25× duplicates on
+// baltavista: a restart loop where every boot re-ran the migration
+// while the legacy row's delete had failed transiently.
+func migrateLegacyCollection(
+	s *Store,
+	legacy string,
+	target func(uint64) string,
+	naturalKey func(row map[string]any) (field string, value any),
+) (int, error) {
 	rows, err := s.db.Find(legacy, map[string]any{}, nil)
 	if err != nil {
 		if isMissingCollection(err) {
@@ -137,11 +151,35 @@ func migrateLegacyCollection(s *Store, legacy string, target func(uint64) string
 		if !ok || accID == 0 {
 			continue
 		}
+		dst := target(accID)
+
+		// Already-migrated guard: if naturalKey says "this doc identifies
+		// itself by field=value" and a doc with that pair already exists
+		// in the destination, treat the legacy row as already moved and
+		// just drop it. Skips inserting a duplicate.
+		if naturalKey != nil {
+			field, value := naturalKey(row)
+			if field != "" {
+				existing, err := s.db.FindOne(dst, map[string]any{
+					"account_id": accID,
+					field:        value,
+				})
+				if err != nil && !isMissingCollection(err) {
+					return moved, fmt.Errorf("lookup in %s: %w", dst, err)
+				}
+				if existing != nil {
+					if _, err := s.db.Delete(legacy, map[string]any{"_id": row["_id"]}); err != nil {
+						return moved, fmt.Errorf("delete from %s: %w", legacy, err)
+					}
+					continue
+				}
+			}
+		}
+
 		// Re-insert into the per-account collection. OxiDB Insert
 		// auto-assigns _id; we strip the legacy _id to let it pick a
 		// fresh one in the new collection (the document body — which
 		// is what callers care about — is unchanged).
-		dst := target(accID)
 		clone := make(map[string]any, len(row))
 		for k, v := range row {
 			if k == "_id" {
@@ -158,6 +196,37 @@ func migrateLegacyCollection(s *Store, legacy string, target func(uint64) string
 		moved++
 	}
 	return moved, nil
+}
+
+// naturalKeyName picks "name" — the IMAP folder name — as the
+// uniqueness key for mailboxes within an account.
+func naturalKeyName(row map[string]any) (string, any) {
+	if v, ok := row["name"].(string); ok {
+		return "name", v
+	}
+	return "", nil
+}
+
+// naturalKeyAccount uses "account_id" — for collections that hold
+// exactly one row per account (vacations, sieve_scripts).
+func naturalKeyAccount(row map[string]any) (string, any) {
+	if v, ok := uint64Field(row, "account_id"); ok {
+		return "account_id", v
+	}
+	return "", nil
+}
+
+// naturalKeyMailboxUID composes (mailbox_id, uid) for messages — the
+// IMAP-defined uniqueness pair within a mailbox.
+func naturalKeyMailboxUID(row map[string]any) (string, any) {
+	// Returning a composite means we cannot use the simple
+	// FindOne({field: value}) shape. For now we leave it as "" so the
+	// guard short-circuits and we accept that a botched message
+	// migration may produce duplicates; the mailbox-list cleanup
+	// (oximailctl mailbox dedupe) was the practical issue we needed
+	// to recover from. A future iteration could thread a query-shape
+	// argument instead.
+	return "", nil
 }
 
 // migrateLegacyExpungeLog moves expunge-log rows into per-account
