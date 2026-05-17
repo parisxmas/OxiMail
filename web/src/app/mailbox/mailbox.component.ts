@@ -214,10 +214,22 @@ const STORAGE_KEY_LIST = 'oximail.listWidth';
               <button class="icon-btn" type="button" (click)="markUnread(msg)" title="Mark unread" aria-label="Mark unread">
                 <i-lucide [img]="icons.MailOpen" [size]="18"></i-lucide>
               </button>
-              <button class="icon-btn" type="button" (click)="moveToTrash(msg)" title="Move to Trash" aria-label="Move to Trash">
+              <button
+                class="icon-btn"
+                type="button"
+                (click)="archive(msg)"
+                title="Archive"
+                aria-label="Archive"
+              >
                 <i-lucide [img]="icons.Archive" [size]="18"></i-lucide>
               </button>
-              <button class="icon-btn danger" type="button" (click)="remove(msg)" title="Delete" aria-label="Delete">
+              <button
+                class="icon-btn danger"
+                type="button"
+                (click)="deleteOrTrash(msg)"
+                [title]="inTrash() ? 'Delete permanently' : 'Move to Trash'"
+                [attr.aria-label]="inTrash() ? 'Delete permanently' : 'Move to Trash'"
+              >
                 <i-lucide [img]="icons.Trash2" [size]="18"></i-lucide>
               </button>
             </div>
@@ -819,16 +831,37 @@ export class MailboxComponent implements OnInit, OnDestroy {
     });
   }
 
-  moveToTrash(msg: MessageDetail): void {
-    this.api.move(msg.id, 'Trash').subscribe({
+  // archive moves the message to the Archive folder. Distinct from
+  // deleteOrTrash — the user explicitly wants to keep this message,
+  // just out of the Inbox.
+  archive(msg: MessageDetail): void {
+    this.api.move(msg.id, 'Archive').subscribe({
       next: () => this.afterRemoval(),
     });
   }
 
-  remove(msg: MessageDetail): void {
-    this.api.remove(msg.id).subscribe({
-      next: () => this.afterRemoval(),
-    });
+  // deleteOrTrash matches Gmail's single-button delete UX: from any
+  // folder it moves to Trash; from inside Trash itself it permanently
+  // removes the message (after a confirm so it's not a foot-gun).
+  deleteOrTrash(msg: MessageDetail): void {
+    if (this.inTrash()) {
+      if (!confirm('Delete this message permanently? This cannot be undone.')) {
+        return;
+      }
+      this.api.remove(msg.id).subscribe({
+        next: () => this.afterRemoval(),
+      });
+    } else {
+      this.api.move(msg.id, 'Trash').subscribe({
+        next: () => this.afterRemoval(),
+      });
+    }
+  }
+
+  // inTrash reports whether the currently selected mailbox IS the
+  // Trash folder. Drives the dual-mode behaviour of the trash icon.
+  protected inTrash(): boolean {
+    return this.selected().toUpperCase() === 'TRASH';
   }
 
   // reply opens the compose dialog pre-filled with a reply or
