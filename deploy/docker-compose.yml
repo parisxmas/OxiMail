@@ -70,6 +70,10 @@ services:
       # Logs as JSON for log aggregators; switch to "text" for tail-friendly.
       - OXIMAIL_LOG_FORMAT=${OXIMAIL_LOG_FORMAT:-json}
       - OXIMAIL_LOG_LEVEL=${OXIMAIL_LOG_LEVEL:-info}
+      # Spam-pipeline knobs. Empty OXIMAIL_DNSBL_ZONES disables DNSBL;
+      # 0 OXIMAIL_GREYLIST_DELAY disables greylisting.
+      - OXIMAIL_DNSBL_ZONES=${OXIMAIL_DNSBL_ZONES-zen.spamhaus.org}
+      - OXIMAIL_GREYLIST_DELAY=${OXIMAIL_GREYLIST_DELAY:-1m}
     ports:
       - "25:25"        # SMTP MX (inbound)
       - "465:465"      # SMTPS submission
