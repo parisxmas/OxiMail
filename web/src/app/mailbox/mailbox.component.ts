@@ -52,6 +52,18 @@ const LIST_DEFAULT = 360;
 const STORAGE_KEY_FOLDERS = 'oximail.foldersWidth';
 const STORAGE_KEY_LIST = 'oximail.listWidth';
 
+// Undo-toast lifetime. 6s matches Gmail's snackbar and is long enough
+// to react to a misclick without parking visual noise on screen.
+const UNDO_TIMEOUT_MS = 6_000;
+
+// One pending undoable move at a time, mirrored in the toast.
+interface UndoState {
+  messageId: number;
+  sourceFolder: string;
+  label: string;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 @Component({
   selector: 'oximail-mailbox',
   imports: [DatePipe, ComposeComponent, RouterLink, LucideAngularModule],
@@ -273,6 +285,22 @@ const STORAGE_KEY_LIST = 'oximail.listWidth';
         (close)="closeCompose()"
         (sent)="onSent()"
       />
+    }
+
+    <!-- Undo toast — bottom-left. Auto-dismisses after UNDO_TIMEOUT_MS;
+         clicking Undo moves the message back to where it came from. -->
+    @if (undoState(); as u) {
+      <div class="undo-toast" role="status" aria-live="polite">
+        <span class="undo-label">{{ u.label }}</span>
+        <button type="button" class="undo-action" (click)="undo()">Undo</button>
+        <button
+          type="button"
+          class="undo-dismiss"
+          (click)="dismissUndo()"
+          aria-label="Dismiss"
+          title="Dismiss"
+        >✕</button>
+      </div>
     }
   `,
   styles: `
@@ -642,6 +670,68 @@ const STORAGE_KEY_LIST = 'oximail.listWidth';
       place-items: center;
       height: 100%;
     }
+    /* Undo toast — floats bottom-left, above the page chrome. Slide-in
+       animation cues that something just happened; clicking outside it
+       doesn't dismiss (so users have the full timeout to react). */
+    .undo-toast {
+      position: fixed;
+      left: 24px;
+      bottom: 24px;
+      z-index: 9;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px 10px 16px;
+      background: #2d3748;
+      color: white;
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+      font-size: 13px;
+      max-width: min(420px, calc(100vw - 48px));
+      animation: undo-slide-in 160ms ease-out;
+    }
+    @keyframes undo-slide-in {
+      from { transform: translateY(8px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    .undo-label {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .undo-action {
+      background: transparent;
+      border: none;
+      color: #93c5fd;
+      font-weight: 600;
+      padding: 4px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      text-transform: uppercase;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+    }
+    .undo-action:hover {
+      background: rgba(255, 255, 255, 0.08);
+    }
+    .undo-dismiss {
+      background: transparent;
+      border: none;
+      color: rgba(255, 255, 255, 0.6);
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .undo-dismiss:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: white;
+    }
   `,
 })
 export class MailboxComponent implements OnInit, OnDestroy {
@@ -663,6 +753,11 @@ export class MailboxComponent implements OnInit, OnDestroy {
   // and the related min/max constants up top.
   readonly foldersWidth = signal<number>(this.loadWidth(STORAGE_KEY_FOLDERS, FOLDERS_DEFAULT, FOLDERS_MIN, FOLDERS_MAX));
   readonly listWidth = signal<number>(this.loadWidth(STORAGE_KEY_LIST, LIST_DEFAULT, LIST_MIN, LIST_MAX));
+
+  // Pending undo-able move (archive or trash). When non-null the
+  // bottom toast is shown; cleared on Undo, on dismiss, or when the
+  // UNDO_TIMEOUT_MS timer fires.
+  readonly undoState = signal<UndoState | null>(null);
 
   // Active resize state — populated on mousedown over a divider, drives
   // the document-level mousemove/mouseup listeners.
@@ -722,6 +817,9 @@ export class MailboxComponent implements OnInit, OnDestroy {
       document.body.style.cursor = '';
       this.resizeTarget = null;
     }
+    // Cancel a pending undo timer — otherwise it'd fire against a
+    // detached component and silently NPE.
+    this.clearUndoTimer();
   }
 
   private startPolling(): void {
@@ -835,8 +933,12 @@ export class MailboxComponent implements OnInit, OnDestroy {
   // deleteOrTrash — the user explicitly wants to keep this message,
   // just out of the Inbox.
   archive(msg: MessageDetail): void {
+    const sourceFolder = this.selected();
     this.api.move(msg.id, 'Archive').subscribe({
-      next: () => this.afterRemoval(),
+      next: () => {
+        this.afterRemoval();
+        this.showUndo(msg.id, sourceFolder, `Archived "${msg.subject || '(no subject)'}"`);
+      },
     });
   }
 
@@ -852,8 +954,12 @@ export class MailboxComponent implements OnInit, OnDestroy {
         next: () => this.afterRemoval(),
       });
     } else {
+      const sourceFolder = this.selected();
       this.api.move(msg.id, 'Trash').subscribe({
-        next: () => this.afterRemoval(),
+        next: () => {
+          this.afterRemoval();
+          this.showUndo(msg.id, sourceFolder, `Moved "${msg.subject || '(no subject)'}" to Trash`);
+        },
       });
     }
   }
@@ -862,6 +968,40 @@ export class MailboxComponent implements OnInit, OnDestroy {
   // Trash folder. Drives the dual-mode behaviour of the trash icon.
   protected inTrash(): boolean {
     return this.selected().toUpperCase() === 'TRASH';
+  }
+
+  // showUndo schedules an undo toast for a just-completed move. The
+  // toast auto-dismisses after UNDO_TIMEOUT_MS; a fresh move replaces
+  // any pending undo (only one operation is undoable at a time —
+  // matches Gmail). After the message is moved BACK we refresh the
+  // mailboxes + message list so the user sees it return immediately.
+  private showUndo(messageId: number, sourceFolder: string, label: string): void {
+    this.clearUndoTimer();
+    const timer = setTimeout(() => this.undoState.set(null), UNDO_TIMEOUT_MS);
+    this.undoState.set({ messageId, sourceFolder, label, timer });
+  }
+
+  protected undo(): void {
+    const u = this.undoState();
+    if (!u) return;
+    this.clearUndoTimer();
+    this.undoState.set(null);
+    this.api.move(u.messageId, u.sourceFolder).subscribe({
+      next: () => {
+        this.refreshMailboxes();
+        this.loadMessages();
+      },
+    });
+  }
+
+  protected dismissUndo(): void {
+    this.clearUndoTimer();
+    this.undoState.set(null);
+  }
+
+  private clearUndoTimer(): void {
+    const u = this.undoState();
+    if (u) clearTimeout(u.timer);
   }
 
   // reply opens the compose dialog pre-filled with a reply or
