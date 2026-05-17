@@ -61,6 +61,21 @@ func (s *sessionStore) delete(token string) {
 	s.mu.Unlock()
 }
 
+// deleteByAccount revokes every session whose owner is accountID,
+// optionally keeping `except` alive. Used after a password change to
+// log out every other browser/device that still holds an old session
+// token (the user who just changed the password keeps their current
+// session — they'd hate to be bounced to the login screen mid-flow).
+func (s *sessionStore) deleteByAccount(accountID uint64, except string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for token, sess := range s.sessions {
+		if sess.accountID == accountID && token != except {
+			delete(s.sessions, token)
+		}
+	}
+}
+
 // lookup resolves a token to its account id, reporting false if the
 // token is unknown or expired.
 func (s *sessionStore) lookup(token string) (uint64, bool) {

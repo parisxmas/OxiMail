@@ -98,6 +98,7 @@ func New(addr, staticDir string, st *store.Store, tlsConfig *tls.Config, mtasts 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/logout", s.auth(s.handleLogout))
+	mux.HandleFunc("POST /api/account/password", s.auth(s.handleChangePassword))
 	mux.HandleFunc("GET /api/mailboxes", s.auth(s.handleMailboxes))
 	mux.HandleFunc("GET /api/mailboxes/{mailbox}/messages", s.auth(s.handleListMessages))
 	mux.HandleFunc("GET /api/messages/{id}", s.auth(s.handleGetMessage))

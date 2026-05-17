@@ -159,6 +159,17 @@ export class ApiService {
   deleteSieve() {
     return this.http.delete<void>('/api/sieve');
   }
+
+  // changePassword rotates the caller's password. The server verifies
+  // current_password, enforces the min-length rule, and revokes every
+  // OTHER session for the account on success — the current session
+  // stays valid (the user doesn't get bounced back to login).
+  changePassword(currentPassword: string, newPassword: string) {
+    return this.http.post<void>('/api/account/password', {
+      current_password: currentPassword,
+      new_password: newPassword,
+    });
+  }
 }
 
 // VacationRule mirrors internal/webmail.vacationResponse.

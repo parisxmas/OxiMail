@@ -977,6 +977,89 @@ func TestMTASTSPolicyHandler(t *testing.T) {
 	}
 }
 
+// TestWebmailChangePassword covers POST /api/account/password —
+// happy path (rotates the hash + invalidates other sessions while
+// keeping the caller's session alive), validation rejection (short
+// password, mismatched current), and the negative auth case (wrong
+// current password gets 401 not 204).
+func TestWebmailChangePassword(t *testing.T) {
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	hash, err := store.HashPassword("originalPW123")
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	acc, err := st.CreateAccount("pwuser@oximail.test", hash, 0)
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+
+	base := startWebmail(t, st)
+
+	// Two parallel sessions for pwuser — one to use, one to confirm
+	// gets revoked by the password change.
+	var keepSess, otherSess struct{ Token, Address string }
+	if s := postJSON(t, base+"/api/login", "", loginBody("pwuser@oximail.test", "originalPW123"), &keepSess); s != http.StatusOK {
+		t.Fatalf("first login: %d", s)
+	}
+	if s := postJSON(t, base+"/api/login", "", loginBody("pwuser@oximail.test", "originalPW123"), &otherSess); s != http.StatusOK {
+		t.Fatalf("second login: %d", s)
+	}
+
+	t.Run("wrong current password is rejected with 401", func(t *testing.T) {
+		body := mustJSON(map[string]string{"current_password": "WRONG", "new_password": "brandNewPW456"})
+		if s := post(t, base+"/api/account/password", keepSess.Token, body); s != http.StatusUnauthorized {
+			t.Errorf("status = %d, want 401", s)
+		}
+	})
+
+	t.Run("short new password is rejected with 400", func(t *testing.T) {
+		body := mustJSON(map[string]string{"current_password": "originalPW123", "new_password": "short"})
+		if s := post(t, base+"/api/account/password", keepSess.Token, body); s != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", s)
+		}
+	})
+
+	t.Run("new = current is rejected with 400", func(t *testing.T) {
+		body := mustJSON(map[string]string{"current_password": "originalPW123", "new_password": "originalPW123"})
+		if s := post(t, base+"/api/account/password", keepSess.Token, body); s != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", s)
+		}
+	})
+
+	t.Run("happy path: 204, hash rotated, other session revoked, caller stays in", func(t *testing.T) {
+		body := mustJSON(map[string]string{"current_password": "originalPW123", "new_password": "brandNewPW456"})
+		if s := post(t, base+"/api/account/password", keepSess.Token, body); s != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204", s)
+		}
+		// Old password no longer authenticates against the store.
+		if _, err := st.Authenticate("pwuser@oximail.test", "originalPW123"); err == nil {
+			t.Error("old password still works after rotation")
+		}
+		// New one does.
+		if _, err := st.Authenticate("pwuser@oximail.test", "brandNewPW456"); err != nil {
+			t.Errorf("new password does not work: %v", err)
+		}
+		// The OTHER session is now invalid — any authed call returns 401.
+		if s := get(t, base+"/api/mailboxes", otherSess.Token); s != http.StatusUnauthorized {
+			t.Errorf("other session after rotation: %d, want 401", s)
+		}
+		// The current session is still good.
+		if s := get(t, base+"/api/mailboxes", keepSess.Token); s != http.StatusOK {
+			t.Errorf("caller session after rotation: %d, want 200", s)
+		}
+	})
+	_ = acc
+}
+
 // startWebmail launches the webmail server on a free port, wired to st,
 // and returns its base URL. It is shut down when the test ends.
 func startWebmail(t *testing.T, st *store.Store) string {

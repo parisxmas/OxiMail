@@ -91,6 +91,70 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, loginResponse{Token: token, Address: acc.Address})
 }
 
+// MinPasswordLength is the minimum length we accept for a webmail
+// password change. 8 is the policy-makers' lowest-common-denominator
+// — short enough not to wall normal users off, long enough to add a
+// little friction over the typical pattern-based password.
+const MinPasswordLength = 8
+
+// changePasswordRequest is the JSON body of POST /api/account/password.
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+// handleChangePassword lets a logged-in account rotate its own
+// password. It verifies the current password (rate-limited via the
+// per-account limiter so a stolen short-lived session can't brute
+// the current password), enforces a minimum new-password length,
+// stores the new hash, and revokes every OTHER session for the
+// account — the current one stays alive so the user doesn't lose
+// their place.
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, acc *store.Account) {
+	var req changePasswordRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	acctKey := strings.ToLower(strings.TrimSpace(acc.Address))
+	if s.accountLimiter.Blocked(acctKey) {
+		writeError(w, http.StatusTooManyRequests, "too many failed attempts, try again later")
+		return
+	}
+	if _, err := s.store.Authenticate(acc.Address, req.CurrentPassword); err != nil {
+		s.accountLimiter.RecordFailure(acctKey)
+		if s.accountLimiter.Blocked(acctKey) {
+			log.Printf("webmail: rate-limit triggered for account %q on password change from %s", acctKey, clientIP(r))
+		}
+		writeError(w, http.StatusUnauthorized, "current password is incorrect")
+		return
+	}
+	if len(req.NewPassword) < MinPasswordLength {
+		writeError(w, http.StatusBadRequest, "new password must be at least 8 characters")
+		return
+	}
+	if req.NewPassword == req.CurrentPassword {
+		writeError(w, http.StatusBadRequest, "new password must differ from the current one")
+		return
+	}
+	hash, err := store.HashPassword(req.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not hash the new password")
+		return
+	}
+	if err := s.store.SetAccountPassword(acc.ID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not store the new password")
+		return
+	}
+	// Revoke any OTHER sessions for this account so a stolen one is
+	// invalidated by the rotation. Keep the caller's session alive
+	// (matched by token) — they're the one who just typed the new
+	// password, no point bouncing them to the login screen.
+	current, _ := resolveToken(r)
+	s.sessions.deleteByAccount(acc.ID, current)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleLogout revokes the caller's session token and clears the
 // browser cookies. The handler is wrapped with auth, so it implicitly
 // requires a valid session (and, for cookie-based callers, a valid

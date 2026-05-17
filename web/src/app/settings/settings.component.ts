@@ -31,9 +31,75 @@ import { ApiService, SieveScript, VacationRule } from '../api.service';
         >
           Filter rules (Sieve)
         </button>
+        <button
+          type="button"
+          class="tab"
+          [class.active]="tab() === 'password'"
+          (click)="tab.set('password')"
+        >
+          Password
+        </button>
       </div>
 
-      @if (tab() === 'vacation') {
+      @if (tab() === 'password') {
+        <section class="card">
+          <h2>Change password</h2>
+          <p class="hint">
+            Your password is stored as a bcrypt hash — neither us nor
+            anyone else can read it back. Changing it signs out every
+            other browser and device, but keeps this session active.
+          </p>
+
+          <label>
+            Current password
+            <input
+              type="password"
+              autocomplete="current-password"
+              [(ngModel)]="pwCurrent"
+              name="pw-current"
+            />
+          </label>
+
+          <label>
+            New password (at least 8 characters)
+            <input
+              type="password"
+              autocomplete="new-password"
+              minlength="8"
+              [(ngModel)]="pwNew"
+              name="pw-new"
+            />
+          </label>
+
+          <label>
+            Confirm new password
+            <input
+              type="password"
+              autocomplete="new-password"
+              [(ngModel)]="pwConfirm"
+              name="pw-confirm"
+            />
+          </label>
+
+          @if (pwError()) {
+            <p class="error">{{ pwError() }}</p>
+          }
+          @if (pwSavedAt()) {
+            <p class="ok">Password updated.</p>
+          }
+
+          <footer>
+            <button
+              type="button"
+              class="primary"
+              [disabled]="pwBusy()"
+              (click)="changePassword()"
+            >
+              {{ pwBusy() ? 'Updating…' : 'Update password' }}
+            </button>
+          </footer>
+        </section>
+      } @else if (tab() === 'vacation') {
         <section class="card">
           <h2>Vacation auto-responder</h2>
           <p class="hint">
@@ -183,7 +249,17 @@ export class SettingsComponent {
   private readonly api = inject(ApiService);
   private readonly router = inject(Router);
 
-  readonly tab = signal<'vacation' | 'sieve'>('vacation');
+  readonly tab = signal<'vacation' | 'sieve' | 'password'>('vacation');
+
+  // Change-password form state. All three fields are kept in the
+  // component (not the API) so a navigate-away doesn't persist
+  // anything sensitive; the form is cleared on success.
+  pwCurrent = '';
+  pwNew = '';
+  pwConfirm = '';
+  readonly pwBusy = signal(false);
+  readonly pwError = signal('');
+  readonly pwSavedAt = signal<number>(0);
 
   // The example block goes through a property rather than literal
   // template text so the Angular parser doesn't try to interpret the
@@ -277,6 +353,48 @@ export class SettingsComponent {
         // which is much more useful than a generic "Save failed".
         this.sieveError.set(err.error?.error || 'Save failed.');
         this.sieveBusy.set(false);
+      },
+    });
+  }
+
+  // changePassword validates the three inputs client-side (mirror of
+  // what the server checks, surfaced as immediate feedback), then
+  // calls the API. On success the form is cleared so leftover bytes
+  // don't sit in the DOM longer than necessary, and a "Password
+  // updated." confirmation shows for the next 5 seconds.
+  changePassword(): void {
+    this.pwError.set('');
+    this.pwSavedAt.set(0);
+    if (!this.pwCurrent) {
+      this.pwError.set('Enter your current password.');
+      return;
+    }
+    if (this.pwNew.length < 8) {
+      this.pwError.set('New password must be at least 8 characters.');
+      return;
+    }
+    if (this.pwNew === this.pwCurrent) {
+      this.pwError.set('New password must differ from the current one.');
+      return;
+    }
+    if (this.pwNew !== this.pwConfirm) {
+      this.pwError.set('Confirmation does not match the new password.');
+      return;
+    }
+    this.pwBusy.set(true);
+    this.api.changePassword(this.pwCurrent, this.pwNew).subscribe({
+      next: () => {
+        this.pwCurrent = '';
+        this.pwNew = '';
+        this.pwConfirm = '';
+        this.pwSavedAt.set(Date.now());
+        this.pwBusy.set(false);
+        // Clear the success banner after 5s so it doesn't linger.
+        setTimeout(() => this.pwSavedAt.set(0), 5_000);
+      },
+      error: (err) => {
+        this.pwError.set(err.error?.error || 'Could not change the password.');
+        this.pwBusy.set(false);
       },
     });
   }
