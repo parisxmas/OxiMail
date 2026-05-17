@@ -1,9 +1,14 @@
 import { Component, inject, input, output, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { LucideAngularModule, Send, Save, X, Pilcrow, Code2 } from 'lucide-angular';
+import { LucideAngularModule, Send, Save, X, Pilcrow, Code2, Maximize2, Minimize2 } from 'lucide-angular';
 import { QuillEditorComponent } from 'ngx-quill';
 
 import { ApiService } from '../api.service';
+
+// localStorage key for the compose "expanded" preference. Mirrors the
+// pattern from the mailbox splitter — a returning user gets their
+// last layout back.
+const STORAGE_KEY_EXPANDED = 'oximail.composeExpanded';
 
 // ComposeSeed pre-populates the dialog: reply / forward callers fill
 // the threading fields, draft-resume callers fill the id.
@@ -23,12 +28,23 @@ export interface ComposeSeed {
   imports: [FormsModule, LucideAngularModule, QuillEditorComponent],
   template: `
     <div class="backdrop" (click)="cancel()"></div>
-    <form class="dialog" (ngSubmit)="submit()">
+    <form class="dialog" [class.expanded]="expanded()" (ngSubmit)="submit()">
       <header>
         <h2>New message</h2>
-        <button type="button" class="icon-btn" (click)="cancel()" aria-label="Close" title="Close">
-          <i-lucide [img]="icons.X" [size]="18"></i-lucide>
-        </button>
+        <div class="header-actions">
+          <button
+            type="button"
+            class="icon-btn"
+            (click)="toggleExpanded()"
+            [attr.aria-label]="expanded() ? 'Shrink composer' : 'Expand composer'"
+            [title]="expanded() ? 'Shrink' : 'Full screen'"
+          >
+            <i-lucide [img]="expanded() ? icons.Minimize2 : icons.Maximize2" [size]="16"></i-lucide>
+          </button>
+          <button type="button" class="icon-btn" (click)="cancel()" aria-label="Close" title="Close">
+            <i-lucide [img]="icons.X" [size]="18"></i-lucide>
+          </button>
+        </div>
       </header>
 
       <label>
@@ -89,7 +105,7 @@ export interface ComposeSeed {
           name="html"
           [(ngModel)]="html"
           format="html"
-          [styles]="quillStyles"
+          [styles]="expanded() ? quillStylesExpanded : quillStyles"
           theme="snow"
         ></quill-editor>
       } @else {
@@ -129,6 +145,9 @@ export interface ComposeSeed {
       inset: 0;
       background: rgba(0, 0, 0, 0.4);
     }
+    /* Compact mode — bottom-right, like Gmail's snap-out composer.
+       Right for quick replies; the expand button promotes it to the
+       large centered .expanded variant. */
     .dialog {
       position: absolute;
       right: 24px;
@@ -143,6 +162,38 @@ export interface ComposeSeed {
       border: 1px solid var(--border);
       border-radius: 12px;
       box-shadow: 0 20px 48px rgba(0, 0, 0, 0.28);
+      transition: width 160ms ease, height 160ms ease,
+                  inset 160ms ease, border-radius 160ms ease;
+    }
+    /* Expanded mode — large centered modal. ~min(960px, 80vw) wide,
+       fills 86vh tall. The editor body grows to take the slack so the
+       user has a real surface to write into. */
+    .dialog.expanded {
+      right: auto;
+      bottom: auto;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: min(960px, calc(100vw - 64px));
+      height: 86vh;
+      max-height: 86vh;
+    }
+    .dialog.expanded ::ng-deep quill-editor {
+      flex: 1;
+      min-height: 0;
+    }
+    .dialog.expanded ::ng-deep .ql-container.ql-snow {
+      flex: 1;
+      min-height: 0;
+    }
+    .dialog.expanded textarea {
+      flex: 1;
+      min-height: 0;
+    }
+    .header-actions {
+      display: inline-flex;
+      gap: 2px;
+      align-items: center;
     }
     header {
       display: flex;
@@ -291,12 +342,29 @@ export class ComposeComponent {
   // Icons referenced from the template — keep them as a single object
   // so the imports list above stays the one place that pins the icon
   // set (any new icon goes in both places).
-  protected readonly icons = { Send, Save, X, Pilcrow, Code2 };
+  protected readonly icons = { Send, Save, X, Pilcrow, Code2, Maximize2, Minimize2 };
 
-  // Style passed to <quill-editor> to lock its inner editing area at
-  // a sensible default height. The CSS above grows the container with
-  // the dialog; this keeps the first paint comfortable to type into.
+  // Expanded mode — large centered modal vs. the default bottom-right
+  // panel. Restored from localStorage so a user who prefers the
+  // full-screen composer gets it on every open.
+  readonly expanded = signal<boolean>(this.loadExpanded());
+
+  toggleExpanded(): void {
+    const next = !this.expanded();
+    this.expanded.set(next);
+    try { localStorage.setItem(STORAGE_KEY_EXPANDED, next ? '1' : '0'); } catch { /* ignore */ }
+  }
+
+  private loadExpanded(): boolean {
+    try { return localStorage.getItem(STORAGE_KEY_EXPANDED) === '1'; } catch { return false; }
+  }
+
+  // Style passed to <quill-editor>. The compact mode locks the inner
+  // editing area at 220px so the bottom-right panel stays a sensible
+  // shape; the expanded mode hands the editor the full slack of the
+  // centered dialog (height: 100% inside a flex parent).
   protected readonly quillStyles = { height: '220px' };
+  protected readonly quillStylesExpanded = { height: '100%' };
 
   ngOnInit(): void {
     const s = this.seed();
