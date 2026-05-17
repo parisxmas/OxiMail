@@ -85,6 +85,7 @@ interface UndoState {
           <button
             class="folder icon-text"
             [class.active]="mb.name === selected()"
+            [class.has-unread]="mb.unseen > 0"
             (click)="selectMailbox(mb.name)"
           >
             <i-lucide [img]="folderIcon(mb.name)" [size]="16"></i-lucide>
@@ -409,6 +410,13 @@ interface UndoState {
       background: var(--bg-sunken);
       font-weight: 600;
       color: var(--accent);
+    }
+    /* Folder with unread messages stays bold even when it's not the
+       active folder — same affordance Gmail uses to draw the eye to
+       inboxes that have new mail. */
+    .folder.has-unread {
+      font-weight: 600;
+      color: var(--text);
     }
     .folder .folder-name {
       flex: 1;
