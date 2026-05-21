@@ -41,6 +41,44 @@ services:
       timeout: 2s
       retries: 12
 
+  avd:
+    # OxiMail antivirus daemon. Speaks the clamd wire protocol on a
+    # Unix socket; rspamd's `clamav` module dials it directly (see
+    # deploy/rspamd/local.d/antivirus.conf). Ships with the EICAR
+    # test signature out of the box so end-to-end probes pass on a
+    # fresh deploy; mount additional --hdb / --cvd / --ndb / --yara
+    # via the OXIMAIL_AV_EXTRA_ARGS env var to grow the detection
+    # set without rebuilding the image.
+    #
+    # Build context is a sibling clone of the antivirus repo on
+    # the deploy host — by convention /opt/antivirus next to
+    # /opt/oximail. Move them together when relocating.
+    build:
+      context: ../../antivirus
+    container_name: oximail-avd
+    restart: unless-stopped
+    environment:
+      - OXIMAIL_AV_EXTRA_ARGS=${OXIMAIL_AV_EXTRA_ARGS:-}
+      - RUST_LOG=${OXIMAIL_AV_LOG:-info}
+    volumes:
+      # Shared socket dir. Both avd (writer) and rspamd (reader)
+      # mount this volume at /run/avd; avd creates avd.sock there
+      # with umask 000 so the rspamd uid can dial it.
+      - avd-socket:/run/avd
+    networks:
+      - oximail
+    healthcheck:
+      # `test -S` succeeds iff the path exists and is a Unix socket.
+      # avd creates the socket as the first thing it does after the
+      # signature load, so this also gates "signatures are loaded".
+      # A protocol-level PING probe would be richer but needs nc /
+      # socat in the runtime image, which we'd rather not ship.
+      test: ["CMD-SHELL", "test -S /run/avd/avd.sock"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 4s
+
   rspamd:
     # Content scanner. Empty OXIMAIL_RSPAMD_URL on the oximail side
     # disables the integration, so this sidecar is opt-in at the
@@ -54,6 +92,13 @@ services:
     image: rspamd/rspamd:latest
     container_name: oximail-rspamd
     restart: unless-stopped
+    depends_on:
+      avd:
+        # Wait for the AV daemon to be ready so the first
+        # /checkv2 call doesn't surface a connection-refused on
+        # the clamav backend. Rspamd handles per-call retries, but
+        # a clean startup keeps the logs quiet.
+        condition: service_healthy
     networks:
       - oximail
     volumes:
@@ -61,6 +106,13 @@ services:
       # container restarts. Without this, every restart wipes the
       # adaptive parts and quality slowly degrades.
       - rspamd-data:/var/lib/rspamd
+      # Shared AV socket — same volume avd publishes on. Read-only
+      # from rspamd's side: it dials but doesn't create anything.
+      - avd-socket:/run/avd:ro
+      # Antivirus module config. Mounted into local.d/ so the upstream
+      # rspamd image picks it up alongside the baseline defaults
+      # without us shipping a fork or a custom image.
+      - ./rspamd/local.d/antivirus.conf:/etc/rspamd/local.d/antivirus.conf:ro
     healthcheck:
       # Use bash explicitly: the Debian slim base ships dash as
       # /bin/sh and dash has no /dev/tcp builtin. 11334 is the
@@ -134,6 +186,12 @@ volumes:
   oxidb-data:
   oximail-acme:
   rspamd-data:
+  # tmpfs-style volume shared between avd (creator) and rspamd
+  # (consumer) for the AV daemon's Unix socket. Lives only on
+  # the docker host's filesystem; nothing on it survives a
+  # `docker compose down -v`, which is fine because the socket
+  # is recreated at avd startup.
+  avd-socket:
 
 networks:
   oximail:
