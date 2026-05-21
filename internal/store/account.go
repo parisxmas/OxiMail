@@ -188,7 +188,7 @@ func (s *Store) CreateAccount(address, passwordHash string, quotaBytes int64) (*
 	// vacations, sieve_scripts, expunge_log) up front so subsequent
 	// inserts have indexes ready and so a fresh `du` of the data
 	// directory makes the new account visible immediately.
-	if err := EnsureAccountCollections(s.db, a.ID); err != nil {
+	if err := EnsureAccountCollections(s, a.ID); err != nil {
 		return nil, fmt.Errorf("store: ensure per-account collections for %q: %w", address, err)
 	}
 	return a, nil
@@ -294,7 +294,7 @@ func (s *Store) DeleteAccount(id uint64) error {
 	}
 	// DropCollection on each per-account collection — the on-disk
 	// btree files actually go away.
-	if err := DropAccountCollections(s.db, id); err != nil {
+	if err := DropAccountCollections(s, id); err != nil {
 		return fmt.Errorf("store: delete account %d: drop per-account collections: %w", id, err)
 	}
 	if _, err := s.db.Delete(CollAccounts, map[string]any{"_id": id}); err != nil {

@@ -2,8 +2,6 @@ package store
 
 import (
 	"fmt"
-
-	"github.com/parisxmas/OxiDB/go/oxidb"
 )
 
 // Per-account collection naming. Each account owns its own set of
@@ -65,7 +63,8 @@ func ExpungeLogColl(accountID uint64) string {
 // indexes for accountID. Idempotent — safe to call at every startup
 // (in case the schema check ran but account-collection setup didn't).
 // Called from CreateAccount and from the startup migration walker.
-func EnsureAccountCollections(db *oxidb.Client, accountID uint64) error {
+func EnsureAccountCollections(s *Store, accountID uint64) error {
+	db := s.db
 	msg := MessagesColl(accountID)
 	mb := MailboxesColl(accountID)
 	vac := VacationsColl(accountID)
@@ -126,7 +125,8 @@ func EnsureAccountCollections(db *oxidb.Client, accountID uint64) error {
 // parisxmas/OxiDB#12 (merged as d04ac4db). Earlier OxiDB versions
 // fail with "io error: Not a directory" on the small per-account
 // collections.
-func DropAccountCollections(db *oxidb.Client, accountID uint64) error {
+func DropAccountCollections(s *Store, accountID uint64) error {
+	db := s.db
 	for _, coll := range []string{
 		MessagesColl(accountID),
 		MailboxesColl(accountID),

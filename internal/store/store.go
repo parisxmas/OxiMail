@@ -31,8 +31,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-
-	"github.com/parisxmas/OxiDB/go/oxidb"
 )
 
 // Collection names for the SHARED collections — these stay global
@@ -70,15 +68,17 @@ var ErrAuthFailed = errors.New("store: authentication failed")
 
 // Store is the handle every component uses to reach OxiDB.
 type Store struct {
-	db *oxidb.Client
+	db *dbClient
 }
 
-// Open connects to OxiDB.
+// Open connects to OxiDB. The returned Store's underlying connection
+// is reconnect-on-broken-pipe (see dbClient); a one-off network blip
+// or oxidb-server restart will redial transparently on the next call.
 //
 // TODO: swap the single connection for the oxidb connection pool once
 // the concurrent hot paths (delivery, IMAP fetch) exist.
 func Open(host string, port int) (*Store, error) {
-	db, err := oxidb.Connect(host, port, 10*time.Second)
+	db, err := dial(host, port, 10*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("store: connect to OxiDB %s:%d: %w", host, port, err)
 	}

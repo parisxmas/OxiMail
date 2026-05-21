@@ -38,7 +38,7 @@ func MigratePerAccount(s *Store) error {
 	// First pass: make sure every account has its per-account
 	// collections in place. EnsureAccountCollections is idempotent.
 	for _, acc := range accounts {
-		if err := EnsureAccountCollections(s.db, acc.ID); err != nil {
+		if err := EnsureAccountCollections(s, acc.ID); err != nil {
 			return fmt.Errorf("ensure collections for account %d: %w", acc.ID, err)
 		}
 	}

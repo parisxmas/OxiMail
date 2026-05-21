@@ -3,8 +3,6 @@ package store
 import (
 	"fmt"
 	"strings"
-
-	"github.com/parisxmas/OxiDB/go/oxidb"
 )
 
 // EnsureSchema creates the indexes and the blob bucket the mail server
@@ -76,28 +74,28 @@ func EnsureSchema(s *Store) error {
 	return nil
 }
 
-func ensureCollection(db *oxidb.Client, coll string) error {
+func ensureCollection(db *dbClient, coll string) error {
 	if err := db.CreateCollection(coll); err != nil && !isAlreadyExists(err) {
 		return fmt.Errorf("store: create collection %q: %w", coll, err)
 	}
 	return nil
 }
 
-func ensureIndex(db *oxidb.Client, coll, field string) error {
+func ensureIndex(db *dbClient, coll, field string) error {
 	if err := db.CreateIndex(coll, field); err != nil && !isAlreadyExists(err) {
 		return fmt.Errorf("store: index %s.%s: %w", coll, field, err)
 	}
 	return nil
 }
 
-func ensureUnique(db *oxidb.Client, coll, field string) error {
+func ensureUnique(db *dbClient, coll, field string) error {
 	if err := db.CreateUniqueIndex(coll, field); err != nil && !isAlreadyExists(err) {
 		return fmt.Errorf("store: unique index %s.%s: %w", coll, field, err)
 	}
 	return nil
 }
 
-func ensureComposite(db *oxidb.Client, coll string, fields []string) error {
+func ensureComposite(db *dbClient, coll string, fields []string) error {
 	if err := db.CreateCompositeIndex(coll, fields); err != nil && !isAlreadyExists(err) {
 		return fmt.Errorf("store: composite index %s%v: %w", coll, fields, err)
 	}
