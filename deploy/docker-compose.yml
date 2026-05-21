@@ -109,10 +109,12 @@ services:
       # Shared AV socket — same volume avd publishes on. Read-only
       # from rspamd's side: it dials but doesn't create anything.
       - avd-socket:/run/avd:ro
-      # Antivirus module config. Mounted into local.d/ so the upstream
-      # rspamd image picks it up alongside the baseline defaults
-      # without us shipping a fork or a custom image.
+      # Antivirus module config + symbol score table. Mounted into
+      # local.d/ so the upstream rspamd image picks them up alongside
+      # the baseline defaults without us shipping a fork or a
+      # custom image.
       - ./rspamd/local.d/antivirus.conf:/etc/rspamd/local.d/antivirus.conf:ro
+      - ./rspamd/local.d/groups.conf:/etc/rspamd/local.d/groups.conf:ro
     healthcheck:
       # Use bash explicitly: the Debian slim base ships dash as
       # /bin/sh and dash has no /dev/tcp builtin. 11334 is the
