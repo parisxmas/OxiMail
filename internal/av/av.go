@@ -1,161 +1,151 @@
-// Package av is a thin clamd-protocol client OxiMail uses to scan
-// outbound webmail attachments against the avd sidecar before relay.
-// The complement to rspamd's antivirus module on inbound mail
-// (Phase A): rspamd guards the receiver, this package guards what
-// we send.
+// Package av is OxiMail's in-process antivirus scanner.
 //
-// Wire protocol — clamd INSTREAM with the zero-terminated framing
-// variant:
+// Earlier revisions of this package were a thin client to an external
+// clamd-compatible daemon (the Rust avd sidecar). That added an
+// out-of-process hop, a build dependency on a separate repo, and a
+// container in the compose graph for what — in our scope — is a
+// SHA-256 hash lookup. We collapse the whole thing into a pure-Go
+// scanner that's compiled into the oximail binary; signatures live in
+// a small text file embedded at build time, with an optional
+// operator-provided extension loaded at start.
 //
-//	zINSTREAM\0
-//	<uint32 BE: chunk length><chunk bytes>...
-//	<uint32 BE: 0>                       ← terminator
-//	→  stream: OK\0                      ← clean
-//	→  stream: NAME FOUND\0              ← virus signature matched
-//
-// The daemon source we run (parisxmas/antivirus) accepts the same
-// format. We use a fresh connection per scan: simpler than pooling
-// and the per-call cost is one Unix-socket dial (~negligible).
+// API surface mirrors the previous daemon client so the call sites
+// in cmd/oximail/main.go, internal/smtp/smtp.go, and internal/webmail
+// don't need to change shape — only the implementation does.
 package av
 
 import (
-	"bufio"
 	"context"
-	"encoding/binary"
+	"crypto/sha256"
+	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
+	"os"
 	"strings"
-	"time"
 )
 
-// Verdict is the result of a single scan. Threat is the human-
-// readable signature name on a positive hit, empty on a clean
-// response. OK is the boolean view for callers that don't care
-// about the name.
+// Verdict is the result of a single scan. Threat is the human-readable
+// signature name on a positive hit; empty on a clean result. OK is the
+// boolean view for callers that don't care about the name.
 type Verdict struct {
 	OK     bool
 	Threat string
 }
 
-// ErrUnreachable is returned when the daemon socket can't be
-// dialed or the protocol exchange fails. Callers can decide
-// whether to fail open (log + accept) or fail closed (reject the
-// upload) based on their Required setting.
-var ErrUnreachable = errors.New("av: daemon unreachable")
+// ErrUnreachable is kept for source-level compatibility with the old
+// daemon-client API; the in-process scanner never returns it (there's
+// no network call to fail). Handlers branching on errors.Is(err, av.ErrUnreachable)
+// stay correct because they only run on a non-nil err, which we
+// don't produce on the happy path.
+var ErrUnreachable = errors.New("av: scanner unreachable")
 
-// Client speaks INSTREAM to a clamd-compatible daemon over a Unix
-// socket. Stateless and goroutine-safe — each Scan call opens its
-// own connection. A nil *Client never errors; Scan returns OK.
-// That null-object shape lets handlers gate AV-on/off purely via
-// "do we have a client" without conditional branching at every
-// call site.
+// builtinSigdb is the EICAR-only minimum that ships with every build.
+// More entries can be appended via OXIMAIL_AV_SIGDB; the parser is
+// the same shape.
+//
+//go:embed builtin.sigdb
+var builtinSigdb string
+
+// Client is the scanner. Stateless from the caller's perspective —
+// every Scan call hashes the payload and looks it up. The internal
+// signature table is read-only after construction; New is the only
+// writer, so reads need no locking.
+//
+// A nil *Client returns clean from Scan; the null-object idiom keeps
+// "AV disabled" branchless at every call site.
 type Client struct {
-	socket  string
-	timeout time.Duration
+	sigs map[[32]byte]string
 }
 
-// New returns a Client dialing the given Unix socket. An empty
-// socket path yields nil — the canonical "AV disabled" state.
-// Timeout is the per-scan deadline; zero defaults to 10s, which
-// fits an avd scan of a 25 MB attachment with plenty of margin
-// (typical real-world scan is ~50ms).
-func New(socket string, timeout time.Duration) *Client {
-	if socket == "" {
-		return nil
+// New constructs a scanner. The builtin signature set is always
+// loaded; extraPath, when non-empty, is read and merged on top —
+// duplicate hashes win for the later entry, which matches the
+// "operator override beats builtin" intent.
+//
+// An empty extraPath is fine; a non-existent extraPath errors. The
+// caller can choose to treat a missing extra DB as fatal or warn-and-
+// continue — main.go logs and continues, treating extra sigs as
+// strictly additive.
+func New(extraPath string) (*Client, error) {
+	c := &Client{sigs: make(map[[32]byte]string)}
+	if err := c.loadInto(c.sigs, builtinSigdb, "<builtin>"); err != nil {
+		// Shouldn't happen — the builtin file is in our own tree.
+		return nil, fmt.Errorf("av: load builtin sigs: %w", err)
 	}
-	if timeout <= 0 {
-		timeout = 10 * time.Second
+	if extraPath != "" {
+		raw, err := os.ReadFile(extraPath)
+		if err != nil {
+			return nil, fmt.Errorf("av: read %s: %w", extraPath, err)
+		}
+		if err := c.loadInto(c.sigs, string(raw), extraPath); err != nil {
+			return nil, fmt.Errorf("av: parse %s: %w", extraPath, err)
+		}
 	}
-	return &Client{socket: socket, timeout: timeout}
+	return c, nil
 }
 
-// Scan submits data to the daemon and returns the verdict. A nil
-// receiver short-circuits to a clean verdict — that's the "AV
-// disabled" path. Errors are exclusively transport-level
-// (ErrUnreachable wrapped); a daemon that replies with a virus
-// match returns no error, just Verdict{OK: false, Threat: name}.
+// SignatureCount returns the number of distinct hashes loaded. Useful
+// for the startup log so operators can confirm their extra DB landed.
+func (c *Client) SignatureCount() int {
+	if c == nil {
+		return 0
+	}
+	return len(c.sigs)
+}
+
+// Scan computes SHA-256(data) and returns a verdict. A nil receiver
+// (the "AV disabled" idiom) yields a clean verdict — handlers can
+// stay branchless.
+//
+// The ctx is honoured by the cheapest possible mechanism: a check at
+// entry and one at end. SHA-256 over a 25 MB attachment takes well
+// under 100 ms on any reasonable CPU, so finer-grained cancellation
+// would only ever masquerade as cancellation while the OS finishes
+// the in-flight hash anyway.
 func (c *Client) Scan(ctx context.Context, data []byte) (Verdict, error) {
 	if c == nil {
 		return Verdict{OK: true}, nil
 	}
-
-	deadline := time.Now().Add(c.timeout)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
+	if err := ctx.Err(); err != nil {
+		return Verdict{}, err
 	}
-
-	dialer := &net.Dialer{}
-	dctx, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
-	conn, err := dialer.DialContext(dctx, "unix", c.socket)
-	if err != nil {
-		return Verdict{}, fmt.Errorf("%w: dial %s: %v", ErrUnreachable, c.socket, err)
+	sum := sha256.Sum256(data)
+	if name, hit := c.sigs[sum]; hit {
+		return Verdict{OK: false, Threat: name}, nil
 	}
-	defer conn.Close()
-	_ = conn.SetDeadline(deadline)
-
-	// zINSTREAM\0 → tells the daemon "use null-terminated framing
-	// for the response", which is what our reader expects below.
-	if _, err := conn.Write([]byte("zINSTREAM\x00")); err != nil {
-		return Verdict{}, fmt.Errorf("%w: write command: %v", ErrUnreachable, err)
-	}
-
-	// Send the payload as a single big-endian length-prefixed
-	// chunk. clamd supports streaming chunks for memory-bounded
-	// scanning, but our caller has the whole attachment in memory
-	// already (decoded by handleSend), so one chunk is fine and
-	// avoids managing a chunked send loop.
-	var lenBuf [4]byte
-	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
-	if _, err := conn.Write(lenBuf[:]); err != nil {
-		return Verdict{}, fmt.Errorf("%w: write length: %v", ErrUnreachable, err)
-	}
-	if len(data) > 0 {
-		if _, err := conn.Write(data); err != nil {
-			return Verdict{}, fmt.Errorf("%w: write payload: %v", ErrUnreachable, err)
-		}
-	}
-	// Zero-length terminator marks end of stream.
-	for i := range lenBuf {
-		lenBuf[i] = 0
-	}
-	if _, err := conn.Write(lenBuf[:]); err != nil {
-		return Verdict{}, fmt.Errorf("%w: write terminator: %v", ErrUnreachable, err)
-	}
-
-	// Response: one null-terminated line. ReadString returns the
-	// bytes including the terminator; we trim it before parsing.
-	reader := bufio.NewReader(conn)
-	resp, err := reader.ReadString(0)
-	if err != nil {
-		return Verdict{}, fmt.Errorf("%w: read response: %v", ErrUnreachable, err)
-	}
-	resp = strings.TrimRight(resp, "\x00\r\n ")
-	return parseResponse(resp)
+	return Verdict{OK: true}, nil
 }
 
-// parseResponse turns a clamd reply into a Verdict. The format is
-// stable across implementations (clamav, clamdtop, our avd, etc.):
-//
-//	"stream: OK"                  → clean
-//	"stream: <name> FOUND"        → hit
-//	"stream: <text> ERROR"        → daemon-side error
-func parseResponse(resp string) (Verdict, error) {
-	const prefix = "stream: "
-	if !strings.HasPrefix(resp, prefix) {
-		return Verdict{}, fmt.Errorf("av: unexpected response %q", resp)
+// loadInto parses sigdb-formatted content (one `<sha256>:<name>` line
+// per signature; blank lines and `#`-prefixed comments skipped) and
+// merges into dst. Returns the first parse error verbatim so the
+// caller can surface the offending line.
+func (c *Client) loadInto(dst map[[32]byte]string, content, src string) error {
+	for i, raw := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		idx := strings.IndexByte(line, ':')
+		if idx <= 0 || idx == len(line)-1 {
+			return fmt.Errorf("%s:%d: want '<sha256>:<name>', got %q", src, i+1, line)
+		}
+		hashStr := strings.TrimSpace(line[:idx])
+		name := strings.TrimSpace(line[idx+1:])
+		if name == "" {
+			return fmt.Errorf("%s:%d: empty signature name", src, i+1)
+		}
+		bs, err := hex.DecodeString(hashStr)
+		if err != nil {
+			return fmt.Errorf("%s:%d: bad hex: %w", src, i+1, err)
+		}
+		if len(bs) != 32 {
+			return fmt.Errorf("%s:%d: sha256 must be 32 bytes, got %d", src, i+1, len(bs))
+		}
+		var key [32]byte
+		copy(key[:], bs)
+		dst[key] = name
 	}
-	body := resp[len(prefix):]
-	switch {
-	case body == "OK":
-		return Verdict{OK: true}, nil
-	case strings.HasSuffix(body, " FOUND"):
-		name := strings.TrimSuffix(body, " FOUND")
-		return Verdict{OK: false, Threat: name}, nil
-	case strings.HasSuffix(body, " ERROR"):
-		return Verdict{}, fmt.Errorf("av: daemon error: %s", body)
-	default:
-		return Verdict{}, fmt.Errorf("av: unparseable response %q", resp)
-	}
+	return nil
 }

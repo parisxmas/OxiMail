@@ -86,18 +86,16 @@ type Config struct {
 	// RspamdURL — content spam scanning over HTTP. Empty disables it.
 	RspamdURL string
 
-	// AVSocket is the Unix-socket path to a clamd-protocol antivirus
-	// daemon. Webmail compose dials it to scan outbound attachments
-	// before relay (Phase B in the AV plan). Empty disables the
-	// integration; rspamd's antivirus module (Phase A) is the
-	// inbound counterpart and lives at a different control surface.
-	AVSocket string
-	// AVRequired, when true, treats an unreachable AV daemon as a
-	// send-blocking failure: the webmail handler returns 502 and
-	// the attachment doesn't go out. When false (the default) an
-	// AV outage logs a warning but mail still ships — the
-	// receiver's AV catches anything we miss.
-	AVRequired bool
+	// AVSigDB optionally points at an extra signature database loaded
+	// alongside the builtin EICAR set. Format is the same one-line
+	// `<sha256>:<name>` text we use everywhere; comments and blank
+	// lines are skipped. Empty = just the builtin set.
+	//
+	// The AV scanner itself runs in-process inside oximail (no
+	// external daemon, no socket); operators extend coverage by
+	// dropping a sigdb file into a known path and pointing this
+	// env var at it.
+	AVSigDB string
 
 	// DNSBLZones is the comma-separated list of DNS blocklist zones
 	// queried at connection-time (see internal/spam/dnsbl.go). The
@@ -167,8 +165,7 @@ func Load() Config {
 		OxiDBHost:      env("OXIMAIL_OXIDB_HOST", "127.0.0.1"),
 		OxiDBPort:      envInt("OXIMAIL_OXIDB_PORT", 4444),
 		RspamdURL:      env("OXIMAIL_RSPAMD_URL", ""),
-		AVSocket:       env("OXIMAIL_AV_SOCKET", ""),
-		AVRequired:     envBool("OXIMAIL_AV_REQUIRED"),
+		AVSigDB:        env("OXIMAIL_AV_SIGDB", ""),
 		DNSBLZones:     splitCSV(envOrDefault("OXIMAIL_DNSBL_ZONES", "zen.spamhaus.org")),
 		GreylistDelay:  envDuration("OXIMAIL_GREYLIST_DELAY", time.Minute),
 		SRSSecret:      env("OXIMAIL_SRS_SECRET", ""),

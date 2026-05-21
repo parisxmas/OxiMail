@@ -33,6 +33,7 @@ import (
 	gosmtp "github.com/emersion/go-smtp"
 
 	"github.com/parisxmas/OxiMail/internal/arc"
+	"github.com/parisxmas/OxiMail/internal/av"
 	"github.com/parisxmas/OxiMail/internal/observability"
 	"github.com/parisxmas/OxiMail/internal/sieve"
 	"github.com/parisxmas/OxiMail/internal/spam"
@@ -102,13 +103,14 @@ type ForwarderConfig struct {
 // `hostname` in its greeting. A non-nil tlsConfig advertises STARTTLS.
 // `fwd` enables SRS-based alias forwarding to remote addresses; pass
 // the zero value to disable it.
-func New(addr, hostname string, st *store.Store, sp *spam.Pipeline, tlsConfig *tls.Config, fwd ForwarderConfig) *Server {
+func New(addr, hostname string, st *store.Store, sp *spam.Pipeline, avClient *av.Client, tlsConfig *tls.Config, fwd ForwarderConfig) *Server {
 	if fwd.ForwarderDomain == "" {
 		fwd.ForwarderDomain = hostname
 	}
 	be := &backend{
 		store:      st,
 		spam:       sp,
+		av:         avClient,
 		fwd:        fwd,
 		suppressor: vacation.NewSuppressor(7 * 24 * time.Hour),
 	}
@@ -165,6 +167,7 @@ func (s *Server) Stop() error {
 type backend struct {
 	store      *store.Store
 	spam       *spam.Pipeline
+	av         *av.Client
 	fwd        ForwarderConfig
 	suppressor *vacation.Suppressor
 }
@@ -343,6 +346,32 @@ func (s *session) Data(r io.Reader) error {
 			Code:         550,
 			EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
 			Message:      "Message rejected by local policy",
+		}
+	}
+
+	// AV scan — sits after the spam pipeline so policy-rejected
+	// mail doesn't burn the hash. A signature hit returns 550 with
+	// the threat name in the response; the receiving MX learns
+	// nothing about our signature DB beyond what's already public
+	// (EICAR + any operator-loaded list). nil av.Client is the
+	// "scanning disabled" idiom and short-circuits clean.
+	if av := s.backend.av; av != nil {
+		v, err := av.Scan(context.Background(), raw)
+		if err != nil {
+			log.Printf("smtp: av scan error: %v", err)
+			return &gosmtp.SMTPError{
+				Code:         451,
+				EnhancedCode: gosmtp.EnhancedCode{4, 7, 0},
+				Message:      "Temporary local problem, please try again later",
+			}
+		}
+		if !v.OK {
+			log.Printf("smtp: rejected message from <%s> — AV signature %q matched", s.from, v.Threat)
+			return &gosmtp.SMTPError{
+				Code:         550,
+				EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
+				Message:      "Virus signature detected: " + v.Threat,
+			}
 		}
 	}
 

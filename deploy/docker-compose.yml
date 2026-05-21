@@ -41,51 +41,6 @@ services:
       timeout: 2s
       retries: 12
 
-  avd:
-    # OxiMail antivirus daemon. Speaks the clamd wire protocol on a
-    # Unix socket; rspamd's `clamav` module dials it directly (see
-    # deploy/rspamd/local.d/antivirus.conf). Ships with the EICAR
-    # test signature out of the box so end-to-end probes pass on a
-    # fresh deploy; mount additional --hdb / --cvd / --ndb / --yara
-    # via the OXIMAIL_AV_EXTRA_ARGS env var to grow the detection
-    # set without rebuilding the image.
-    #
-    # Build context is a sibling clone of the antivirus repo on
-    # the deploy host — by convention /opt/antivirus next to
-    # /opt/oximail. Move them together when relocating.
-    build:
-      context: ../../antivirus
-    container_name: oximail-avd
-    restart: unless-stopped
-    environment:
-      - OXIMAIL_AV_EXTRA_ARGS=${OXIMAIL_AV_EXTRA_ARGS:-}
-      - RUST_LOG=${OXIMAIL_AV_LOG:-info}
-    volumes:
-      # Shared socket dir. Both avd (writer) and rspamd (reader)
-      # mount this volume at /run/avd; avd creates avd.sock there
-      # with umask 000 so the rspamd uid can dial it.
-      - avd-socket:/run/avd
-      # External signature databases. The image ships only the
-      # EICAR built-in; for real-world coverage the operator
-      # syncs ClamAV's main.cvd (~85MB, ~6M signatures) and
-      # optionally daily.cvd / bytecode.cvd into this directory
-      # on the host, then sets OXIMAIL_AV_EXTRA_ARGS in .env
-      # to point --cvd / --hdb at them.
-      - ${OXIMAIL_AV_SIGS_DIR:-/opt/avd-sigs}:/etc/avd/extra:ro
-    networks:
-      - oximail
-    healthcheck:
-      # `test -S` succeeds iff the path exists and is a Unix socket.
-      # avd creates the socket as the first thing it does after the
-      # signature load, so this also gates "signatures are loaded".
-      # A protocol-level PING probe would be richer but needs nc /
-      # socat in the runtime image, which we'd rather not ship.
-      test: ["CMD-SHELL", "test -S /run/avd/avd.sock"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 4s
-
   rspamd:
     # Content scanner. Empty OXIMAIL_RSPAMD_URL on the oximail side
     # disables the integration, so this sidecar is opt-in at the
@@ -99,13 +54,6 @@ services:
     image: rspamd/rspamd:latest
     container_name: oximail-rspamd
     restart: unless-stopped
-    depends_on:
-      avd:
-        # Wait for the AV daemon to be ready so the first
-        # /checkv2 call doesn't surface a connection-refused on
-        # the clamav backend. Rspamd handles per-call retries, but
-        # a clean startup keeps the logs quiet.
-        condition: service_healthy
     networks:
       - oximail
     volumes:
@@ -113,15 +61,6 @@ services:
       # container restarts. Without this, every restart wipes the
       # adaptive parts and quality slowly degrades.
       - rspamd-data:/var/lib/rspamd
-      # Shared AV socket — same volume avd publishes on. Read-only
-      # from rspamd's side: it dials but doesn't create anything.
-      - avd-socket:/run/avd:ro
-      # Antivirus module config + symbol score table. Mounted into
-      # local.d/ so the upstream rspamd image picks them up alongside
-      # the baseline defaults without us shipping a fork or a
-      # custom image.
-      - ./rspamd/local.d/antivirus.conf:/etc/rspamd/local.d/antivirus.conf:ro
-      - ./rspamd/local.d/groups.conf:/etc/rspamd/local.d/groups.conf:ro
     healthcheck:
       # Use bash explicitly: the Debian slim base ships dash as
       # /bin/sh and dash has no /dev/tcp builtin. 11334 is the
@@ -177,20 +116,11 @@ services:
       # wires the inbound spam pipeline to it. Set this to empty
       # in your .env to disable scanning entirely.
       - OXIMAIL_RSPAMD_URL=${OXIMAIL_RSPAMD_URL-http://rspamd:11333}
-      # Outbound AV: oximail dials the avd sidecar over a Unix
-      # socket to scan webmail compose attachments before relay.
-      # Empty value disables the integration (mail goes out
-      # unscanned). The default below assumes the avd sidecar
-      # is present per deploy/docker-compose.yml.
-      - OXIMAIL_AV_SOCKET=${OXIMAIL_AV_SOCKET-/run/avd/avd.sock}
-      # When true, an unreachable / broken avd causes outbound
-      # webmail sends to fail with a 502; when false (default),
-      # avd outages log a warning but mail still goes out. The
-      # tradeoff is "block legit sends during an outage" vs
-      # "accept the rare moment a virus slips through during a
-      # 30-second avd restart". Default leans on Phase A
-      # (rspamd) as the catch-net on the receiver's side too.
-      - OXIMAIL_AV_REQUIRED=${OXIMAIL_AV_REQUIRED-false}
+      # AV scanner runs in-process — no daemon, no socket. By
+      # default the oximail binary ships the EICAR test signature
+      # so a fresh deploy is virus-aware. Setting OXIMAIL_AV_SIGDB
+      # to a file path mounts an operator-extended list on top.
+      - OXIMAIL_AV_SIGDB=${OXIMAIL_AV_SIGDB-}
     ports:
       - "25:25"        # SMTP MX (inbound)
       - "465:465"      # SMTPS submission
@@ -202,12 +132,10 @@ services:
       - "9090:9090"    # /metrics, /healthz, /readyz
     volumes:
       - oximail-acme:/var/lib/oximail/acme-cache
-      # AV daemon socket — read-only mount from the shared
-      # avd-socket volume. internal/av in oximail dials
-      # /run/avd/avd.sock to scan outbound webmail attachments
-      # before they leave the host. Rspamd (Phase A) handles
-      # inbound; this is the symmetric outbound guard.
-      - avd-socket:/run/avd:ro
+      # Optional extra AV signature database. When the operator
+      # sets OXIMAIL_AV_SIGDB, mount the host path here so the
+      # in-process scanner can load it alongside the builtin set.
+      # No mount needed for the EICAR-only default.
     networks:
       - oximail
 
@@ -215,12 +143,6 @@ volumes:
   oxidb-data:
   oximail-acme:
   rspamd-data:
-  # tmpfs-style volume shared between avd (creator) and rspamd
-  # (consumer) for the AV daemon's Unix socket. Lives only on
-  # the docker host's filesystem; nothing on it survives a
-  # `docker compose down -v`, which is fine because the socket
-  # is recreated at avd startup.
-  avd-socket:
 
 networks:
   oximail:

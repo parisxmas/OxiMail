@@ -2,235 +2,164 @@ package av
 
 import (
 	"context"
-	"encoding/binary"
-	"errors"
-	"io"
-	"net"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
-	"sync"
+	"strings"
 	"testing"
-	"time"
 )
 
-// fakeDaemon is a stand-in clamd-protocol server we drive in
-// tests. It accepts INSTREAM (only — Scan never sends anything
-// else), captures the streamed payload, and replies with the
-// scripted Verdict response. fakeDaemon.respond is set by each
-// test; the default is "stream: OK".
-type fakeDaemon struct {
-	t      *testing.T
-	socket string
+// eicar is the canonical EICAR antivirus test string. Its sha256 lives
+// in builtin.sigdb so a fresh New() recognises it without operator
+// input; the tests below pin both ends of that contract.
+var eicar = []byte("X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*")
 
-	mu          sync.Mutex
-	lastPayload []byte
-	respond     string // "stream: OK" / "stream: NAME FOUND" / "stream: bad ERROR"
-	hangup      bool   // when true, close the conn before sending a reply (transport error)
-
-	listener net.Listener
-	done     chan struct{}
-}
-
-func newFakeDaemon(t *testing.T) *fakeDaemon {
-	t.Helper()
-	dir := t.TempDir()
-	sock := filepath.Join(dir, "avd.sock")
-	l, err := net.Listen("unix", sock)
+func TestNewLoadsBuiltinEicar(t *testing.T) {
+	c, err := New("")
 	if err != nil {
-		t.Fatalf("listen unix: %v", err)
+		t.Fatalf("New: %v", err)
 	}
-	f := &fakeDaemon{
-		t:        t,
-		socket:   sock,
-		respond:  "stream: OK",
-		listener: l,
-		done:     make(chan struct{}),
+	if n := c.SignatureCount(); n < 1 {
+		t.Errorf("SignatureCount = %d, want >= 1 (builtin sigdb)", n)
 	}
-	go f.accept()
-	t.Cleanup(func() {
-		_ = l.Close()
-		_ = os.Remove(sock)
-		<-f.done
-	})
-	return f
-}
-
-func (f *fakeDaemon) accept() {
-	defer close(f.done)
-	for {
-		conn, err := f.listener.Accept()
-		if err != nil {
-			return
-		}
-		go f.handle(conn)
-	}
-}
-
-func (f *fakeDaemon) handle(conn net.Conn) {
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-
-	// First nine bytes are "zINSTREAM\0".
-	hdr := make([]byte, 10)
-	if _, err := io.ReadFull(conn, hdr); err != nil {
-		return
-	}
-	if string(hdr) != "zINSTREAM\x00" {
-		return
-	}
-
-	// Stream loop: 4-byte length, then N bytes, until length == 0.
-	var collected []byte
-	for {
-		var lb [4]byte
-		if _, err := io.ReadFull(conn, lb[:]); err != nil {
-			return
-		}
-		n := binary.BigEndian.Uint32(lb[:])
-		if n == 0 {
-			break
-		}
-		buf := make([]byte, n)
-		if _, err := io.ReadFull(conn, buf); err != nil {
-			return
-		}
-		collected = append(collected, buf...)
-	}
-
-	f.mu.Lock()
-	f.lastPayload = collected
-	hangup := f.hangup
-	resp := f.respond
-	f.mu.Unlock()
-
-	if hangup {
-		return
-	}
-	_, _ = conn.Write([]byte(resp + "\x00"))
-}
-
-func TestScanClean(t *testing.T) {
-	f := newFakeDaemon(t)
-	f.mu.Lock()
-	f.respond = "stream: OK"
-	f.mu.Unlock()
-
-	c := New(f.socket, time.Second)
-	v, err := c.Scan(context.Background(), []byte("hello, world"))
-	if err != nil {
-		t.Fatalf("Scan: %v", err)
-	}
-	if !v.OK {
-		t.Errorf("OK = false, want true")
-	}
-	if v.Threat != "" {
-		t.Errorf("Threat = %q, want empty", v.Threat)
-	}
-	if got := string(f.lastPayload); got != "hello, world" {
-		t.Errorf("daemon got %q, want %q", got, "hello, world")
-	}
-}
-
-func TestScanFound(t *testing.T) {
-	f := newFakeDaemon(t)
-	f.mu.Lock()
-	f.respond = "stream: EICAR-Test-File FOUND"
-	f.mu.Unlock()
-
-	c := New(f.socket, time.Second)
-	v, err := c.Scan(context.Background(), []byte("eicar bytes here"))
+	v, err := c.Scan(context.Background(), eicar)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
 	if v.OK {
-		t.Errorf("OK = true, want false for FOUND")
+		t.Error("EICAR scan returned OK; builtin signature should match")
 	}
 	if v.Threat != "EICAR-Test-File" {
 		t.Errorf("Threat = %q, want EICAR-Test-File", v.Threat)
 	}
 }
 
-func TestScanMultiWordThreat(t *testing.T) {
-	// Daemon-side names can include spaces — the parser must
-	// preserve them and only strip the trailing " FOUND".
-	f := newFakeDaemon(t)
-	f.mu.Lock()
-	f.respond = "stream: Win.Trojan.Generic Sample FOUND"
-	f.mu.Unlock()
-
-	c := New(f.socket, time.Second)
-	v, err := c.Scan(context.Background(), []byte("x"))
+func TestScanCleanIsOK(t *testing.T) {
+	c, err := New("")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	v, err := c.Scan(context.Background(), []byte("hello, world — clean as a whistle"))
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	if v.Threat != "Win.Trojan.Generic Sample" {
-		t.Errorf("Threat = %q, want full multi-word name", v.Threat)
+	if !v.OK {
+		t.Errorf("clean payload returned OK=false (threat=%q)", v.Threat)
 	}
 }
 
-func TestScanError(t *testing.T) {
-	// Daemon reports a scan-level error (corrupt input, etc.).
-	// We surface it as a Go error, not a silent clean verdict —
-	// the caller chooses fail-open vs fail-closed.
-	f := newFakeDaemon(t)
-	f.mu.Lock()
-	f.respond = "stream: PARSE FAILED ERROR"
-	f.mu.Unlock()
-
-	c := New(f.socket, time.Second)
-	_, err := c.Scan(context.Background(), []byte("x"))
-	if err == nil {
-		t.Fatal("expected error on daemon ERROR response")
-	}
-}
-
-func TestScanUnreachable(t *testing.T) {
-	// Socket path that doesn't exist — must error with
-	// ErrUnreachable so handlers can branch on fail-open vs
-	// fail-closed by checking errors.Is.
-	c := New("/no/such/socket/avd.sock", 200*time.Millisecond)
-	_, err := c.Scan(context.Background(), []byte("x"))
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !errors.Is(err, ErrUnreachable) {
-		t.Errorf("err = %v, want ErrUnreachable", err)
-	}
-}
-
-func TestScanHangup(t *testing.T) {
-	// Daemon closes the connection mid-protocol. Same fail-open /
-	// fail-closed surface as a hard unreachable: wrapped under
-	// ErrUnreachable.
-	f := newFakeDaemon(t)
-	f.mu.Lock()
-	f.hangup = true
-	f.mu.Unlock()
-
-	c := New(f.socket, 500*time.Millisecond)
-	_, err := c.Scan(context.Background(), []byte("x"))
-	if err == nil {
-		t.Fatal("expected error on early hangup")
-	}
-	if !errors.Is(err, ErrUnreachable) {
-		t.Errorf("err = %v, want wrapped ErrUnreachable", err)
-	}
-}
-
-func TestNewDisabled(t *testing.T) {
-	// Empty socket path → nil client, which is the "AV disabled"
-	// idiom. Scan on a nil receiver short-circuits to clean.
-	c := New("", 0)
-	if c != nil {
-		t.Fatal("New(\"\") should return nil")
-	}
-	// nil.Scan is the documented contract; calling it should not
-	// panic and should return clean.
-	v, err := c.Scan(context.Background(), []byte("anything"))
+func TestNilClientIsClean(t *testing.T) {
+	// nil *Client is the "AV disabled" idiom — every scan clean,
+	// no panic. Handlers consume this branchless.
+	var c *Client
+	v, err := c.Scan(context.Background(), eicar)
 	if err != nil {
 		t.Fatalf("nil.Scan: %v", err)
 	}
 	if !v.OK {
-		t.Errorf("nil.Scan OK = false, want true")
+		t.Error("nil scanner should always return OK")
 	}
+}
+
+func TestLoadExtraSignatures(t *testing.T) {
+	// Operator-provided sigdb at OXIMAIL_AV_SIGDB is loaded on top
+	// of the builtin. Add a fabricated hash and confirm Scan finds
+	// it under the operator's chosen name.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "extra.sigdb")
+	// Hash of the string "totally-not-malware" — a known sha256.
+	custom := "totally-not-malware"
+	// Trying to keep the test data self-describing: we declare what
+	// we're matching against, then bake the hash inline.
+	knownHash := sha256OfString(custom)
+	if err := os.WriteFile(path,
+		[]byte("# test extra\n"+knownHash+":TEST-CUSTOM-HIT\n"), 0o644); err != nil {
+		t.Fatalf("write extra sigdb: %v", err)
+	}
+	c, err := New(path)
+	if err != nil {
+		t.Fatalf("New(extra): %v", err)
+	}
+	if n := c.SignatureCount(); n < 2 {
+		t.Errorf("SignatureCount = %d, want >= 2 (builtin + extra)", n)
+	}
+	v, err := c.Scan(context.Background(), []byte(custom))
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if v.OK || v.Threat != "TEST-CUSTOM-HIT" {
+		t.Errorf("custom hash didn't match: %+v", v)
+	}
+	// Builtin EICAR still works with the extra DB loaded — the
+	// override semantics are additive, not replace.
+	v2, _ := c.Scan(context.Background(), eicar)
+	if v2.OK {
+		t.Error("EICAR no longer matches after loading extra sigdb")
+	}
+}
+
+func TestLoadMissingExtraErrors(t *testing.T) {
+	// A non-existent extra path is a real error — operator
+	// misconfigured the env var. Better to fail loudly than
+	// silently skip the file they thought they were loading.
+	if _, err := New("/no/such/file.sigdb"); err == nil {
+		t.Fatal("expected error for missing extra sigdb")
+	}
+}
+
+func TestLoadRejectsMalformedLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.sigdb")
+	if err := os.WriteFile(path, []byte("nothex:Name\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := New(path)
+	if err == nil {
+		t.Fatal("expected parse error for non-hex sha256")
+	}
+	if !strings.Contains(err.Error(), "bad hex") {
+		t.Errorf("error %q should mention 'bad hex'", err)
+	}
+}
+
+func TestLoadIgnoresCommentsAndBlanks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tidy.sigdb")
+	content := `
+# header comment
+   # indented comment
+
+` + sha256OfString("payload-x") + `:Trojan.X
+
+# trailing
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	c, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	v, _ := c.Scan(context.Background(), []byte("payload-x"))
+	if v.OK || v.Threat != "Trojan.X" {
+		t.Errorf("verdict = %+v, want hit on Trojan.X", v)
+	}
+}
+
+func TestScanCtxCancelled(t *testing.T) {
+	c, _ := New("")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.Scan(ctx, eicar); err == nil {
+		t.Error("expected cancelled-context error")
+	}
+}
+
+// sha256OfString returns the lowercase-hex sha256 of s. Inline helper
+// so the test data above stays "what we're matching against" rather
+// than a free-floating hex blob.
+func sha256OfString(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }

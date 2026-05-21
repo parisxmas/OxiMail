@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/parisxmas/OxiMail/internal/av"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
@@ -730,16 +729,16 @@ func (s *Server) loadOwnedMessage(w http.ResponseWriter, r *http.Request, acc *s
 }
 
 // scanAttachmentsOrError runs every attachment through the AV
-// daemon and turns the result into an HTTP-status + message pair.
-// Returns ok = true on clean / disabled-AV / fail-open paths.
-// Returns ok = false with an appropriate status code on:
+// scanner and turns the result into an HTTP-status + message pair.
+// Returns ok = true on clean / disabled-AV paths. Returns ok =
+// false with an appropriate status code on:
 //
-//   - virus hit: 400 + signature name
-//   - daemon unreachable AND avRequired: 502 + diagnostic
+//   - virus hit:     400 + signature name
+//   - scan failure:  502 + diagnostic
 //
 // When AV is disabled (s.av == nil) the scan is a no-op and the
-// function always returns ok = true — the null-object shape
-// from internal/av flows all the way through.
+// function always returns ok = true — the null-object shape from
+// internal/av flows all the way through.
 func (s *Server) scanAttachmentsOrError(ctx context.Context, atts []attachment) (int, string, bool) {
 	if s.av == nil || len(atts) == 0 {
 		return 0, "", true
@@ -747,13 +746,6 @@ func (s *Server) scanAttachmentsOrError(ctx context.Context, atts []attachment) 
 	for i, a := range atts {
 		v, err := s.av.Scan(ctx, a.Content)
 		if err != nil {
-			if errors.Is(err, av.ErrUnreachable) && !s.avRequired {
-				// Fail-open: log and let the message ship. The
-				// receiver's AV is the catch-net.
-				log.Printf("webmail: AV unreachable, attachment %d (%q) passed without scan: %v",
-					i, a.Filename, err)
-				continue
-			}
 			return http.StatusBadGateway,
 				fmt.Sprintf("attachment %d (%q): antivirus scan failed: %v", i, a.Filename, err),
 				false

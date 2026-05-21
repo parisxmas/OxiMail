@@ -486,7 +486,7 @@ func startSMTP(t *testing.T, st *store.Store) string {
 func startSMTPWithForwarder(t *testing.T, st *store.Store, fwd smtp.ForwarderConfig) string {
 	t.Helper()
 	addr := fmt.Sprintf("127.0.0.1:%d", itest.FreePort(t))
-	srv := smtp.New(addr, "oximail.test", st, spam.Permissive(), nil, fwd)
+	srv := smtp.New(addr, "oximail.test", st, spam.Permissive(), nil, nil, fwd)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)

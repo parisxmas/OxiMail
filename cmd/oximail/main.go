@@ -84,21 +84,22 @@ func main() {
 	// Components, in start order. The implicit-TLS surfaces are only
 	// brought up when a certificate is configured.
 	pipeline := spam.New(cfg.RspamdURL, cfg.DNSBLZones, cfg.GreylistDelay)
-	avClient := av.New(cfg.AVSocket, 0)
-	if avClient != nil {
-		log.Printf("AV: outbound attachment scanning enabled — socket=%s required=%v",
-			cfg.AVSocket, cfg.AVRequired)
+	avClient, err := av.New(cfg.AVSigDB)
+	if err != nil {
+		log.Fatalf("av: %v", err)
 	}
+	log.Printf("AV: in-process scanner ready — signatures=%d extra_db=%q",
+		avClient.SignatureCount(), cfg.AVSigDB)
 	webmailSrv := webmail.New(cfg.WebmailAddr, cfg.WebmailStatic, st, tlsConfig, webmail.MTASTSPolicy{
 		Mode:   cfg.MTASTSMode,
 		MX:     mtastsMX(cfg),
 		MaxAge: cfg.MTASTSMaxAge,
 	})
-	webmailSrv.SetAV(avClient, cfg.AVRequired)
+	webmailSrv.SetAV(avClient)
 	components := []named{
 		{"observability", observability.New(cfg.MetricsAddr, st)},
 		{"spam", pipeline},
-		{"smtp", smtp.New(cfg.SMTPAddr, cfg.Hostname, st, pipeline, tlsConfig, fwd)},
+		{"smtp", smtp.New(cfg.SMTPAddr, cfg.Hostname, st, pipeline, avClient, tlsConfig, fwd)},
 		{"submission", smtp.NewSubmission(cfg.SubmissionAddr, cfg.Hostname, st, tlsConfig)},
 		{"imap", imap.New(cfg.IMAPAddr, st, tlsConfig)},
 		{"webmail", webmailSrv},

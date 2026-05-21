@@ -1,0 +1,12 @@
+# OxiMail antivirus — built-in signature set.
+#
+# Format: <sha256-hex>:<signature-name>
+# Comments (#) and blank lines are skipped.
+#
+# Embedded into the oximail binary via //go:embed so a fresh build
+# is virus-aware on the EICAR test signature without any external
+# database. Operators can layer additional hashes by setting
+# OXIMAIL_AV_SIGDB to a file path; the contents are loaded
+# alongside this builtin set.
+
+275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f:EICAR-Test-File
