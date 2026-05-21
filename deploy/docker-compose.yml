@@ -71,11 +71,13 @@ services:
       - ./rspamd/local.d:/etc/rspamd/local.d:ro
     healthcheck:
       # Use bash explicitly: the Debian slim base ships dash as
-      # /bin/sh and dash has no /dev/tcp builtin. 11334 is the
-      # controller worker; rspamd boots it after the main
-      # /checkv2 worker, so this also gates "ready to accept
-      # scans" reasonably well.
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/11334"]
+      # /bin/sh and dash has no /dev/tcp builtin. 11333 is the
+      # normal worker (the /checkv2 endpoint the spam pipeline
+      # POSTs to). Probing it directly is more accurate than the
+      # controller-port probe we used before — and we've since
+      # disabled the controller worker for memory reasons, so
+      # this is the only listener left.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/11333"]
       interval: 10s
       timeout: 3s
       retries: 6
