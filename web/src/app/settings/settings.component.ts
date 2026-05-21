@@ -222,6 +222,70 @@ import { AccountProfile, ApiService, SieveScript, VacationRule } from '../api.se
         </section>
       } @else {
         <section class="card">
+          <h2>Add a filter</h2>
+          <p class="hint">
+            Build one rule with the dropdowns. The "Add to script"
+            button appends the equivalent Sieve to the editor below,
+            where you can review or hand-edit. Stack multiple rules
+            by clicking Add repeatedly.
+          </p>
+          <div class="rule-builder">
+            <label class="rb-field">
+              <span class="label-text">When</span>
+              <select [(ngModel)]="rbField" name="rb-field">
+                <option value="From">From</option>
+                <option value="To">To</option>
+                <option value="Cc">Cc</option>
+                <option value="Subject">Subject</option>
+              </select>
+            </label>
+            <label class="rb-field">
+              <span class="label-text">{{ ' ' }}</span>
+              <select [(ngModel)]="rbOp" name="rb-op">
+                <option value="contains">contains</option>
+                <option value="matches">matches (use * wildcard)</option>
+                <option value="is">is exactly</option>
+              </select>
+            </label>
+            <label class="rb-field rb-grow">
+              <span class="label-text">value</span>
+              <input
+                type="text"
+                placeholder="e.g. alice@example.com"
+                [(ngModel)]="rbValue"
+                name="rb-value"
+              />
+            </label>
+            <label class="rb-field">
+              <span class="label-text">then</span>
+              <select [(ngModel)]="rbAction" name="rb-action">
+                <option value="move">Move to folder…</option>
+                <option value="delete">Delete (discard)</option>
+              </select>
+            </label>
+            @if (rbAction() === 'move') {
+              <label class="rb-field rb-grow">
+                <span class="label-text">folder</span>
+                <input
+                  type="text"
+                  placeholder="e.g. DMARC reports"
+                  [(ngModel)]="rbTarget"
+                  name="rb-target"
+                />
+              </label>
+            }
+          </div>
+          @if (rbError()) {
+            <p class="error">{{ rbError() }}</p>
+          }
+          <footer>
+            <button type="button" class="primary" (click)="appendRule()">
+              Add to script
+            </button>
+          </footer>
+        </section>
+
+        <section class="card">
           <h2>Filter rules (Sieve)</h2>
           <p class="hint">
             Sieve scripts run at delivery time. The supported subset covers
@@ -295,6 +359,14 @@ import { AccountProfile, ApiService, SieveScript, VacationRule } from '../api.se
     .ok { margin: 0; color: var(--accent); font-size: 13px; }
     footer { display: flex; justify-content: flex-end; gap: 8px; }
     .danger { color: var(--danger); }
+    /* Rule-builder form: dropdowns + value input + folder input on a
+       wrapping flex row. rb-grow lets the value / folder inputs
+       expand to fill the remaining horizontal space; the dropdowns
+       keep their natural width. */
+    .rule-builder { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+    .rb-field { flex: 0 0 auto; min-width: 120px; }
+    .rb-field.rb-grow { flex: 1 1 200px; }
+    .rb-field select, .rb-field input { padding: 6px 8px; }
   `,
 })
 export class SettingsComponent {
@@ -345,6 +417,18 @@ export class SettingsComponent {
   readonly sieveBusy = signal(false);
   readonly sieveError = signal('');
   readonly sieveSavedAt = signal<number>(0);
+
+  // Rule-builder form state. The fields drive a tiny single-condition
+  // Sieve compiler in appendRule(); the output is just glued onto the
+  // bottom of sieveSource so the user can review / hand-edit before
+  // hitting Save. We don't auto-save — keeps the existing Save button
+  // the only path that talks to the server.
+  rbField: 'From' | 'To' | 'Cc' | 'Subject' = 'From';
+  rbOp: 'contains' | 'matches' | 'is' = 'contains';
+  rbValue = '';
+  readonly rbAction = signal<'move' | 'delete'>('move');
+  rbTarget = '';
+  readonly rbError = signal('');
 
   ngOnInit(): void {
     // Load profile up front: it's the default tab, so the user
@@ -469,6 +553,59 @@ export class SettingsComponent {
     });
   }
 
+  // appendRule compiles the rule-builder form into a Sieve if-block
+  // and appends it to the script textarea. We do NOT save here —
+  // the user reviews the script in the editor and hits Save when
+  // ready. That keeps the form a strict authoring helper, never an
+  // auto-pusher behind the user's back.
+  //
+  // The compiled output has the same structure no matter what the
+  // user picked: one `if header :OP "FIELD" "VALUE" { ACTIONS }`.
+  // ACTIONS is `fileinto "X"; stop;` for Move or `discard;` for
+  // Delete. `stop` after fileinto keeps later rules from also
+  // touching the message — gmail behaviour for explicit filters.
+  appendRule(): void {
+    this.rbError.set('');
+    const value = this.rbValue.trim();
+    if (!value) {
+      this.rbError.set('Enter a value to match against.');
+      return;
+    }
+    let actions: string;
+    if (this.rbAction() === 'move') {
+      const target = this.rbTarget.trim();
+      if (!target) {
+        this.rbError.set('Enter a folder to move matching mail into.');
+        return;
+      }
+      actions = `    fileinto "${escapeSieve(target)}";\n    stop;`;
+    } else {
+      actions = `    discard;`;
+    }
+    const block =
+      `\n# Rule: ${this.rbField} ${this.rbOp} ${truncate(value, 60)}\n` +
+      `if header :${this.rbOp} "${this.rbField}" "${escapeSieve(value)}" {\n` +
+      `${actions}\n` +
+      `}\n`;
+
+    // Make sure the script has the right require[] line — appending a
+    // fileinto needs `require ["fileinto"];` at the top, otherwise
+    // the server-side parser rejects the whole script. If the user
+    // has no script yet, we seed one with the right require.
+    let next = this.sieveSource;
+    const needsFileinto = this.rbAction() === 'move' && !/require\s*\[[^\]]*"fileinto"/.test(next);
+    if (needsFileinto) {
+      next = `require ["fileinto"];\n` + next;
+    }
+    this.sieveSource = (next + block).replace(/\n{3,}/g, '\n\n');
+
+    // Clear the value/target so a repeat Add doesn't accidentally
+    // duplicate the same rule on a stray click. Leave field/op/action
+    // alone since users often build several rules of the same shape.
+    this.rbValue = '';
+    this.rbTarget = '';
+  }
+
   // saveProfile sends the (possibly empty) display name to the server.
   // We don't validate length client-side beyond the maxlength=80 the
   // input already enforces; the server's normaliser is authoritative
@@ -507,4 +644,19 @@ export class SettingsComponent {
       },
     });
   }
+}
+
+// escapeSieve escapes the two characters that have meaning inside a
+// Sieve quoted-string: backslash and double-quote. RFC 5228 §2.4.2.1.
+// Anything else (including non-ASCII) is fine as raw bytes.
+function escapeSieve(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+// truncate returns at most n chars, with an ellipsis when clipped.
+// Used only for human-readable comments in the generated Sieve, so
+// the rule-list header reads "Rule: From contains alice…" instead
+// of the full pasted value if it's a paragraph.
+function truncate(s: string, n: number): string {
+  return s.length <= n ? s : s.slice(0, n - 1) + '…';
 }
