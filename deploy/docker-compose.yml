@@ -41,6 +41,37 @@ services:
       timeout: 2s
       retries: 12
 
+  rspamd:
+    # Content scanner. Empty OXIMAIL_RSPAMD_URL on the oximail side
+    # disables the integration, so this sidecar is opt-in at the
+    # url level — but defaulting both the container AND the url
+    # makes a fresh deploy spam-aware out of the box.
+    #
+    # The default config is permissive (no DKIM/SPF rejects, no
+    # bayes training out of the box) — we lean on Rspamd's mime
+    # heuristics, fuzzy, surbl, and phishing modules to flag
+    # obvious malware attachments and known-bad URLs.
+    image: rspamd/rspamd:latest
+    container_name: oximail-rspamd
+    restart: unless-stopped
+    networks:
+      - oximail
+    volumes:
+      # Persist learned bayes + history + neural data across
+      # container restarts. Without this, every restart wipes the
+      # adaptive parts and quality slowly degrades.
+      - rspamd-data:/var/lib/rspamd
+    healthcheck:
+      # Use bash explicitly: the Debian slim base ships dash as
+      # /bin/sh and dash has no /dev/tcp builtin. 11334 is the
+      # controller worker; rspamd boots it after the main
+      # /checkv2 worker, so this also gates "ready to accept
+      # scans" reasonably well.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/11334"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
   oximail:
     build:
       context: ..
@@ -49,6 +80,12 @@ services:
     restart: unless-stopped
     depends_on:
       oxidb:
+        condition: service_healthy
+      rspamd:
+        # Not strictly required — the spam.New pipeline fails open
+        # when Rspamd is unreachable — but waiting for healthy
+        # avoids a few seconds of "every message bypasses the
+        # filter" right after a cold start.
         condition: service_healthy
     environment:
       # Server identity + storage wiring.
@@ -74,6 +111,11 @@ services:
       # 0 OXIMAIL_GREYLIST_DELAY disables greylisting.
       - OXIMAIL_DNSBL_ZONES=${OXIMAIL_DNSBL_ZONES-zen.spamhaus.org}
       - OXIMAIL_GREYLIST_DELAY=${OXIMAIL_GREYLIST_DELAY:-1m}
+      # Content scanner. The rspamd sidecar above is started
+      # automatically; OXIMAIL_RSPAMD_URL=http://rspamd:11333
+      # wires the inbound spam pipeline to it. Set this to empty
+      # in your .env to disable scanning entirely.
+      - OXIMAIL_RSPAMD_URL=${OXIMAIL_RSPAMD_URL-http://rspamd:11333}
     ports:
       - "25:25"        # SMTP MX (inbound)
       - "465:465"      # SMTPS submission
@@ -91,6 +133,7 @@ services:
 volumes:
   oxidb-data:
   oximail-acme:
+  rspamd-data:
 
 networks:
   oximail:

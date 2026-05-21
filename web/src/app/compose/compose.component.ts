@@ -11,6 +11,28 @@ import { ApiService, AttachmentUpload } from '../api.service';
 // round-trip.
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
+// BLOCKED_ATTACHMENT_EXTENSIONS mirrors blockedAttachmentExts in
+// internal/webmail/handlers.go. Surfacing the same list client-side
+// turns a "Send pressed → 400 from server" round-trip into an
+// inline error the moment the user picks the file. If the two
+// lists ever drift, the server is authoritative — the SPA is just a
+// fast feedback layer.
+const BLOCKED_ATTACHMENT_EXTENSIONS = new Set<string>([
+  '.exe', '.bat', '.cmd', '.com', '.scr', '.pif', '.lnk',
+  '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.hta',
+  '.jar', '.ps1', '.ps2', '.msi', '.msp',
+  '.iso', '.img', '.vhd', '.vhdx',
+  '.docm', '.dotm', '.xlsm', '.xltm', '.xlsb',
+  '.pptm', '.potm', '.ppam',
+]);
+
+function blockedAttachmentExtension(filename: string): string | null {
+  const dot = filename.lastIndexOf('.');
+  if (dot < 0 || dot === filename.length - 1) return null;
+  const ext = filename.substring(dot).toLowerCase();
+  return BLOCKED_ATTACHMENT_EXTENSIONS.has(ext) ? ext : null;
+}
+
 // ComposeSeed pre-populates the dialog: reply / forward callers fill
 // the threading fields, draft-resume callers fill the id.
 export interface ComposeSeed {
@@ -486,6 +508,14 @@ export class ComposeComponent {
     let total = this.totalAttachmentBytes();
     const additions: PendingAttachment[] = [];
     for (const f of files) {
+      const blockedExt = blockedAttachmentExtension(f.name);
+      if (blockedExt) {
+        this.error.set(
+          `Attachment "${f.name}" is blocked (${blockedExt} files are a common malware vector). ` +
+            `Wrap it in a zip if you really need to send it.`,
+        );
+        return;
+      }
       if (total + f.size > MAX_ATTACHMENT_BYTES) {
         this.error.set(
           `Attachment "${f.name}" pushes total over ${formatBytesStatic(MAX_ATTACHMENT_BYTES)}. ` +

@@ -508,6 +508,12 @@ func decodeAttachments(in []attachmentInput) ([]attachment, error) {
 	total := 0
 	out := make([]attachment, 0, len(in))
 	for i, a := range in {
+		if ext, blocked := blockedAttachmentExtension(a.Filename); blocked {
+			return nil, fmt.Errorf(
+				"attachment %d (%q): %s files are blocked — common malware vector. "+
+					"Wrap the file in a zip if you really need to send it.",
+				i, a.Filename, ext)
+		}
 		bytes, err := base64.StdEncoding.DecodeString(a.Data)
 		if err != nil {
 			return nil, fmt.Errorf("attachment %d (%q): not valid base64: %w", i, a.Filename, err)
@@ -524,6 +530,49 @@ func decodeAttachments(in []attachmentInput) ([]attachment, error) {
 		})
 	}
 	return out, nil
+}
+
+// blockedAttachmentExts is the set of file extensions we refuse to send
+// from the webmail composer. The list is the consensus "obvious
+// malware vector" set used by Gmail / Outlook / most ISP submission
+// servers: native Windows executables and shortcuts, Windows / Mac
+// scripts that run on double-click, disk-image containers commonly
+// used to evade Mark-of-the-Web, and macro-enabled Office documents.
+// We deliberately do NOT block archives (.zip, .7z, .rar) — they have
+// legitimate uses and the dangerous payload still needs a user step
+// (extract + run) that OS protections cover.
+//
+// All keys are lowercase, leading dot included, so the lookup is just
+// `blockedAttachmentExts[strings.ToLower(ext)]`.
+var blockedAttachmentExts = map[string]bool{
+	".exe": true, ".bat": true, ".cmd": true, ".com": true,
+	".scr": true, ".pif": true, ".lnk": true,
+	".vbs": true, ".vbe": true, ".js": true, ".jse": true,
+	".wsf": true, ".wsh": true, ".hta": true,
+	".jar": true,
+	".ps1": true, ".ps2": true,
+	".msi": true, ".msp": true,
+	".iso": true, ".img": true, ".vhd": true, ".vhdx": true,
+	".docm": true, ".dotm": true,
+	".xlsm": true, ".xltm": true, ".xlsb": true,
+	".pptm": true, ".potm": true, ".ppam": true,
+}
+
+// blockedAttachmentExtension reports whether the filename's last
+// extension is in the blocklist. The second return is the offending
+// extension (with the dot, lowercased) — useful for the error
+// message so the user knows *why* their attachment was refused.
+// Filenames without an extension are always allowed.
+//
+// Double-extension files (e.g. "report.pdf.exe") block on the LAST
+// extension only — that's the one Windows uses to pick the handler.
+func blockedAttachmentExtension(filename string) (string, bool) {
+	dot := strings.LastIndexByte(filename, '.')
+	if dot < 0 || dot == len(filename)-1 {
+		return "", false
+	}
+	ext := strings.ToLower(filename[dot:])
+	return ext, blockedAttachmentExts[ext]
 }
 
 // collectRecipients merges, trims, and de-duplicates the To and Cc
