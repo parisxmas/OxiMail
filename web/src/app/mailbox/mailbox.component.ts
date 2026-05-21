@@ -48,11 +48,19 @@ const REFRESH_INTERVAL_MS = 10_000;
 const FOLDERS_MIN = 160;
 const FOLDERS_MAX = 360;
 const FOLDERS_DEFAULT = 200;
-const LIST_MIN = 260;
-const LIST_MAX = 600;
-const LIST_DEFAULT = 360;
+// Vertical bounds for the list pane (top half of the stacked
+// reading-pane layout). MIN keeps at least a few rows visible; MAX
+// is generous — the reader minimum will kick in on the other side.
+const LIST_HEIGHT_MIN = 120;
+const LIST_HEIGHT_MAX = 1200;
+const LIST_HEIGHT_DEFAULT = 380;
 const STORAGE_KEY_FOLDERS = 'oximail.foldersWidth';
-const STORAGE_KEY_LIST = 'oximail.listWidth';
+// The horizontal list-width key from the pre-stacked layout. Kept
+// only because the value range happens to overlap "reasonable
+// list-pane height in px" — loadWidth's clamp will accept a
+// previously-stored 360 and treat it as a height. New users save
+// under STORAGE_KEY_LIST_HEIGHT.
+const STORAGE_KEY_LIST_HEIGHT = 'oximail.listHeight';
 
 // Undo-toast lifetime. 6s matches Gmail's snackbar and is long enough
 // to react to a misclick without parking visual noise on screen.
@@ -74,7 +82,7 @@ interface UndoState {
       class="app"
       [attr.data-view]="view()"
       [style.--folders-width.px]="foldersWidth()"
-      [style.--list-width.px]="listWidth()"
+      [style.--list-height.px]="listHeight()"
     >
       <!-- Folder sidebar -->
       <aside class="folders">
@@ -286,6 +294,8 @@ interface UndoState {
         role="separator"
         aria-orientation="horizontal"
         aria-label="Resize message list / reader split"
+        (mousedown)="startResize($event, 'split')"
+        (dblclick)="resetWidth('split')"
       ></div>
 
       <!-- Reader. Bottom row of the main column. Always visible at
@@ -455,20 +465,22 @@ interface UndoState {
         1fr;
       height: 100%;
     }
-    /* Main column: list on top, hdivider, reader below. flex:1 +
-       min-height:0 on each pane is what makes them share the
-       available vertical space and scroll their OWN overflow
-       independently — without min-height:0 the children's intrinsic
-       content height wins and the whole column scrolls instead. */
+    /* Main column: list on top, hdivider, reader below. Three-row
+       grid — first row's height comes from the --list-height CSS
+       variable bound to the listHeight signal so a drag on the
+       hdivider updates it live. The reader takes whatever's left
+       (1fr). min-height:0 on each pane is what keeps the children's
+       intrinsic content height from blowing out the grid; without
+       it the whole column would scroll instead of each pane
+       independently. */
     .main {
-      display: flex;
-      flex-direction: column;
+      display: grid;
+      grid-template-rows: var(--list-height, 380px) 6px 1fr;
       min-width: 0;
       min-height: 0;
     }
     .main .list,
     .main .reader {
-      flex: 1 1 0;
       min-height: 0;
     }
     /* Thin gutter between list and reader. Same hover treatment as
@@ -1177,7 +1189,10 @@ export class MailboxComponent implements OnInit, OnDestroy {
   // template-columns then consumes. See FOLDERS_DEFAULT / LIST_DEFAULT
   // and the related min/max constants up top.
   readonly foldersWidth = signal<number>(this.loadWidth(STORAGE_KEY_FOLDERS, FOLDERS_DEFAULT, FOLDERS_MIN, FOLDERS_MAX));
-  readonly listWidth = signal<number>(this.loadWidth(STORAGE_KEY_LIST, LIST_DEFAULT, LIST_MIN, LIST_MAX));
+  // listHeight is the vertical size of the message-list pane in
+  // the stacked reading-pane layout. The reader takes whatever
+  // height is left. Drag the .hdivider to retune.
+  readonly listHeight = signal<number>(this.loadWidth(STORAGE_KEY_LIST_HEIGHT, LIST_HEIGHT_DEFAULT, LIST_HEIGHT_MIN, LIST_HEIGHT_MAX));
 
   // Pending undo-able move (archive or trash). When non-null the
   // bottom toast is shown; cleared on Undo, on dismiss, or when the
@@ -1185,9 +1200,11 @@ export class MailboxComponent implements OnInit, OnDestroy {
   readonly undoState = signal<UndoState | null>(null);
 
   // Active resize state — populated on mousedown over a divider, drives
-  // the document-level mousemove/mouseup listeners.
-  private resizeTarget: 'folders' | 'list' | null = null;
-  private resizeStartX = 0;
+  // the document-level mousemove/mouseup listeners. 'folders' is the
+  // X-axis sidebar drag; 'split' is the Y-axis list/reader split in
+  // the stacked main column.
+  private resizeTarget: 'folders' | 'split' | null = null;
+  private resizeStartCoord = 0;
   private resizeStartWidth = 0;
   private readonly onResizeMove = (e: MouseEvent) => this.resizeMove(e);
   private readonly onResizeEnd = () => this.resizeEnd();
@@ -1751,38 +1768,47 @@ export class MailboxComponent implements OnInit, OnDestroy {
   }
 
   // startResize captures the initial mouse position and current
-  // pane width, then attaches document-level listeners that track
+  // pane size, then attaches document-level listeners that track
   // the drag through to mouseup. Listeners go on `document` (not
   // the 6px divider) so dragging works even when the cursor leaves
   // the tiny target — the standard splitter idiom.
-  protected startResize(event: MouseEvent, target: 'folders' | 'list'): void {
+  //
+  // 'folders' tracks clientX → folders sidebar width.
+  // 'split'   tracks clientY → list pane height in the main stack.
+  protected startResize(event: MouseEvent, target: 'folders' | 'split'): void {
     event.preventDefault();
     this.resizeTarget = target;
-    this.resizeStartX = event.clientX;
-    this.resizeStartWidth = target === 'folders' ? this.foldersWidth() : this.listWidth();
-    document.body.style.cursor = 'col-resize';
+    if (target === 'folders') {
+      this.resizeStartCoord = event.clientX;
+      this.resizeStartWidth = this.foldersWidth();
+      document.body.style.cursor = 'col-resize';
+    } else {
+      this.resizeStartCoord = event.clientY;
+      this.resizeStartWidth = this.listHeight();
+      document.body.style.cursor = 'row-resize';
+    }
     document.addEventListener('mousemove', this.onResizeMove);
     document.addEventListener('mouseup', this.onResizeEnd);
   }
 
   private resizeMove(event: MouseEvent): void {
     if (!this.resizeTarget) return;
-    const delta = event.clientX - this.resizeStartX;
-    const next = this.resizeStartWidth + delta;
     if (this.resizeTarget === 'folders') {
-      this.foldersWidth.set(clamp(next, FOLDERS_MIN, FOLDERS_MAX));
+      const delta = event.clientX - this.resizeStartCoord;
+      this.foldersWidth.set(clamp(this.resizeStartWidth + delta, FOLDERS_MIN, FOLDERS_MAX));
     } else {
-      this.listWidth.set(clamp(next, LIST_MIN, LIST_MAX));
+      const delta = event.clientY - this.resizeStartCoord;
+      this.listHeight.set(clamp(this.resizeStartWidth + delta, LIST_HEIGHT_MIN, LIST_HEIGHT_MAX));
     }
   }
 
   private resizeEnd(): void {
     if (!this.resizeTarget) return;
-    // Persist the final widths only on drag-end (not every mousemove)
+    // Persist the final value only on drag-end (not every mousemove)
     // so we don't hammer localStorage during the drag.
-    const key = this.resizeTarget === 'folders' ? STORAGE_KEY_FOLDERS : STORAGE_KEY_LIST;
-    const width = this.resizeTarget === 'folders' ? this.foldersWidth() : this.listWidth();
-    try { localStorage.setItem(key, String(width)); } catch { /* ignore quota / disabled storage */ }
+    const key = this.resizeTarget === 'folders' ? STORAGE_KEY_FOLDERS : STORAGE_KEY_LIST_HEIGHT;
+    const value = this.resizeTarget === 'folders' ? this.foldersWidth() : this.listHeight();
+    try { localStorage.setItem(key, String(value)); } catch { /* ignore quota / disabled storage */ }
     this.resizeTarget = null;
     document.body.style.cursor = '';
     document.removeEventListener('mousemove', this.onResizeMove);
@@ -1790,14 +1816,14 @@ export class MailboxComponent implements OnInit, OnDestroy {
   }
 
   // resetWidth (double-click on a divider) restores the pane to its
-  // default width and clears the stored override.
-  protected resetWidth(target: 'folders' | 'list'): void {
+  // default size and clears the stored override.
+  protected resetWidth(target: 'folders' | 'split'): void {
     if (target === 'folders') {
       this.foldersWidth.set(FOLDERS_DEFAULT);
       try { localStorage.removeItem(STORAGE_KEY_FOLDERS); } catch { /* ignore */ }
     } else {
-      this.listWidth.set(LIST_DEFAULT);
-      try { localStorage.removeItem(STORAGE_KEY_LIST); } catch { /* ignore */ }
+      this.listHeight.set(LIST_HEIGHT_DEFAULT);
+      try { localStorage.removeItem(STORAGE_KEY_LIST_HEIGHT); } catch { /* ignore */ }
     }
   }
 
