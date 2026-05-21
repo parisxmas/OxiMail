@@ -94,12 +94,12 @@ type Config struct {
 	// env var at it.
 	AVSigDB string
 
-	// AVUpdateURL turns on a background goroutine that periodically
-	// fetches a SHA-256 feed (one hash per line; abuse.ch's
-	// `/export/txt/sha256/recent/` is the default shape), writes
-	// it to AVAutoSigDB, and triggers a hot reload of the scanner.
-	// Empty = no automated refresh.
-	AVUpdateURL string
+	// AVUpdateURLs is the comma-separated list of feed endpoints the
+	// auto-updater fetches on every tick. Each entry can be either
+	// plain text (one SHA-256 per line, abuse.ch `recent/` shape) or
+	// a ZIP archive (abuse.ch `full/` shape; the parser walks every
+	// entry inside). An empty list disables automated refresh.
+	AVUpdateURLs []string
 
 	// AVUpdateInterval is the cadence between refreshes. Defaults to
 	// 6h via internal/av so it's safe to leave at zero.
@@ -110,10 +110,12 @@ type Config struct {
 	// the auto-managed feed with their own manual list.
 	AVAutoSigDB string
 
-	// AVUpdateSource labels every hash the updater imports — shows
-	// up as the signature name in scan verdicts. Default
-	// "MalwareBazaar" matches the default URL.
-	AVUpdateSource string
+	// AVUpdateSources labels each feed in AVUpdateURLs by index — the
+	// label is written into the sigdb beside every hash and shows up
+	// as the signature name in scan verdicts. When fewer sources are
+	// supplied than URLs, the missing entries fall back to the URL
+	// itself (loadInto requires a non-empty name).
+	AVUpdateSources []string
 
 	// DNSBLZones is the comma-separated list of DNS blocklist zones
 	// queried at connection-time (see internal/spam/dnsbl.go). The
@@ -183,10 +185,12 @@ func Load() Config {
 		OxiDBHost:      env("OXIMAIL_OXIDB_HOST", "127.0.0.1"),
 		OxiDBPort:      envInt("OXIMAIL_OXIDB_PORT", 4444),
 		AVSigDB:          env("OXIMAIL_AV_SIGDB", ""),
-		AVUpdateURL:      env("OXIMAIL_AV_UPDATE_URL", ""),
+		AVUpdateURLs:     splitCSV(envOrDefault("OXIMAIL_AV_UPDATE_URL",
+			"https://bazaar.abuse.ch/export/txt/sha256/full/,"+
+				"https://threatfox.abuse.ch/export/csv/sha256/full/")),
 		AVUpdateInterval: envDuration("OXIMAIL_AV_UPDATE_INTERVAL", 0),
 		AVAutoSigDB:      env("OXIMAIL_AV_AUTO_SIGDB", "/var/lib/oximail/av/auto.sigdb"),
-		AVUpdateSource:   env("OXIMAIL_AV_UPDATE_SOURCE", ""),
+		AVUpdateSources:  splitCSV(envOrDefault("OXIMAIL_AV_UPDATE_SOURCE", "MalwareBazaar,ThreatFox")),
 		DNSBLZones:     splitCSV(envOrDefault("OXIMAIL_DNSBL_ZONES", "zen.spamhaus.org")),
 		GreylistDelay:  envDuration("OXIMAIL_GREYLIST_DELAY", time.Minute),
 		SRSSecret:      env("OXIMAIL_SRS_SECRET", ""),

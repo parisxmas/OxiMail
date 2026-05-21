@@ -1,6 +1,8 @@
 package av
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -74,7 +76,7 @@ func TestUpdaterFetchesAndPopulatesSigdb(t *testing.T) {
 		t.Fatalf("pre-refresh signatures = %d, want 1 (EICAR only)", got)
 	}
 
-	u := NewUpdater(c, feed.server.URL, out, "TestFeed", 10*time.Millisecond)
+	u := NewUpdater(c, []Feed{{URL: feed.server.URL, Source: "TestFeed"}}, out, 10*time.Millisecond)
 	if u == nil {
 		t.Fatal("NewUpdater returned nil — bad arg interpretation")
 	}
@@ -109,7 +111,7 @@ func TestUpdaterHotReloadOnNewBody(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "auto.sigdb")
 	c, _ := New(out)
-	u := NewUpdater(c, feed.server.URL, out, "TestFeed", time.Hour)
+	u := NewUpdater(c, []Feed{{URL: feed.server.URL, Source: "TestFeed"}}, out, time.Hour)
 
 	if err := u.refresh(context.Background()); err != nil {
 		t.Fatalf("refresh 1: %v", err)
@@ -145,7 +147,7 @@ func TestUpdaterRejectsGarbageLines(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "auto.sigdb")
 	c, _ := New(out)
-	u := NewUpdater(c, feed.server.URL, out, "TestFeed", time.Hour)
+	u := NewUpdater(c, []Feed{{URL: feed.server.URL, Source: "TestFeed"}}, out, time.Hour)
 	if err := u.refresh(context.Background()); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
@@ -168,7 +170,7 @@ func TestUpdaterHandlesHTTPError(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "auto.sigdb")
 	c, _ := New(out)
-	u := NewUpdater(c, srv.URL, out, "TestFeed", time.Hour)
+	u := NewUpdater(c, []Feed{{URL: srv.URL, Source: "TestFeed"}}, out, time.Hour)
 	if err := u.refresh(context.Background()); err == nil {
 		t.Fatal("expected error on HTTP 500")
 	}
@@ -179,13 +181,17 @@ func TestUpdaterHandlesHTTPError(t *testing.T) {
 
 func TestNewUpdaterDisabledOnEmptyArgs(t *testing.T) {
 	c, _ := New()
-	if u := NewUpdater(c, "", "/tmp/x.sigdb", "S", time.Hour); u != nil {
-		t.Error("empty url should yield nil updater")
+	one := []Feed{{URL: "http://x", Source: "S"}}
+	if u := NewUpdater(c, nil, "/tmp/x.sigdb", time.Hour); u != nil {
+		t.Error("empty feed list should yield nil updater")
 	}
-	if u := NewUpdater(c, "http://x", "", "S", time.Hour); u != nil {
+	if u := NewUpdater(c, []Feed{{URL: "", Source: "S"}}, "/tmp/x.sigdb", time.Hour); u != nil {
+		t.Error("feed list with only empty URLs should yield nil updater")
+	}
+	if u := NewUpdater(c, one, "", time.Hour); u != nil {
 		t.Error("empty out path should yield nil updater")
 	}
-	if u := NewUpdater(nil, "http://x", "/tmp/x.sigdb", "S", time.Hour); u != nil {
+	if u := NewUpdater(nil, one, "/tmp/x.sigdb", time.Hour); u != nil {
 		t.Error("nil client should yield nil updater")
 	}
 }
@@ -197,7 +203,7 @@ func TestUpdaterRunRespectsContext(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "auto.sigdb")
 	c, _ := New(out)
-	u := NewUpdater(c, feed.server.URL, out, "TestFeed", 50*time.Millisecond)
+	u := NewUpdater(c, []Feed{{URL: feed.server.URL, Source: "TestFeed"}}, out, 50*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -226,4 +232,212 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// TestUpdaterMergesMultipleFeeds — the multi-source contract: one
+// feed contributes hash A, another contributes hash B, both end up
+// loaded with their respective source labels.
+func TestUpdaterMergesMultipleFeeds(t *testing.T) {
+	hashA := hashOf("payload-A")
+	hashB := hashOf("payload-B")
+	feedA := newFakeFeed(t, hashA+"\n")
+	feedB := newFakeFeed(t, hashB+"\n")
+
+	dir := t.TempDir()
+	out := filepath.Join(dir, "auto.sigdb")
+	c, _ := New(out)
+	u := NewUpdater(c, []Feed{
+		{URL: feedA.server.URL, Source: "FeedA"},
+		{URL: feedB.server.URL, Source: "FeedB"},
+	}, out, time.Hour)
+	if err := u.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	if got := c.SignatureCount(); got != 3 {
+		t.Errorf("signatures = %d, want 3 (EICAR + A + B)", got)
+	}
+	if v, _ := c.Scan(context.Background(), []byte("payload-A")); v.OK || v.Threat != "FeedA" {
+		t.Errorf("payload-A verdict = %+v, want hit on FeedA", v)
+	}
+	if v, _ := c.Scan(context.Background(), []byte("payload-B")); v.OK || v.Threat != "FeedB" {
+		t.Errorf("payload-B verdict = %+v, want hit on FeedB", v)
+	}
+}
+
+// TestUpdaterContinuesWhenOneFeedFails — a transient outage on one
+// feed must not knock out the rest. Hashes from the surviving feeds
+// stay live; the failed-feed line shows up in the sigdb header.
+func TestUpdaterContinuesWhenOneFeedFails(t *testing.T) {
+	hashGood := hashOf("good-payload")
+	goodFeed := newFakeFeed(t, hashGood+"\n")
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	defer badSrv.Close()
+
+	dir := t.TempDir()
+	out := filepath.Join(dir, "auto.sigdb")
+	c, _ := New(out)
+	u := NewUpdater(c, []Feed{
+		{URL: badSrv.URL, Source: "BadFeed"},
+		{URL: goodFeed.server.URL, Source: "GoodFeed"},
+	}, out, time.Hour)
+	if err := u.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh with one bad feed should still succeed if any feed works: %v", err)
+	}
+	if v, _ := c.Scan(context.Background(), []byte("good-payload")); v.OK || v.Threat != "GoodFeed" {
+		t.Errorf("good payload verdict = %+v, want hit on GoodFeed", v)
+	}
+	written, _ := os.ReadFile(out)
+	if !contains(string(written), "BadFeed") || !contains(string(written), "FAILED") {
+		t.Errorf("sigdb header should record the failed feed:\n%s", written)
+	}
+}
+
+// TestUpdaterRefreshFailsWhenAllFeedsFail — if every feed fails the
+// refresh aborts and leaves the previous sigdb intact.
+func TestUpdaterRefreshFailsWhenAllFeedsFail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	out := filepath.Join(dir, "auto.sigdb")
+	c, _ := New(out)
+	u := NewUpdater(c, []Feed{
+		{URL: srv.URL, Source: "A"},
+		{URL: srv.URL, Source: "B"},
+	}, out, time.Hour)
+	if err := u.refresh(context.Background()); err == nil {
+		t.Fatal("expected error when every feed fails")
+	}
+	if got := c.SignatureCount(); got != 1 {
+		t.Errorf("signatures = %d, want 1 (builtin EICAR intact)", got)
+	}
+}
+
+// TestUpdaterParsesZipFeed — the MalwareBazaar full export ships as
+// a ZIP containing a single plain-text hash file. The parser must
+// detect the PK magic, unzip in memory, and extract hashes from
+// every entry inside.
+func TestUpdaterParsesZipFeed(t *testing.T) {
+	hash := hashOf("zipped-payload")
+	zipped := makeZip(t, "full_sha256.txt", "# header\n"+hash+"\n")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/zip")
+		_, _ = w.Write(zipped)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	out := filepath.Join(dir, "auto.sigdb")
+	c, _ := New(out)
+	u := NewUpdater(c, []Feed{{URL: srv.URL, Source: "ZipFeed"}}, out, time.Hour)
+	if err := u.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if v, _ := c.Scan(context.Background(), []byte("zipped-payload")); v.OK || v.Threat != "ZipFeed" {
+		t.Errorf("zipped payload verdict = %+v, want hit on ZipFeed", v)
+	}
+}
+
+// TestUpdaterParsesCSVFeed — ThreatFox's full export wraps a CSV in a
+// ZIP. Each data row is quoted-comma columns with the SHA-256 hash
+// sitting in the third column. The line parser extracts the hash
+// via the 64-hex-token regex regardless of surrounding columns.
+func TestUpdaterParsesCSVFeed(t *testing.T) {
+	hash := hashOf("csv-payload")
+	csv := fmt.Sprintf(`################################################################
+# ThreatFox IOCs: SHA256 hashes - CSV format (full dump)       #
+################################################################
+"2021-08-20 12:00:30", "192447", "%s", "sha256_hash", "payload", "win.cryptbot"
+# Number of entries: 1
+`, hash)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(csv))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	out := filepath.Join(dir, "auto.sigdb")
+	c, _ := New(out)
+	u := NewUpdater(c, []Feed{{URL: srv.URL, Source: "ThreatFox"}}, out, time.Hour)
+	if err := u.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if v, _ := c.Scan(context.Background(), []byte("csv-payload")); v.OK || v.Threat != "ThreatFox" {
+		t.Errorf("csv payload verdict = %+v, want hit on ThreatFox", v)
+	}
+}
+
+// TestUpdaterDeterministicSigdb — back-to-back refreshes that pull
+// the same upstream contents must produce a byte-identical sigdb
+// file. Determinism keeps the volume diff small for rsync/backup
+// and lets operators compare files across hosts.
+func TestUpdaterDeterministicSigdb(t *testing.T) {
+	body := hashOf("a") + "\n" + hashOf("b") + "\n" + hashOf("c") + "\n"
+	feed := newFakeFeed(t, body)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "auto.sigdb")
+	c, _ := New(out)
+	u := NewUpdater(c, []Feed{{URL: feed.server.URL, Source: "F"}}, out, time.Hour)
+
+	if err := u.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh 1: %v", err)
+	}
+	first, _ := os.ReadFile(out)
+	if err := u.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh 2: %v", err)
+	}
+	second, _ := os.ReadFile(out)
+	// Strip the `# fetched <timestamp>` line which legitimately changes.
+	if stripFetchedHeader(string(first)) != stripFetchedHeader(string(second)) {
+		t.Errorf("sigdb non-deterministic across refreshes:\nFIRST:\n%s\nSECOND:\n%s", first, second)
+	}
+}
+
+func makeZip(t *testing.T, entryName, entryBody string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create(entryName)
+	if err != nil {
+		t.Fatalf("zip create: %v", err)
+	}
+	if _, err := w.Write([]byte(entryBody)); err != nil {
+		t.Fatalf("zip write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func stripFetchedHeader(s string) string {
+	out := ""
+	for _, line := range bytesSplit(s, "\n") {
+		if len(line) >= len("# fetched") && line[:len("# fetched")] == "# fetched" {
+			continue
+		}
+		out += line + "\n"
+	}
+	return out
+}
+
+func bytesSplit(s, sep string) []string {
+	var out []string
+	for {
+		i := -1
+		for j := 0; j+len(sep) <= len(s); j++ {
+			if s[j:j+len(sep)] == sep {
+				i = j
+				break
+			}
+		}
+		if i < 0 {
+			out = append(out, s)
+			return out
+		}
+		out = append(out, s[:i])
+		s = s[i+len(sep):]
+	}
 }

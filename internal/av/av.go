@@ -94,7 +94,13 @@ func New(extraPaths ...string) (*Client, error) {
 // daemon. Other I/O errors and parse errors do propagate.
 func (c *Client) Reload() error {
 	m := map[[32]byte]string{}
-	if err := c.loadInto(m, builtinSigdb, "<builtin>"); err != nil {
+	// Source-label interner shared across the whole load: every map
+	// value referencing "MalwareBazaar" points at the same Go string
+	// header's backing bytes. At 1M+ entries with mostly two or three
+	// distinct labels the saved memory is non-trivial (~13 MB per
+	// 13-char label that would otherwise allocate per row).
+	intern := map[string]string{}
+	if err := c.loadInto(m, intern, builtinSigdb, "<builtin>"); err != nil {
 		return fmt.Errorf("av: load builtin sigs: %w", err)
 	}
 	for _, p := range c.extraPaths {
@@ -108,7 +114,7 @@ func (c *Client) Reload() error {
 		if err != nil {
 			return fmt.Errorf("av: read %s: %w", p, err)
 		}
-		if err := c.loadInto(m, string(raw), p); err != nil {
+		if err := c.loadInto(m, intern, string(raw), p); err != nil {
 			return fmt.Errorf("av: parse %s: %w", p, err)
 		}
 	}
@@ -158,9 +164,11 @@ func (c *Client) Scan(ctx context.Context, data []byte) (Verdict, error) {
 
 // loadInto parses sigdb-formatted content (one `<sha256>:<name>` line
 // per signature; blank lines and `#`-prefixed comments skipped) and
-// merges into dst. Returns the first parse error verbatim so the
-// caller can surface the offending line.
-func (c *Client) loadInto(dst map[[32]byte]string, content, src string) error {
+// merges into dst. `intern` interns the per-line `name` field so all
+// hashes from the same source share one backing string. Returns the
+// first parse error verbatim so the caller can surface the offending
+// line.
+func (c *Client) loadInto(dst map[[32]byte]string, intern map[string]string, content, src string) error {
 	for i, raw := range strings.Split(content, "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -174,6 +182,11 @@ func (c *Client) loadInto(dst map[[32]byte]string, content, src string) error {
 		name := strings.TrimSpace(line[idx+1:])
 		if name == "" {
 			return fmt.Errorf("%s:%d: empty signature name", src, i+1)
+		}
+		if canon, ok := intern[name]; ok {
+			name = canon
+		} else {
+			intern[name] = name
 		}
 		bs, err := hex.DecodeString(hashStr)
 		if err != nil {

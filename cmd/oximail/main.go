@@ -101,10 +101,21 @@ func main() {
 	// spawned later in main once the signal-aware ctx exists; we
 	// just construct the value here so the log line lands next to
 	// the av-init line.
-	avUpdater := av.NewUpdater(avClient, cfg.AVUpdateURL, cfg.AVAutoSigDB, cfg.AVUpdateSource, cfg.AVUpdateInterval)
+	feeds := make([]av.Feed, 0, len(cfg.AVUpdateURLs))
+	for i, url := range cfg.AVUpdateURLs {
+		var src string
+		if i < len(cfg.AVUpdateSources) {
+			src = cfg.AVUpdateSources[i]
+		}
+		feeds = append(feeds, av.Feed{URL: url, Source: src})
+	}
+	avUpdater := av.NewUpdater(avClient, feeds, cfg.AVAutoSigDB, cfg.AVUpdateInterval)
 	if avUpdater != nil {
-		log.Printf("AV: updater enabled — url=%s out=%s interval=%v",
-			cfg.AVUpdateURL, cfg.AVAutoSigDB, cfg.AVUpdateInterval)
+		log.Printf("AV: updater enabled — feeds=%d out=%s interval=%v",
+			len(avUpdater.Feeds()), cfg.AVAutoSigDB, cfg.AVUpdateInterval)
+		for _, f := range avUpdater.Feeds() {
+			log.Printf("AV: updater feed — source=%s url=%s", f.Source, f.URL)
+		}
 	}
 	webmailSrv := webmail.New(cfg.WebmailAddr, cfg.WebmailStatic, st, tlsConfig, webmail.MTASTSPolicy{
 		Mode:   cfg.MTASTSMode,

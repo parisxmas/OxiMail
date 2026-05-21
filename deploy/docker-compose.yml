@@ -80,17 +80,18 @@ services:
       # so a fresh deploy is virus-aware. Setting OXIMAIL_AV_SIGDB
       # to a file path mounts an operator-extended list on top.
       - OXIMAIL_AV_SIGDB=${OXIMAIL_AV_SIGDB-}
-      # AV auto-updater. When OXIMAIL_AV_UPDATE_URL is set, oximail
-      # spawns a goroutine that periodically fetches a SHA-256
-      # feed (default: abuse.ch MalwareBazaar recent dump), writes
-      # the hashes to OXIMAIL_AV_AUTO_SIGDB, and hot-reloads the
-      # scanner. The default value below opts every fresh deploy
-      # into the abuse.ch feed; set this to empty in .env to
-      # disable the network refresh entirely.
-      - OXIMAIL_AV_UPDATE_URL=${OXIMAIL_AV_UPDATE_URL-https://bazaar.abuse.ch/export/txt/sha256/recent/}
+      # AV auto-updater. Comma-separated URL list (paired by index
+      # with OXIMAIL_AV_UPDATE_SOURCE). Each entry can be plain text
+      # (one SHA-256 per line, abuse.ch `recent/` shape) or a ZIP
+      # archive (abuse.ch `full/` shape — the parser walks every
+      # entry inside). Defaults fetch the abuse.ch MalwareBazaar
+      # full SHA-256 dump (~1M hashes) plus the ThreatFox IoC
+      # sha256 feed (a few thousand curated IoCs). Set to empty
+      # to disable the network refresh entirely.
+      - OXIMAIL_AV_UPDATE_URL=${OXIMAIL_AV_UPDATE_URL-https://bazaar.abuse.ch/export/txt/sha256/full/,https://threatfox.abuse.ch/export/csv/sha256/full/}
+      - OXIMAIL_AV_UPDATE_SOURCE=${OXIMAIL_AV_UPDATE_SOURCE-MalwareBazaar,ThreatFox}
       - OXIMAIL_AV_UPDATE_INTERVAL=${OXIMAIL_AV_UPDATE_INTERVAL-6h}
       - OXIMAIL_AV_AUTO_SIGDB=${OXIMAIL_AV_AUTO_SIGDB-/var/lib/oximail/av/auto.sigdb}
-      - OXIMAIL_AV_UPDATE_SOURCE=${OXIMAIL_AV_UPDATE_SOURCE-MalwareBazaar}
     ports:
       - "25:25"        # SMTP MX (inbound)
       - "465:465"      # SMTPS submission
