@@ -204,6 +204,13 @@ export interface ComposeSeed {
       box-shadow: 0 20px 48px rgba(0, 0, 0, 0.28);
       transition: width 160ms ease, height 160ms ease,
                   inset 160ms ease, border-radius 160ms ease;
+      /* The Quill editor's contenteditable area expands with content
+         and, in some browsers, overdraws past its flex parent. With
+         the dialog's overflow at its default (visible), that overdraw
+         would cover the footer and intercept pointer events — the
+         buttons stay visible but clicks land on the invisible editor
+         instead. Clip at the dialog and let inner regions scroll. */
+      overflow: hidden;
     }
     /* Expanded mode — large centered modal. ~min(960px, 80vw) wide,
        fills 86vh tall. The editor body grows to take the slack so the
@@ -325,6 +332,11 @@ export interface ComposeSeed {
       min-height: 220px;
       font-family: inherit;
       font-size: 14px;
+      /* Pin overflow on the container — when the editor content
+         exceeds the dialog's body region, content scrolls inside
+         this container rather than pushing the footer offscreen
+         or overdrawing other regions. */
+      overflow: auto;
     }
     .error {
       margin: 0;
@@ -337,6 +349,10 @@ export interface ComposeSeed {
       gap: 8px;
       padding-top: 4px;
       border-top: 1px solid var(--border);
+      /* Hard pin: the action row must never shrink. Without this, a
+         tall body (long draft, big Quill toolbar dropdown) can squash
+         the footer to 0 height in tight flex layouts. */
+      flex-shrink: 0;
     }
     .icon-text {
       display: inline-flex;
