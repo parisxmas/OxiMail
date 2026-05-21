@@ -147,17 +147,28 @@ func (s *Store) Deliver(accountID uint64, in IncomingMessage) (*Message, error) 
 
 // DeliverTo files an inbound message into the named folder of an
 // account — INBOX in the common case, "Junk" for quarantined mail,
-// any other default folder for special-case routing. The default
-// mailboxes are created on first delivery if they do not exist yet,
-// so an account is reachable the moment it is created without a
-// separate provisioning step.
+// or any folder named by a Sieve `fileinto` rule. Missing folders are
+// auto-created on first delivery (the Sieve `mailbox` extension /
+// RFC 5490 semantics), so a `fileinto "DMARC reports"` on a fresh
+// account works without a separate provisioning step.
 func (s *Store) DeliverTo(accountID uint64, folder string, in IncomingMessage) (*Message, error) {
 	mb, err := s.GetMailboxByName(accountID, folder)
 	if errors.Is(err, ErrNotFound) {
+		// Two reasons a folder might be missing on a fresh delivery:
+		// (a) the account just got created and the standard mailboxes
+		// haven't been materialised yet, or (b) Sieve asked us to file
+		// into a user-named folder we've never seen. EnsureDefaultMailboxes
+		// covers (a); the explicit CreateMailbox fallback covers (b).
 		if err := s.EnsureDefaultMailboxes(accountID); err != nil {
 			return nil, fmt.Errorf("store: deliver to account %d (%s): %w", accountID, folder, err)
 		}
 		mb, err = s.GetMailboxByName(accountID, folder)
+		if errors.Is(err, ErrNotFound) {
+			if _, cerr := s.CreateMailbox(accountID, folder); cerr != nil {
+				return nil, fmt.Errorf("store: deliver to account %d: create folder %q: %w", accountID, folder, cerr)
+			}
+			mb, err = s.GetMailboxByName(accountID, folder)
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: deliver to account %d (%s): %w", accountID, folder, err)
