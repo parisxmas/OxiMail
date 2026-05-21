@@ -186,7 +186,14 @@ func (c *Client) loadInto(dst map[[32]byte]string, intern map[string]string, con
 		if canon, ok := intern[name]; ok {
 			name = canon
 		} else {
-			intern[name] = name
+			// `name` is currently a substring slice of the 80+ MB
+			// parse buffer. Cloning detaches it so the buffer
+			// becomes GC-eligible once Reload returns — otherwise
+			// the interned canonical aliases keep the whole file
+			// resident for the lifetime of the map.
+			canon := strings.Clone(name)
+			intern[canon] = canon
+			name = canon
 		}
 		bs, err := hex.DecodeString(hashStr)
 		if err != nil {
