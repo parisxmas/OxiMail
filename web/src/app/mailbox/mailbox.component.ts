@@ -1,4 +1,4 @@
-import { Component, OnDestroy, OnInit, inject, signal } from '@angular/core';
+import { Component, OnDestroy, OnInit, computed, inject, signal } from '@angular/core';
 import { DatePipe } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
 import {
@@ -30,6 +30,7 @@ import {
   Mailbox,
   MessageDetail,
   MessageSummary,
+  Thread,
 } from '../models';
 
 // Auto-refresh cadence for the open mailbox + folder counts. 10s strikes
@@ -142,25 +143,30 @@ interface UndoState {
         </header>
         @if (loadingList()) {
           <p class="hint">Loading…</p>
-        } @else if (messages().length === 0) {
+        } @else if (threads().length === 0) {
           <p class="hint">No messages.</p>
         } @else {
-          @for (m of messages(); track m.id) {
+          @for (t of threads(); track t.key) {
             <button
               class="row"
-              [class.unread]="!m.seen"
-              [class.active]="m.id === openMessage()?.id"
-              (click)="open(m.id)"
+              [class.unread]="t.unreadCount > 0"
+              [class.active]="threadHasOpen(t)"
+              (click)="open(t.messages[0].id)"
             >
-              <span class="avatar" [style.background]="avatarColor(m.from)">{{ initials(m.from) }}</span>
+              <span class="avatar" [style.background]="avatarColor(t.messages[0].from)">{{ initials(t.messages[0].from) }}</span>
               <div class="row-main">
                 <div class="row-top">
-                  <span class="row-from">{{ senderName(m.from) }}</span>
-                  <span class="row-date">{{ m.date | date: 'shortDate' }}</span>
+                  <span class="row-from">
+                    {{ threadSenders(t) }}
+                    @if (t.messages.length > 1) {
+                      <span class="thread-count">({{ t.messages.length }})</span>
+                    }
+                  </span>
+                  <span class="row-date">{{ t.messages[0].date | date: 'shortDate' }}</span>
                 </div>
-                <div class="row-subject">{{ m.subject || '(no subject)' }}</div>
-                @if (m.snippet) {
-                  <div class="row-snippet">{{ m.snippet }}</div>
+                <div class="row-subject">{{ t.subject || '(no subject)' }}</div>
+                @if (t.messages[0].snippet) {
+                  <div class="row-snippet">{{ t.messages[0].snippet }}</div>
                 }
               </div>
             </button>
@@ -180,6 +186,33 @@ interface UndoState {
       <!-- Reader -->
       <section class="reader">
         @if (openMessage(); as msg) {
+          @if (openThread(); as thread) {
+            <!-- Thread navigation strip — appears only when the open
+                 message lives in a thread with siblings. Each row is a
+                 clickable summary; the currently-open one is muted. -->
+            <div class="thread-strip" role="list" [attr.aria-label]="thread.messages.length + ' messages in this conversation'">
+              <div class="thread-strip-head">
+                {{ thread.messages.length }} messages in this conversation
+              </div>
+              @for (tm of thread.messages; track tm.id) {
+                <button
+                  type="button"
+                  role="listitem"
+                  class="thread-strip-row"
+                  [class.active]="tm.id === msg.id"
+                  [class.unread]="!tm.seen"
+                  (click)="open(tm.id)"
+                  [title]="tm.subject"
+                >
+                  <span class="thread-strip-from">{{ senderName(tm.from) }}</span>
+                  @if (tm.snippet) {
+                    <span class="thread-strip-snippet">{{ tm.snippet }}</span>
+                  }
+                  <span class="thread-strip-date">{{ tm.date | date: 'shortDate' }}</span>
+                </button>
+              }
+            </div>
+          }
           <div class="reader-head">
             <button
               class="back mobile-only icon-btn"
@@ -575,6 +608,77 @@ interface UndoState {
       white-space: nowrap;
       margin-top: 2px;
     }
+    /* Inline count badge on a thread row, e.g. "Alice, Bob (3)". A
+       small muted parenthetical that doesn't compete with the sender
+       names for attention — gmail keeps the thread length subtle
+       there. */
+    .thread-count {
+      color: var(--text-muted);
+      font-weight: 400;
+      font-size: 12px;
+      margin-left: 4px;
+    }
+    /* Reader's thread navigation strip — a vertical list of
+       per-message rows shown above the message header when the open
+       message lives in a thread of 2+. Each row is clickable and
+       swaps the open message. The currently-open one is muted; an
+       unread sibling renders in the same bold/accent style as an
+       unread list row. */
+    .thread-strip {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-sunken);
+    }
+    .thread-strip-head {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 4px;
+    }
+    .thread-strip-row {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      padding: 4px 8px;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      border-radius: 4px;
+      cursor: pointer;
+      text-align: left;
+      font: inherit;
+    }
+    .thread-strip-row:hover {
+      background: var(--bg);
+    }
+    .thread-strip-row.active {
+      background: var(--bg);
+      color: var(--text);
+    }
+    .thread-strip-row.unread {
+      color: var(--unread);
+      font-weight: 600;
+    }
+    .thread-strip-from {
+      flex-shrink: 0;
+      font-size: 13px;
+    }
+    .thread-strip-snippet {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+    }
+    .thread-strip-date {
+      flex-shrink: 0;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
     .reader {
       display: flex;
       flex-direction: column;
@@ -779,6 +883,25 @@ export class MailboxComponent implements OnInit, OnDestroy {
   readonly selected = signal<string>('INBOX');
   readonly messages = signal<MessageSummary[]>([]);
   readonly openMessage = signal<MessageDetail | null>(null);
+
+  // Threads derived from messages() — a computed signal so we never
+  // store and risk drifting from the source list. Drafts and Sent
+  // benefit from threading just as much as INBOX, so we don't
+  // special-case the folder; if a folder happens to have one message
+  // per subject, every thread has length 1 and rendering looks
+  // identical to the pre-thread view.
+  readonly threads = computed<Thread[]>(() => groupByThread(this.messages()));
+
+  // The thread the currently-open message lives in, if any. Derived
+  // from openMessage() + threads(). Used by the reader's thread
+  // navigation strip; null when no message is open or the thread has
+  // a single message (no nav needed).
+  readonly openThread = computed<Thread | null>(() => {
+    const m = this.openMessage();
+    if (!m) return null;
+    const t = this.threads().find((th) => th.messages.some((mm) => mm.id === m.id));
+    return t && t.messages.length > 1 ? t : null;
+  });
   readonly composing = signal(false);
   readonly composeSeed = signal<ComposeSeed | null>(null);
   // Mobile-only navigation state. On wide screens the CSS shows all
@@ -1157,6 +1280,26 @@ export class MailboxComponent implements OnInit, OnDestroy {
     }
   }
 
+  // threadHasOpen reports whether the currently-open message belongs to
+  // this thread. Drives the .active highlight in the list view; matches
+  // pre-thread behaviour where a row was active iff it was the open one.
+  protected threadHasOpen(t: Thread): boolean {
+    const open = this.openMessage();
+    return !!open && t.messages.some((m) => m.id === open.id);
+  }
+
+  // threadSenders returns the comma-joined sender label for the row.
+  // Singletons show the bare name; threads show "Alice, Bob" or
+  // "Alice, Bob +1" when there are more than two distinct senders.
+  // We pipe each through senderName so display-name parsing applies.
+  protected threadSenders(t: Thread): string {
+    const names = t.senders.map((s) => this.senderName(s));
+    if (names.length === 0) return '(unknown)';
+    if (names.length === 1) return names[0];
+    if (names.length === 2) return names[0] + ', ' + names[1];
+    return names[0] + ', ' + names[1] + ' +' + (names.length - 1);
+  }
+
   // senderName extracts the human-readable part of an RFC 5322 From
   // header — "Alice <alice@x>" -> "Alice", or the address if no name
   // is present.
@@ -1240,6 +1383,65 @@ export class MailboxComponent implements OnInit, OnDestroy {
       boxes.map((b) => (b.name === name ? { ...b, unseen } : b)),
     );
   }
+}
+
+// SUBJECT_PREFIX_RE captures one leading reply/forward-style prefix
+// plus the bracketed-tag prefix some lists glue on top
+// ("[oximail-dev] Re: foo"). We strip iteratively so chains like
+// "Re: Re: Fwd: …" collapse to the bare subject.
+const SUBJECT_PREFIX_RE = /^\s*(?:re|fwd|fw|aw|ynt|rv|tr)\s*:\s*|^\s*\[[^\]]+\]\s*/i;
+
+// normalizeSubject is the grouping key for thread detection. Strips
+// every leading reply/forward prefix and bracketed tag, lowercases,
+// and trims. An empty subject becomes "(no subject)" so messages with
+// no header still bucket together (same as the row label does).
+export function normalizeSubject(raw: string): string {
+  let s = raw || '';
+  while (true) {
+    const next = s.replace(SUBJECT_PREFIX_RE, '');
+    if (next === s) break;
+    s = next;
+  }
+  s = s.trim().toLowerCase();
+  return s === '' ? '(no subject)' : s;
+}
+
+// groupByThread folds a flat message list into Thread objects. The
+// algorithm is deliberately simple: bucket by normalizeSubject, sort
+// each bucket newest-first, then sort threads by their newest
+// message's date so the list still feels "newest activity first".
+export function groupByThread(msgs: MessageSummary[]): Thread[] {
+  const buckets = new Map<string, MessageSummary[]>();
+  for (const m of msgs) {
+    const key = normalizeSubject(m.subject);
+    const arr = buckets.get(key);
+    if (arr) arr.push(m);
+    else buckets.set(key, [m]);
+  }
+  const out: Thread[] = [];
+  for (const [key, arr] of buckets) {
+    arr.sort((a, b) => +new Date(b.date) - +new Date(a.date));
+    const senders: string[] = [];
+    const seen = new Set<string>();
+    for (const m of arr) {
+      const addr = (m.from || '').trim();
+      if (addr && !seen.has(addr)) {
+        seen.add(addr);
+        senders.push(addr);
+        if (senders.length === 3) break;
+      }
+    }
+    out.push({
+      key,
+      subject: arr[0].subject || '(no subject)',
+      messages: arr,
+      senders,
+      unreadCount: arr.filter((m) => !m.seen).length,
+    });
+  }
+  // Sort threads by their newest message's date, newest first.
+  out.sort((a, b) => +new Date(b.messages[0].date) - +new Date(a.messages[0].date));
+  return out;
 }
 
 // addressOnly pulls "alice@x" out of "Alice <alice@x>"; on a plain

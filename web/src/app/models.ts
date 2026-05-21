@@ -51,3 +51,31 @@ export interface SendResult {
 // IMAP system flags used by the UI.
 export const FLAG_SEEN = '\\Seen';
 export const FLAG_FLAGGED = '\\Flagged';
+
+// Thread groups a set of MessageSummary entries that we believe belong
+// to the same conversation. We compute threads client-side from the
+// flat /api/mailboxes/{mailbox}/messages response — no backend change.
+//
+// Grouping key: subject with all leading "Re:"/"Fwd:"/"FW:"/"[tag]"
+// prefixes stripped, trimmed and lowercased. This is the gmail-style
+// "naive subject" rule. It misses subject-rewrite cases (where a
+// reply changes the subject) and over-groups two unrelated messages
+// that happen to share a subject — but for a personal mailbox at the
+// sizes we deal with, those edges are rare and the win on the
+// common "Re: foo" chain is huge.
+export interface Thread {
+  // Grouping key (normalized lowercase subject). Stable id for *ngFor.
+  key: string;
+  // Display subject — the canonical-cased subject of the latest message
+  // with Re:/Fwd: stripped. Used for the list row title.
+  subject: string;
+  // Messages in the thread, newest first. messages[0] is always the
+  // one we render in the row and open by default.
+  messages: MessageSummary[];
+  // Distinct senders (as raw From strings), newest first, capped at 3.
+  // Drives the comma-joined sender label on the row.
+  senders: string[];
+  // Number of unread messages in the thread. Drives the bold/unread
+  // styling and is shown as a count badge when > 0.
+  unreadCount: number;
+}
