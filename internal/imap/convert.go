@@ -97,11 +97,15 @@ func parseIncoming(raw []byte) store.IncomingMessage {
 	in.Subject = msg.Header.Get("Subject")
 	in.MessageID = strings.Trim(msg.Header.Get("Message-Id"), "<>")
 	if addr, err := mail.ParseAddress(msg.Header.Get("From")); err == nil {
-		// Preserve the display name when the From header carries one,
-		// so the list view renders `"Alice" <addr>` instead of the bare
-		// address. Empty Name keeps the historical bare-address shape.
+		// Preserve the (already RFC 2047-decoded) display name so the
+		// list view renders `Alice <addr>` instead of the bare address.
+		// We deliberately do NOT call addr.String(): that would
+		// RE-encode a non-ASCII Name back into `=?utf-8?q?...?=`,
+		// which is the wire transport form, not what a human inbox
+		// list should show. Empty Name keeps the historical
+		// bare-address shape.
 		if addr.Name != "" {
-			in.FromAddr = addr.String()
+			in.FromAddr = addr.Name + " <" + addr.Address + ">"
 		} else {
 			in.FromAddr = addr.Address
 		}

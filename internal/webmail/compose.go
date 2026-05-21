@@ -37,6 +37,24 @@ func formatFromHeader(displayName, address string) string {
 	return (&mail.Address{Name: displayName, Address: address}).String()
 }
 
+// formatFromAddr returns the value we store on Message.FromAddr — used
+// for inbox-list rendering, not for re-emitting onto the wire. The
+// crucial difference from formatFromHeader: we keep the display name
+// in **decoded** UTF-8 (`Barış Akın <addr>`) instead of RFC 2047
+// (`=?utf-8?q?Bar=C4=B1=C5=9F_Ak=C4=B1n?= <addr>`). The SPA's
+// senderName parser reads this field, and humans want to see the
+// name, not the encoded-word transport form.
+//
+// Empty display name still collapses to the bare address so the wire
+// shape of FromAddr stays unchanged for the historical case.
+func formatFromAddr(displayName, address string) string {
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		return address
+	}
+	return displayName + " <" + address + ">"
+}
+
 // attachment is one file the user attached to an outbound message.
 // Content is the raw bytes (already base64-decoded by the handler);
 // Filename + ContentType land on the part header. A nil/empty

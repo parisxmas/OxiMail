@@ -625,12 +625,15 @@ func parseHeaders(raw []byte) (subject, messageID, fromAddr string) {
 	subject = msg.Header.Get("Subject")
 	messageID = strings.Trim(msg.Header.Get("Message-Id"), "<>")
 	if addr, err := mail.ParseAddress(msg.Header.Get("From")); err == nil {
-		// Keep the display name on FromAddr when present so the
-		// inbox-list rendering can show `"Alice" <addr>` instead of
-		// stripping to the bare address. Empty Name → bare address,
-		// the historical shape (and what older clients expect).
+		// Keep the (already RFC 2047-decoded) display name on FromAddr
+		// when present so the inbox list renders `Alice <addr>`
+		// instead of stripping to the bare address. We deliberately
+		// do NOT call addr.String(): that would RE-encode a non-ASCII
+		// Name back into `=?utf-8?q?...?=`, which is the transport
+		// form, not what a human inbox list should show. Empty Name
+		// → bare address, the historical shape.
 		if addr.Name != "" {
-			fromAddr = addr.String()
+			fromAddr = addr.Name + " <" + addr.Address + ">"
 		} else {
 			fromAddr = addr.Address
 		}

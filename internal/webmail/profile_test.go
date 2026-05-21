@@ -79,6 +79,36 @@ func TestFormatFromHeader(t *testing.T) {
 	})
 }
 
+func TestFormatFromAddr(t *testing.T) {
+	// formatFromAddr produces the inbox-list metadata. It MUST stay
+	// plaintext UTF-8 even for non-ASCII names — re-encoding to RFC
+	// 2047 here would surface `=?utf-8?q?...?=` to the SPA, which
+	// renders the encoded-word verbatim because it's not in the
+	// business of decoding transport-layer encodings.
+	cases := []struct {
+		name        string
+		displayName string
+		address     string
+		want        string
+	}{
+		{name: "empty → bare", address: "x@y.test", want: "x@y.test"},
+		{name: "ASCII", displayName: "Alice", address: "alice@y.test", want: "Alice <alice@y.test>"},
+		{name: "non-ASCII stays decoded", displayName: "Barış Akın", address: "b@y.test", want: "Barış Akın <b@y.test>"},
+		// Whitespace is trimmed (handled by formatFromAddr, not the
+		// caller) so a profile with a single accidental space at the
+		// end doesn't surface as `Name  <addr>` in the list.
+		{name: "trim whitespace", displayName: "  Alice  ", address: "x@y.test", want: "Alice <x@y.test>"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := formatFromAddr(c.displayName, c.address)
+			if got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestNormaliseDisplayName(t *testing.T) {
 	t.Run("trims whitespace", func(t *testing.T) {
 		got, err := normaliseDisplayName("  Alice  ")
