@@ -271,22 +271,15 @@ interface UndoState {
         }
       </section>
 
-      <!-- Divider: list | reader. Drag to resize. Double-click resets. -->
-      <div
-        class="divider"
-        role="separator"
-        aria-label="Resize message list"
-        (mousedown)="startResize($event, 'list')"
-        (dblclick)="resetWidth('list')"
-      ></div>
-
-      <!-- Reader -->
+      <!-- Reader. Lives in the same grid column as the list; CSS
+           shows whichever matches the 'view' signal. No divider —
+           the gmail-style switch view has nothing to resize between. -->
       <section class="reader">
         @if (openMessage(); as msg) {
           <!-- Conversation header: subject + thread length hint -->
           <div class="conversation-head">
             <button
-              class="back mobile-only icon-btn"
+              class="back icon-btn"
               type="button"
               (click)="view.set('list')"
               aria-label="Back to list"
@@ -435,17 +428,25 @@ interface UndoState {
   styles: `
     .app {
       display: grid;
-      /* Two thin (6px) divider columns sit between the three panes.
-         --folders-width and --list-width are bound from the host via
-         signals; the reader takes whatever's left (1fr). */
+      /* Gmail-style two-pane layout: folders sidebar + a single
+         main column that shows either the list or the reader (never
+         both side-by-side). One drag handle between them; the main
+         column gets the full remaining width on every breakpoint. */
       grid-template-columns:
         var(--folders-width, 200px)
-        6px
-        var(--list-width, 360px)
         6px
         1fr;
       height: 100%;
     }
+    /* Show only one of list / reader at a time, picked by the
+       'view' signal on the host. This is what makes the layout
+       feel like gmail: clicking a row REPLACES the inbox with the
+       conversation; the back button returns. Default view is
+       'list' so a fresh page load lands on the inbox. */
+    .app[data-view='list'] .reader { display: none; }
+    .app[data-view='reader'] .list { display: none; }
+    .app[data-view='folders'] .list { display: none; }
+    .app[data-view='folders'] .reader { display: none; }
     /* The drag handle itself. 6px wide, transparent until hover/active
        so it reads as a thin gutter at rest. col-resize cursor advertises
        the affordance. */
@@ -1872,9 +1873,13 @@ export class MailboxComponent implements OnInit, OnDestroy {
   }
 
   // afterRemoval reloads the folder after a message left it (move or
-  // delete), and refreshes the folder counts.
+  // delete), refreshes the folder counts, and switches the gmail-style
+  // single-pane back to the list so the user isn't staring at an
+  // empty reader.
   private afterRemoval(): void {
     this.openMessage.set(null);
+    this.openThreadDetails.set([]);
+    this.view.set('list');
     this.refreshMailboxes();
     this.loadMessages();
   }
