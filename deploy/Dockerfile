@@ -51,7 +51,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* && \
     groupadd --system --gid 999 oximail && \
     useradd  --system --uid 999 --gid 999 --home-dir /var/lib/oximail --create-home oximail && \
-    install -d -o oximail -g oximail /var/lib/oximail/acme-cache
+    install -d -o oximail -g oximail /var/lib/oximail/acme-cache && \
+    install -d -o oximail -g oximail /var/lib/oximail/av
 
 COPY --from=go-builder   /out/oximail       /usr/local/bin/oximail
 COPY --from=go-builder   /out/oximailctl    /usr/local/bin/oximailctl
