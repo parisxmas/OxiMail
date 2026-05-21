@@ -2,6 +2,7 @@ package webmail
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/parisxmas/OxiMail/internal/av"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
@@ -597,6 +599,10 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, acc *store.A
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if status, msg, ok := s.scanAttachmentsOrError(r.Context(), attachments); !ok {
+		writeError(w, status, msg)
+		return
+	}
 
 	messageID := randomID() + "@" + addressDomain(acc.Address)
 	raw := buildMessage(composeFields{
@@ -721,6 +727,46 @@ func (s *Server) loadOwnedMessage(w http.ResponseWriter, r *http.Request, acc *s
 		return nil, false
 	}
 	return m, true
+}
+
+// scanAttachmentsOrError runs every attachment through the AV
+// daemon and turns the result into an HTTP-status + message pair.
+// Returns ok = true on clean / disabled-AV / fail-open paths.
+// Returns ok = false with an appropriate status code on:
+//
+//   - virus hit: 400 + signature name
+//   - daemon unreachable AND avRequired: 502 + diagnostic
+//
+// When AV is disabled (s.av == nil) the scan is a no-op and the
+// function always returns ok = true — the null-object shape
+// from internal/av flows all the way through.
+func (s *Server) scanAttachmentsOrError(ctx context.Context, atts []attachment) (int, string, bool) {
+	if s.av == nil || len(atts) == 0 {
+		return 0, "", true
+	}
+	for i, a := range atts {
+		v, err := s.av.Scan(ctx, a.Content)
+		if err != nil {
+			if errors.Is(err, av.ErrUnreachable) && !s.avRequired {
+				// Fail-open: log and let the message ship. The
+				// receiver's AV is the catch-net.
+				log.Printf("webmail: AV unreachable, attachment %d (%q) passed without scan: %v",
+					i, a.Filename, err)
+				continue
+			}
+			return http.StatusBadGateway,
+				fmt.Sprintf("attachment %d (%q): antivirus scan failed: %v", i, a.Filename, err),
+				false
+		}
+		if !v.OK {
+			return http.StatusBadRequest,
+				fmt.Sprintf("attachment %d (%q) is blocked — antivirus signature %q matched. "+
+					"If this is a false positive, contact the operator.",
+					i, a.Filename, v.Threat),
+				false
+		}
+	}
+	return 0, "", true
 }
 
 // decodeAttachments base64-decodes the SPA-side attachment payload

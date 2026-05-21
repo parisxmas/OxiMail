@@ -86,6 +86,19 @@ type Config struct {
 	// RspamdURL — content spam scanning over HTTP. Empty disables it.
 	RspamdURL string
 
+	// AVSocket is the Unix-socket path to a clamd-protocol antivirus
+	// daemon. Webmail compose dials it to scan outbound attachments
+	// before relay (Phase B in the AV plan). Empty disables the
+	// integration; rspamd's antivirus module (Phase A) is the
+	// inbound counterpart and lives at a different control surface.
+	AVSocket string
+	// AVRequired, when true, treats an unreachable AV daemon as a
+	// send-blocking failure: the webmail handler returns 502 and
+	// the attachment doesn't go out. When false (the default) an
+	// AV outage logs a warning but mail still ships — the
+	// receiver's AV catches anything we miss.
+	AVRequired bool
+
 	// DNSBLZones is the comma-separated list of DNS blocklist zones
 	// queried at connection-time (see internal/spam/dnsbl.go). The
 	// default — "zen.spamhaus.org" — only works when OxiMail resolves
@@ -154,6 +167,8 @@ func Load() Config {
 		OxiDBHost:      env("OXIMAIL_OXIDB_HOST", "127.0.0.1"),
 		OxiDBPort:      envInt("OXIMAIL_OXIDB_PORT", 4444),
 		RspamdURL:      env("OXIMAIL_RSPAMD_URL", ""),
+		AVSocket:       env("OXIMAIL_AV_SOCKET", ""),
+		AVRequired:     envBool("OXIMAIL_AV_REQUIRED"),
 		DNSBLZones:     splitCSV(envOrDefault("OXIMAIL_DNSBL_ZONES", "zen.spamhaus.org")),
 		GreylistDelay:  envDuration("OXIMAIL_GREYLIST_DELAY", time.Minute),
 		SRSSecret:      env("OXIMAIL_SRS_SECRET", ""),
@@ -264,6 +279,18 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envBool reads an env var as a boolean. "true" / "1" / "yes" / "on"
+// (case-insensitive) → true; anything else, including unset, → false.
+// We deliberately don't error on a typo: a stray "treu" defaulting to
+// false is the correct conservative reading.
+func envBool(key string) bool {
+	switch strings.ToLower(os.Getenv(key)) {
+	case "true", "1", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // envOrDefault is like env, but distinguishes "unset" from "set to the

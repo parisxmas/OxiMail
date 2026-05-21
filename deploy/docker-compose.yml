@@ -170,6 +170,20 @@ services:
       # wires the inbound spam pipeline to it. Set this to empty
       # in your .env to disable scanning entirely.
       - OXIMAIL_RSPAMD_URL=${OXIMAIL_RSPAMD_URL-http://rspamd:11333}
+      # Outbound AV: oximail dials the avd sidecar over a Unix
+      # socket to scan webmail compose attachments before relay.
+      # Empty value disables the integration (mail goes out
+      # unscanned). The default below assumes the avd sidecar
+      # is present per deploy/docker-compose.yml.
+      - OXIMAIL_AV_SOCKET=${OXIMAIL_AV_SOCKET-/run/avd/avd.sock}
+      # When true, an unreachable / broken avd causes outbound
+      # webmail sends to fail with a 502; when false (default),
+      # avd outages log a warning but mail still goes out. The
+      # tradeoff is "block legit sends during an outage" vs
+      # "accept the rare moment a virus slips through during a
+      # 30-second avd restart". Default leans on Phase A
+      # (rspamd) as the catch-net on the receiver's side too.
+      - OXIMAIL_AV_REQUIRED=${OXIMAIL_AV_REQUIRED-false}
     ports:
       - "25:25"        # SMTP MX (inbound)
       - "465:465"      # SMTPS submission
@@ -181,6 +195,12 @@ services:
       - "9090:9090"    # /metrics, /healthz, /readyz
     volumes:
       - oximail-acme:/var/lib/oximail/acme-cache
+      # AV daemon socket — read-only mount from the shared
+      # avd-socket volume. internal/av in oximail dials
+      # /run/avd/avd.sock to scan outbound webmail attachments
+      # before they leave the host. Rspamd (Phase A) handles
+      # inbound; this is the symmetric outbound guard.
+      - avd-socket:/run/avd:ro
     networks:
       - oximail
 

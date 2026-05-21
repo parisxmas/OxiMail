@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/parisxmas/OxiMail/internal/av"
 	"github.com/parisxmas/OxiMail/internal/config"
 	"github.com/parisxmas/OxiMail/internal/imap"
 	"github.com/parisxmas/OxiMail/internal/observability"
@@ -83,17 +84,24 @@ func main() {
 	// Components, in start order. The implicit-TLS surfaces are only
 	// brought up when a certificate is configured.
 	pipeline := spam.New(cfg.RspamdURL, cfg.DNSBLZones, cfg.GreylistDelay)
+	avClient := av.New(cfg.AVSocket, 0)
+	if avClient != nil {
+		log.Printf("AV: outbound attachment scanning enabled — socket=%s required=%v",
+			cfg.AVSocket, cfg.AVRequired)
+	}
+	webmailSrv := webmail.New(cfg.WebmailAddr, cfg.WebmailStatic, st, tlsConfig, webmail.MTASTSPolicy{
+		Mode:   cfg.MTASTSMode,
+		MX:     mtastsMX(cfg),
+		MaxAge: cfg.MTASTSMaxAge,
+	})
+	webmailSrv.SetAV(avClient, cfg.AVRequired)
 	components := []named{
 		{"observability", observability.New(cfg.MetricsAddr, st)},
 		{"spam", pipeline},
 		{"smtp", smtp.New(cfg.SMTPAddr, cfg.Hostname, st, pipeline, tlsConfig, fwd)},
 		{"submission", smtp.NewSubmission(cfg.SubmissionAddr, cfg.Hostname, st, tlsConfig)},
 		{"imap", imap.New(cfg.IMAPAddr, st, tlsConfig)},
-		{"webmail", webmail.New(cfg.WebmailAddr, cfg.WebmailStatic, st, tlsConfig, webmail.MTASTSPolicy{
-			Mode:   cfg.MTASTSMode,
-			MX:     mtastsMX(cfg),
-			MaxAge: cfg.MTASTSMaxAge,
-		})},
+		{"webmail", webmailSrv},
 	}
 	if tlsConfig != nil {
 		components = append(components,

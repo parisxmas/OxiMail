@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/parisxmas/OxiMail/internal/av"
 	"github.com/parisxmas/OxiMail/internal/ratelimit"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
@@ -70,7 +71,22 @@ type Server struct {
 	// would never travel over a development plaintext listener and the
 	// browser would silently drop the login.
 	secure bool
-	stop   sync.Once
+	// av is the outbound-attachment scanner. nil = AV disabled
+	// (the package's null-object shape); the handler skips the
+	// scan and lets the message through. avRequired flips the
+	// fail-mode: when true, an unreachable AV blocks the send.
+	av         *av.Client
+	avRequired bool
+	stop       sync.Once
+}
+
+// SetAV plumbs an antivirus client into the server. Called once
+// from main after webmail.New so the import cycle stays one-way
+// (webmail depends on av, not vice versa). A nil client or empty
+// socket disables the integration.
+func (s *Server) SetAV(client *av.Client, required bool) {
+	s.av = client
+	s.avRequired = required
 }
 
 // MTASTSPolicy is the operator-published MTA-STS policy (RFC 8461)
