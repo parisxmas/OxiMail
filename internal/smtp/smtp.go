@@ -355,8 +355,8 @@ func (s *session) Data(r io.Reader) error {
 	// nothing about our signature DB beyond what's already public
 	// (EICAR + any operator-loaded list). nil av.Client is the
 	// "scanning disabled" idiom and short-circuits clean.
-	if av := s.backend.av; av != nil {
-		v, err := av.Scan(context.Background(), raw)
+	if avClient := s.backend.av; avClient != nil {
+		v, err := av.ScanMessage(context.Background(), avClient, raw)
 		if err != nil {
 			log.Printf("smtp: av scan error: %v", err)
 			return &gosmtp.SMTPError{
