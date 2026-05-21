@@ -1,4 +1,4 @@
-import { Component, OnDestroy, OnInit, computed, inject, signal } from '@angular/core';
+import { Component, HostListener, OnDestroy, OnInit, computed, inject, signal } from '@angular/core';
 import { DatePipe } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
 import {
@@ -148,11 +148,14 @@ interface UndoState {
           <p class="hint">No messages.</p>
         } @else {
           @for (t of threads(); track t.key) {
-            <button
+            <div
               class="row"
               [class.unread]="t.unreadCount > 0"
               [class.active]="threadHasOpen(t)"
               (click)="open(t.messages[0].id)"
+              role="button"
+              tabindex="0"
+              (keydown.enter)="open(t.messages[0].id)"
             >
               <span class="avatar" [style.background]="avatarColor(t.messages[0].from)">{{ initials(t.messages[0].from) }}</span>
               <div class="row-main">
@@ -170,7 +173,48 @@ interface UndoState {
                   <div class="row-snippet">{{ t.messages[0].snippet }}</div>
                 }
               </div>
-            </button>
+              <!-- Hover-only action strip. Stop click propagation so the
+                   button doesn't also open the thread underneath. The
+                   actions apply to the thread's newest message (the one
+                   the user sees in the row); a multi-message thread thus
+                   archives/trashes one mail at a time, like gmail's
+                   per-row hover actions. -->
+              <div class="row-actions" (click)="$event.stopPropagation()">
+                <button
+                  type="button"
+                  class="icon-btn"
+                  (click)="archive(t.messages[0])"
+                  title="Archive"
+                  aria-label="Archive"
+                >
+                  <i-lucide [img]="icons.Archive" [size]="16"></i-lucide>
+                </button>
+                <button
+                  type="button"
+                  class="icon-btn"
+                  (click)="deleteOrTrash(t.messages[0])"
+                  title="Delete"
+                  aria-label="Delete"
+                >
+                  <i-lucide [img]="icons.Trash2" [size]="16"></i-lucide>
+                </button>
+                @if (!t.messages[0].seen) {
+                  <!-- Mark-unread only makes sense when the row is read
+                       (well, currently flagged unread). Hide otherwise
+                       to avoid a no-op click. -->
+                } @else {
+                  <button
+                    type="button"
+                    class="icon-btn"
+                    (click)="markUnread(t.messages[0])"
+                    title="Mark unread"
+                    aria-label="Mark unread"
+                  >
+                    <i-lucide [img]="icons.MailOpen" [size]="16"></i-lucide>
+                  </button>
+                }
+              </div>
+            </div>
           }
         }
       </section>
@@ -533,7 +577,7 @@ interface UndoState {
        Hover gives a subtle nudge; active is the selected message. */
     .row {
       display: grid;
-      grid-template-columns: auto 1fr;
+      grid-template-columns: auto 1fr auto;
       gap: 10px;
       width: 100%;
       text-align: left;
@@ -544,9 +588,30 @@ interface UndoState {
       padding: 12px 14px;
       cursor: pointer;
       transition: background 80ms ease;
+      position: relative;
     }
     .row:hover {
       background: var(--bg-muted);
+    }
+    /* Hover-only quick actions on the right of each row. Hidden by
+       default (display: none keeps them out of layout so the row
+       doesn't reserve space and shift). Visible on row hover or
+       when any child has keyboard focus. */
+    .row-actions {
+      display: none;
+      align-items: center;
+      gap: 2px;
+      align-self: center;
+    }
+    .row:hover .row-actions,
+    .row-actions:focus-within {
+      display: inline-flex;
+    }
+    /* Slightly smaller icon buttons inside row actions so they
+       don't visually compete with the avatar. */
+    .row-actions .icon-btn {
+      width: 28px;
+      height: 28px;
     }
     .row.active {
       background: var(--bg-sunken);
@@ -1055,7 +1120,11 @@ export class MailboxComponent implements OnInit, OnDestroy {
     });
   }
 
-  markUnread(msg: MessageDetail): void {
+  // markUnread / archive / deleteOrTrash all only need {id, subject}
+  // — both MessageSummary (list rows) and MessageDetail (the reader)
+  // satisfy that shape, so we accept the narrow structural type and
+  // let either caller through without a coerce step.
+  markUnread(msg: { id: number; subject: string }): void {
     this.api.setFlags(msg.id, 'remove', [FLAG_SEEN]).subscribe({
       next: (updated) => this.applyUpdate(updated),
     });
@@ -1064,7 +1133,7 @@ export class MailboxComponent implements OnInit, OnDestroy {
   // archive moves the message to the Archive folder. Distinct from
   // deleteOrTrash — the user explicitly wants to keep this message,
   // just out of the Inbox.
-  archive(msg: MessageDetail): void {
+  archive(msg: { id: number; subject: string }): void {
     const sourceFolder = this.selected();
     this.api.move(msg.id, 'Archive').subscribe({
       next: () => {
@@ -1077,7 +1146,7 @@ export class MailboxComponent implements OnInit, OnDestroy {
   // deleteOrTrash matches Gmail's single-button delete UX: from any
   // folder it moves to Trash; from inside Trash itself it permanently
   // removes the message (after a confirm so it's not a foot-gun).
-  deleteOrTrash(msg: MessageDetail): void {
+  deleteOrTrash(msg: { id: number; subject: string }): void {
     if (this.inTrash()) {
       if (!confirm('Delete this message permanently? This cannot be undone.')) {
         return;
@@ -1181,6 +1250,110 @@ export class MailboxComponent implements OnInit, OnDestroy {
   closeCompose(): void {
     this.composing.set(false);
     this.composeSeed.set(null);
+  }
+
+  // Gmail-style keyboard shortcuts. Active anywhere on the page
+  // unless the user is typing into a real input (so `c` doesn't
+  // hijack the search box's letter-by-letter typing). We also
+  // bail on modifier-held keypresses so the browser's own
+  // shortcuts (Cmd+R reload, Cmd+L address bar, etc.) keep working.
+  //
+  // The shortcut surface is small on purpose — j/k to navigate,
+  // c/r to author, e/#/u to triage, / to search. That's the gmail
+  // core; the rest of gmail's wider set (s star, x select, l label,
+  // …) can come later when there's a real demand.
+  @HostListener('document:keydown', ['$event'])
+  protected onGlobalKeydown(e: KeyboardEvent): void {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const target = e.target as HTMLElement | null;
+    if (target && isEditable(target)) return;
+    // Compose dialog is its own modal — its own escape / shortcut
+    // semantics should win. We deliberately do nothing while it's
+    // open (the dialog handles its own keys).
+    if (this.composing()) return;
+
+    switch (e.key) {
+      case 'j':
+        e.preventDefault();
+        this.moveThreadCursor(+1);
+        break;
+      case 'k':
+        e.preventDefault();
+        this.moveThreadCursor(-1);
+        break;
+      case 'c':
+        e.preventDefault();
+        this.openCompose();
+        break;
+      case 'r': {
+        const open = this.openMessage();
+        if (open) {
+          e.preventDefault();
+          this.reply(open, e.shiftKey);
+        }
+        break;
+      }
+      case 'e': {
+        // Archive the open message; if nothing's open, archive the
+        // newest message of the first thread (so e on a fresh
+        // landing still works).
+        const target = this.openMessage() ?? this.threads()[0]?.messages[0];
+        if (target) {
+          e.preventDefault();
+          this.archive(target);
+        }
+        break;
+      }
+      case '#': {
+        const target = this.openMessage() ?? this.threads()[0]?.messages[0];
+        if (target) {
+          e.preventDefault();
+          this.deleteOrTrash(target);
+        }
+        break;
+      }
+      case 'u':
+        // Back-to-list: clears the reader. Useful on narrow screens
+        // (also handy on wide screens to deselect).
+        if (this.openMessage()) {
+          e.preventDefault();
+          this.openMessage.set(null);
+          this.view.set('list');
+        }
+        break;
+      case '/': {
+        // Focus the search input. We use a DOM lookup rather than a
+        // @ViewChild ref because the search field is a tiny part of
+        // a large template — querySelector is cheap and keeps the
+        // component lean.
+        const input = document.querySelector<HTMLInputElement>('input.search');
+        if (input) {
+          e.preventDefault();
+          input.focus();
+          input.select();
+        }
+        break;
+      }
+    }
+  }
+
+  // moveThreadCursor advances the open message to the next / previous
+  // thread in the list. Wraps neither end — gmail also stops at
+  // boundaries, and wrapping makes "I'm at the bottom, did I miss
+  // one?" confusing.
+  private moveThreadCursor(delta: number): void {
+    const list = this.threads();
+    if (list.length === 0) return;
+    const open = this.openMessage();
+    let idx = -1;
+    if (open) {
+      idx = list.findIndex((t) => t.messages.some((m) => m.id === open.id));
+    }
+    let next = idx + delta;
+    if (idx === -1 && delta > 0) next = 0;
+    if (idx === -1 && delta < 0) next = list.length - 1;
+    if (next < 0 || next >= list.length) return;
+    this.open(list[next].messages[0].id);
   }
 
   onSent(): void {
@@ -1384,6 +1557,21 @@ export class MailboxComponent implements OnInit, OnDestroy {
       boxes.map((b) => (b.name === name ? { ...b, unseen } : b)),
     );
   }
+}
+
+// isEditable reports whether el (or any ancestor) is a control the
+// user is actively typing into. The keyboard-shortcut handler bails
+// out in that case so `c` doesn't yank the cursor out of the search
+// box while you're spelling "contract". contenteditable covers
+// rich-text editors (the Quill compose body matches), input /
+// textarea / select cover the standard form fields.
+function isEditable(el: HTMLElement): boolean {
+  for (let cur: HTMLElement | null = el; cur; cur = cur.parentElement) {
+    const tag = cur.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (cur.isContentEditable) return true;
+  }
+  return false;
 }
 
 // SUBJECT_PREFIX_RE captures one leading reply/forward-style prefix
