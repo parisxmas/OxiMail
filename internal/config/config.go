@@ -83,9 +83,6 @@ type Config struct {
 	OxiDBHost string
 	OxiDBPort int
 
-	// RspamdURL — content spam scanning over HTTP. Empty disables it.
-	RspamdURL string
-
 	// AVSigDB optionally points at an extra signature database loaded
 	// alongside the builtin EICAR set. Format is the same one-line
 	// `<sha256>:<name>` text we use everywhere; comments and blank
@@ -185,7 +182,6 @@ func Load() Config {
 		ACMEChallengeAddr: env("OXIMAIL_ACME_CHALLENGE_ADDR", ":80"),
 		OxiDBHost:      env("OXIMAIL_OXIDB_HOST", "127.0.0.1"),
 		OxiDBPort:      envInt("OXIMAIL_OXIDB_PORT", 4444),
-		RspamdURL:      env("OXIMAIL_RSPAMD_URL", ""),
 		AVSigDB:          env("OXIMAIL_AV_SIGDB", ""),
 		AVUpdateURL:      env("OXIMAIL_AV_UPDATE_URL", ""),
 		AVUpdateInterval: envDuration("OXIMAIL_AV_UPDATE_INTERVAL", 0),

@@ -83,7 +83,7 @@ func main() {
 
 	// Components, in start order. The implicit-TLS surfaces are only
 	// brought up when a certificate is configured.
-	pipeline := spam.New(cfg.RspamdURL, cfg.DNSBLZones, cfg.GreylistDelay)
+	pipeline := spam.New(cfg.DNSBLZones, cfg.GreylistDelay)
 	// The AV scanner takes any non-empty extra-sigdb paths the
 	// operator + the auto-updater have wired up; missing files are
 	// tolerated (the updater writes its file on first refresh,

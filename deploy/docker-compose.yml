@@ -41,47 +41,6 @@ services:
       timeout: 2s
       retries: 12
 
-  rspamd:
-    # Content scanner. Empty OXIMAIL_RSPAMD_URL on the oximail side
-    # disables the integration, so this sidecar is opt-in at the
-    # url level — but defaulting both the container AND the url
-    # makes a fresh deploy spam-aware out of the box.
-    #
-    # The default config is permissive (no DKIM/SPF rejects, no
-    # bayes training out of the box) — we lean on Rspamd's mime
-    # heuristics, fuzzy, surbl, and phishing modules to flag
-    # obvious malware attachments and known-bad URLs.
-    image: rspamd/rspamd:latest
-    container_name: oximail-rspamd
-    restart: unless-stopped
-    networks:
-      - oximail
-    volumes:
-      # Persist learned bayes + history + neural data across
-      # container restarts. Without this, every restart wipes the
-      # adaptive parts and quality slowly degrades.
-      - rspamd-data:/var/lib/rspamd
-      # Local config drop-ins — modules we don't use are disabled
-      # here (neural, fuzzy_check, clickhouse, history_redis, p0f,
-      # metric_exporter, replies, bayes). Each file is a one-liner
-      # `enabled = false;` that tells rspamd to skip the module's
-      # init + symbol registration. Saves ~60-80 MB of RSS on a
-      # personal mailbox where none of the disabled modules have
-      # the backing service (redis, p0f, clickhouse) to be useful.
-      - ./rspamd/local.d:/etc/rspamd/local.d:ro
-    healthcheck:
-      # Use bash explicitly: the Debian slim base ships dash as
-      # /bin/sh and dash has no /dev/tcp builtin. 11333 is the
-      # normal worker (the /checkv2 endpoint the spam pipeline
-      # POSTs to). Probing it directly is more accurate than the
-      # controller-port probe we used before — and we've since
-      # disabled the controller worker for memory reasons, so
-      # this is the only listener left.
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/11333"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-
   oximail:
     build:
       context: ..
@@ -90,12 +49,6 @@ services:
     restart: unless-stopped
     depends_on:
       oxidb:
-        condition: service_healthy
-      rspamd:
-        # Not strictly required — the spam.New pipeline fails open
-        # when Rspamd is unreachable — but waiting for healthy
-        # avoids a few seconds of "every message bypasses the
-        # filter" right after a cold start.
         condition: service_healthy
     environment:
       # Server identity + storage wiring.
@@ -118,14 +71,10 @@ services:
       - OXIMAIL_LOG_FORMAT=${OXIMAIL_LOG_FORMAT:-json}
       - OXIMAIL_LOG_LEVEL=${OXIMAIL_LOG_LEVEL:-info}
       # Spam-pipeline knobs. Empty OXIMAIL_DNSBL_ZONES disables DNSBL;
-      # 0 OXIMAIL_GREYLIST_DELAY disables greylisting.
+      # 0 OXIMAIL_GREYLIST_DELAY disables greylisting. The whole
+      # pipeline runs in-process now — no Rspamd sidecar.
       - OXIMAIL_DNSBL_ZONES=${OXIMAIL_DNSBL_ZONES-zen.spamhaus.org}
       - OXIMAIL_GREYLIST_DELAY=${OXIMAIL_GREYLIST_DELAY:-1m}
-      # Content scanner. The rspamd sidecar above is started
-      # automatically; OXIMAIL_RSPAMD_URL=http://rspamd:11333
-      # wires the inbound spam pipeline to it. Set this to empty
-      # in your .env to disable scanning entirely.
-      - OXIMAIL_RSPAMD_URL=${OXIMAIL_RSPAMD_URL-http://rspamd:11333}
       # AV scanner runs in-process — no daemon, no socket. By
       # default the oximail binary ships the EICAR test signature
       # so a fresh deploy is virus-aware. Setting OXIMAIL_AV_SIGDB
@@ -165,7 +114,6 @@ volumes:
   oxidb-data:
   oximail-acme:
   oximail-av:
-  rspamd-data:
 
 networks:
   oximail:

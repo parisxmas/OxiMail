@@ -263,7 +263,7 @@ func TestGreylisterSweep(t *testing.T) {
 
 func TestPipelineCheck(t *testing.T) {
 	clk := newFakeClock()
-	p := New("", nil, -1) // -1 → default greylist delay
+	p := New(nil, -1) // -1 → default greylist delay
 	p.rateLimit.now = clk.now
 	p.greylist.now = clk.now
 	p.dnsbl.lookup = notListed

@@ -3,15 +3,22 @@
 // and short-circuit — the first stage that does not return Accept wins:
 //
 //  1. connection-time — rate limiting, DNS blocklists, greylisting
-//  2. envelope        — SPF, DKIM, DMARC
-//  3. content         — Rspamd over HTTP
+//  2. envelope        — SPF, DKIM, DMARC (native Go, no Rspamd)
 //
-// All three stages are implemented. Stage 1 (ratelimit.go, dnsbl.go,
+// Both stages are implemented. Stage 1 (ratelimit.go, dnsbl.go,
 // greylist.go) keeps its state in memory, which is fine because it is
 // disposable — losing it on a restart just re-greylists and resets
-// counters. Stage 2 (envelope.go) runs SPF / DKIM / DMARC and rejects
-// only on a DMARC p=reject failure. Stage 3 (rspamd.go) runs only when a
-// Rspamd endpoint is configured.
+// counters. Stage 2 (envelope.go) runs SPF / DKIM / DMARC via
+// blitiri.com.ar/go/spf + emersion/go-msgauth and rejects only on a
+// DMARC p=reject failure.
+//
+// Earlier revisions of this package also called Rspamd as a stage-3
+// content scanner. That gave us URL/MIME heuristics and a phishing
+// classifier but cost ~140 MB of resident memory in a sidecar
+// container. For a single-mailbox personal server the auth-only
+// pipeline (stage 1 + stage 2) plus the AV scanner in internal/av
+// covers the realistic threat surface, so the rspamd dependency is
+// gone.
 //
 // TODO: move stage-1 state to OxiMem so a multi-instance deployment
 // shares one view of each sender.
@@ -62,33 +69,25 @@ type Pipeline struct {
 	dnsbl     *dnsblChecker
 	greylist  *greylister
 	envelope  *envelopeChecker
-	// rspamd is the content stage; nil when no Rspamd endpoint is
-	// configured.
-	rspamd *rspamdChecker
 }
 
-// New builds the pipeline. An empty rspamdURL disables the content
-// (Rspamd) stage; a nil dnsblZones uses the default list, an explicit
-// empty slice disables DNSBL queries entirely. A zero greylistDelay
-// short-circuits greylisting (it accepts on first contact instead);
-// a negative value uses the package default.
-func New(rspamdURL string, dnsblZones []string, greylistDelay time.Duration) *Pipeline {
+// New builds the pipeline. A nil dnsblZones uses the default list, an
+// explicit empty slice disables DNSBL queries entirely. A zero
+// greylistDelay short-circuits greylisting (it accepts on first
+// contact instead); a negative value uses the package default.
+func New(dnsblZones []string, greylistDelay time.Duration) *Pipeline {
 	if dnsblZones == nil {
 		dnsblZones = defaultDNSBLZones
 	}
 	if greylistDelay < 0 {
 		greylistDelay = defaultGreylistDelay
 	}
-	p := &Pipeline{
+	return &Pipeline{
 		rateLimit: newRateLimiter(defaultRateLimit, defaultRateWindow),
 		dnsbl:     newDNSBLChecker(dnsblZones),
 		greylist:  newGreylister(greylistDelay),
 		envelope:  newEnvelopeChecker(),
 	}
-	if rspamdURL != "" {
-		p.rspamd = newRspamdChecker(rspamdURL)
-	}
-	return p
 }
 
 // Permissive returns a pipeline that accepts every message without any
@@ -142,12 +141,6 @@ func (p *Pipeline) Check(remoteIP, mailFrom string, rcptTo []string, raw []byte)
 	// Stage 2 — envelope (SPF / DKIM / DMARC).
 	if v := p.envelope.check(remoteIP, mailFrom, raw); v != Accept {
 		return v, nil
-	}
-	// Stage 3 — content: Rspamd, when an endpoint is configured.
-	if p.rspamd != nil {
-		if v := p.rspamd.check(remoteIP, mailFrom, rcptTo, raw); v != Accept {
-			return v, nil
-		}
 	}
 	return Accept, nil
 }
