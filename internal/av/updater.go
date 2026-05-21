@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"time"
 )
@@ -174,6 +176,20 @@ func (u *Updater) refresh(ctx context.Context) error {
 	if err := u.client.Reload(); err != nil {
 		return fmt.Errorf("client reload: %w", err)
 	}
+
+	// The refresh + Reload cycle peaks heap with several large
+	// transients (per-feed hash sets, the merged unique map, the
+	// serialised sigdb buffer, the file-read buffer that loadInto
+	// then parses). After Reload returns, none of those are
+	// referenced — but Go's heap retains the arenas it grew, and
+	// MADV_FREE on Linux leaves the pages mapped as RSS until
+	// memory pressure. A one-off GC + scavenger pass right here
+	// trims the heap back to the live AV map (~100 MB for ~1M
+	// entries) instead of leaving the daemon at the parse-peak
+	// 600+ MB for hours between refreshes.
+	runtime.GC()
+	debug.FreeOSMemory()
+
 	log.Printf("av-updater: refreshed — %d unique hashes across %d feed(s), total active signatures=%d",
 		len(totalUnique), len(u.feeds), u.client.SignatureCount())
 	return nil
