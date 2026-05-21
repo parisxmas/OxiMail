@@ -86,11 +86,16 @@ interface UndoState {
     >
       <!-- Folder sidebar -->
       <aside class="folders">
+        <div class="brand" aria-hidden="true">
+          <span class="brand-glyph">℠</span>
+          <span class="brand-word">OxiMail</span>
+        </div>
         <div class="me" [title]="api.address()">{{ api.address() }}</div>
         <button class="compose-btn primary icon-text" (click)="openCompose()">
           <i-lucide [img]="icons.Edit3" [size]="16"></i-lucide>
           Compose
         </button>
+        <div class="folders-label uppercase-label">Folders</div>
         @for (mb of mailboxes(); track mb.name) {
           <div class="folder-row">
             <button
@@ -454,25 +459,63 @@ interface UndoState {
     }
   `,
   styles: `
+    /* OxiMail — mailbox view.
+     *
+     * Layout: folders sidebar | resize | main column (list on top,
+     * resize, reader on bottom). The grid is wired to two CSS
+     * variables (--folders-width, --list-height) the component
+     * updates via the resize signals; drag-to-resize stays smooth
+     * because we change a variable, not the structure.
+     *
+     * Visual language: warm parchment background, terracotta accent,
+     * Fraunces (serif) for subjects + counts + headings, Geist for
+     * everything else. Unread state is a 3px left-edge accent
+     * stripe (a deliberate editorial mark) + bold ink — NOT a
+     * filled pill, which would compete with the action accents.
+     */
+
+    :host {
+      display: block;
+      height: 100%;
+      color: var(--text);
+      font-family: var(--font-ui);
+      font-size: var(--text-base);
+    }
+
     .app {
       display: grid;
-      /* Two columns at desktop widths: folders sidebar | main. The
-         main column is itself a vertical stack of [list, divider,
-         reader] — Outlook-style "reading pane: bottom". */
       grid-template-columns:
-        var(--folders-width, 200px)
+        var(--folders-width, 220px)
         6px
         1fr;
       height: 100%;
     }
-    /* Main column: list on top, hdivider, reader below. Three-row
-       grid — first row's height comes from the --list-height CSS
-       variable bound to the listHeight signal so a drag on the
-       hdivider updates it live. The reader takes whatever's left
-       (1fr). min-height:0 on each pane is what keeps the children's
-       intrinsic content height from blowing out the grid; without
-       it the whole column would scroll instead of each pane
-       independently. */
+
+    /* Vertical divider (folders | main). Hairline border at rest, a
+       generous invisible hit pad either side, accent-tinted on
+       interaction. The same treatment applies to the horizontal
+       divider below so both axes feel of one piece. */
+    .divider {
+      position: relative;
+      background: var(--border);
+      cursor: col-resize;
+      user-select: none;
+      transition: background 140ms var(--ease-quick);
+    }
+    .divider::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: -5px;
+      right: -5px;
+    }
+    .divider:hover { background: var(--accent); opacity: 0.55; }
+    .divider:active { background: var(--accent); opacity: 0.85; }
+
+    /* Main column: list stacked over reader. The first row's height
+       is bound to --list-height (the resize signal); the divider
+       is a fixed 6px; the reader takes whatever is left. */
     .main {
       display: grid;
       grid-template-rows: var(--list-height, 380px) 6px 1fr;
@@ -480,361 +523,394 @@ interface UndoState {
       min-height: 0;
     }
     .main .list,
-    .main .reader {
-      min-height: 0;
-    }
-    /* Gutter between list and reader. The transparent-until-hover
-       design from the folders divider was invisible here — users
-       reported they couldn't find the drop zone. Give it a visible
-       neutral line at rest (matches the rest of the chrome) and
-       use ::before to extend the pointer hit area without
-       widening the visual gutter. Three states stack cleanly:
-         rest    — thin grey line
-         hover   — accent-tinted band
-         active  — accent-tinted band, slightly stronger */
+    .main .reader { min-height: 0; }
+
     .hdivider {
       position: relative;
       height: 6px;
       background: var(--border);
       cursor: row-resize;
-      transition: background 120ms ease;
+      transition: background 140ms var(--ease-quick);
     }
     .hdivider::before {
-      /* 12px-tall hit pad centred on the visible line. Users with
-         imprecise mice and trackpads can grab anywhere in that
-         band; the visual gutter stays a calm 6px. */
       content: '';
       position: absolute;
       left: 0;
       right: 0;
-      top: -4px;
-      bottom: -4px;
+      top: -5px;
+      bottom: -5px;
     }
-    .hdivider:hover,
-    .hdivider:active {
-      background: var(--accent);
-    }
-    .hdivider:hover { opacity: 0.5; }
-    .hdivider:active { opacity: 0.8; }
-    /* Same visible-at-rest treatment for the folders divider so
-       the two axes feel consistent. Without this the user only
-       discovers the sidebar resize by accident. */
-    .divider {
-      background: var(--border);
-    }
-    .divider::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      bottom: 0;
-      left: -4px;
-      right: -4px;
-    }
-    .divider { position: relative; }
-    /* The drag handle itself. 6px wide, transparent until hover/active
-       so it reads as a thin gutter at rest. col-resize cursor advertises
-       the affordance. */
-    .divider {
-      background: transparent;
-      cursor: col-resize;
-      user-select: none;
-      transition: background 120ms ease;
-    }
-    .divider:hover,
-    .divider:active {
-      background: var(--accent);
-      opacity: 0.4;
-    }
-    .mobile-only { display: none; }
-    /* Below ~720px we collapse to a single column and show only the
-       column that matches the current view signal. Back buttons in
-       the list header and reader header navigate between them. The
-       dividers are hidden — at that width there's nothing to resize. */
-    @media (max-width: 720px) {
-      .app {
-        grid-template-columns: 1fr;
-      }
-      .app > * { display: none; }
-      .divider, .hdivider { display: none !important; }
-      .app[data-view='folders'] .folders { display: flex; }
-      /* At narrow widths the stacked main column is awkward — show
-         only ONE pane at a time and let the back buttons toggle. The
-         desktop flex stack is overridden to a single-pane container
-         here so list and reader can each fill the screen on their
-         turn. */
-      .app[data-view='list'] .main,
-      .app[data-view='reader'] .main { display: flex; }
-      .app[data-view='list'] .main .reader { display: none; }
-      .app[data-view='reader'] .main .list { display: none; }
-      .mobile-only.icon-btn {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 32px;
-        height: 32px;
-        background: transparent;
-        border: none;
-        color: var(--text-muted);
-        margin-right: 4px;
-      }
-    }
-    .folders,
-    .list {
-      border-right: 1px solid var(--border);
-      overflow-y: auto;
-    }
+    .hdivider:hover { background: var(--accent); opacity: 0.55; }
+    .hdivider:active { background: var(--accent); opacity: 0.85; }
+
+    /* ─────────── Folders sidebar ─────────── */
+
     .folders {
       display: flex;
       flex-direction: column;
       gap: 2px;
-      padding: 14px 10px;
-      background: var(--bg-muted);
+      padding: 18px 12px 14px;
+      background:
+        linear-gradient(180deg, var(--bg) 0%, var(--bg-muted) 60%, var(--bg-muted) 100%);
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
     }
+
+    /* Wordmark — pinned at the top of the sidebar. Sets the tone
+       before the user even reads anything else: serif glyph,
+       grotesque word. */
+    .brand {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      padding: 0 8px 14px;
+    }
+    .brand-glyph {
+      font-family: var(--font-display);
+      font-size: 22px;
+      line-height: 1;
+      color: var(--accent);
+      font-variation-settings: 'opsz' 144;
+    }
+    .brand-word {
+      font-family: var(--font-display);
+      font-size: 16px;
+      font-weight: 480;
+      letter-spacing: -0.005em;
+      color: var(--text);
+      font-variation-settings: 'opsz' 144;
+    }
+
     .me {
-      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 8px 12px;
+      font-family: var(--font-mono);
+      font-size: 11.5px;
       color: var(--text-muted);
-      padding: 2px 6px 10px;
+      letter-spacing: 0.005em;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      border-bottom: 1px solid var(--border-soft);
+      margin-bottom: 12px;
     }
+    .folders-label {
+      padding: 0 10px 6px;
+      margin-top: 4px;
+    }
+    .me::before {
+      content: '';
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      flex-shrink: 0;
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+
     .compose-btn {
-      margin-bottom: 10px;
-      padding: 9px 14px;
-      font-weight: 600;
+      margin-bottom: 14px;
+      padding: 10px 14px;
+      font-size: var(--text-md);
+      font-weight: 500;
       border-radius: 8px;
-      justify-content: center;
-    }
-    .icon-text {
       display: inline-flex;
       align-items: center;
       gap: 8px;
+      justify-content: center;
+      letter-spacing: -0.005em;
+      box-shadow: 0 1px 0 rgba(27, 24, 20, 0.06);
     }
-    /* Folder rows: the folder button + a hover-only rename/delete
-       cluster sit on a flex row so the actions tuck against the
-       right edge without pushing the folder name. */
+
     .folder-row {
       display: flex;
       align-items: stretch;
       gap: 2px;
+      position: relative;
     }
     .folder {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
       text-align: left;
-      border: none;
+      border: 1px solid transparent;
       background: transparent;
-      padding: 8px 10px;
+      padding: 7px 10px;
       border-radius: 6px;
-      color: var(--text);
-      transition: background 100ms ease;
+      color: var(--text-muted);
+      font-size: var(--text-base);
+      transition:
+        background 140ms var(--ease-quick),
+        color 140ms var(--ease-quick),
+        border-color 140ms var(--ease-quick);
       cursor: pointer;
       flex: 1;
       min-width: 0;
     }
     .folder:hover {
-      background: var(--bg-sunken);
+      background: rgba(255, 255, 255, 0.4);
+      color: var(--text);
     }
+    .folder.active {
+      background: var(--bg);
+      color: var(--text);
+      font-weight: 500;
+      box-shadow:
+        inset 2px 0 0 var(--accent),
+        var(--shadow-line);
+      border-color: var(--border-soft);
+    }
+    .folder.has-unread:not(.active) {
+      color: var(--text);
+      font-weight: 500;
+    }
+    .folder .folder-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .badge {
+      background: var(--accent);
+      color: var(--accent-text);
+      border-radius: 999px;
+      padding: 1px 7px;
+      font-size: 10.5px;
+      font-weight: 600;
+      font-feature-settings: 'tnum' 1;
+      letter-spacing: 0.02em;
+    }
+    .folder.active .badge { background: var(--text); color: var(--bg); }
     .folder-actions {
       display: none;
       align-items: center;
       gap: 0;
     }
     .folder-row:hover .folder-actions,
-    .folder-actions:focus-within {
-      display: inline-flex;
-    }
-    .folder-actions .icon-btn {
-      width: 26px;
-      height: 26px;
-    }
-    /* New-folder button — same row geometry as the folder list, but
-       muted so it reads as an affordance, not a navigation item. */
+    .folder-actions:focus-within { display: inline-flex; }
+    .folder-actions .icon-btn { width: 26px; height: 26px; }
+
     .new-folder {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
       text-align: left;
-      border: none;
+      border: 1px dashed var(--border);
       background: transparent;
-      padding: 8px 10px;
+      padding: 7px 10px;
+      margin-top: 4px;
       border-radius: 6px;
-      color: var(--text-muted);
-      font-size: 13px;
+      color: var(--text-soft);
+      font-size: var(--text-sm);
       cursor: pointer;
-      transition: background 100ms ease, color 100ms ease;
+      transition: all 140ms var(--ease-quick);
     }
     .new-folder:hover {
-      background: var(--bg-sunken);
-      color: var(--text);
-    }
-    .folder.active {
-      background: var(--bg-sunken);
-      font-weight: 600;
-      color: var(--accent);
-    }
-    /* Folder with unread messages stays bold even when it's not the
-       active folder — same affordance Gmail uses to draw the eye to
-       inboxes that have new mail. */
-    .folder.has-unread {
-      font-weight: 600;
-      color: var(--text);
-    }
-    .folder .folder-name {
-      flex: 1;
-    }
-    .badge {
-      background: var(--accent);
-      color: var(--accent-text);
-      border-radius: 10px;
-      padding: 1px 8px;
-      font-size: 11px;
-      font-weight: 600;
-    }
-    .settings {
-      margin-top: auto;
-      color: var(--text-muted);
-      text-decoration: none;
-      padding: 8px 10px;
-      font-size: 13px;
-      border-radius: 6px;
-      transition: background 100ms ease;
-    }
-    .settings:hover {
-      background: var(--bg-sunken);
-    }
-    .logout {
-      border: none;
-      background: transparent;
-      color: var(--text-muted);
-      text-align: left;
-      padding: 8px 10px;
-      border-radius: 6px;
-      transition: background 100ms ease;
-      cursor: pointer;
-    }
-    .logout:hover {
-      background: var(--bg-sunken);
-    }
-    .list header {
-      position: sticky;
-      top: 0;
       background: var(--bg);
-      padding: 12px 14px;
-      border-bottom: 1px solid var(--border);
-      font-weight: 600;
+      color: var(--accent);
+      border-color: var(--accent);
+      border-style: solid;
+    }
+
+    .settings,
+    .logout {
+      margin-top: auto;
       display: flex;
       align-items: center;
       gap: 10px;
-      z-index: 1;
+      padding: 7px 10px;
+      color: var(--text-soft);
+      text-decoration: none;
+      font-size: var(--text-sm);
+      border: none;
+      background: transparent;
+      border-radius: 6px;
+      transition: all 140ms var(--ease-quick);
+      cursor: pointer;
     }
-    .list header .title {
-      font-size: 14px;
-      text-transform: capitalize;
+    .settings { margin-top: auto; }
+    .logout { margin-top: 0; }
+    .settings:hover, .logout:hover {
+      background: rgba(255, 255, 255, 0.4);
+      color: var(--text);
     }
-    .reader-head h2 {
-      margin: 0 0 12px;
-      font-size: 18px;
-      font-weight: 600;
+
+    .icon-text { display: inline-flex; align-items: center; gap: 8px; }
+
+    /* ─────────── Universal icon button ─────────── */
+
+    .icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 30px;
+      height: 30px;
+      border: none;
+      background: transparent;
+      border-radius: 6px;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition:
+        background 140ms var(--ease-quick),
+        color 140ms var(--ease-quick);
     }
+    .icon-btn:hover {
+      background: var(--bg-muted);
+      color: var(--text);
+    }
+    .icon-btn:active { transform: translateY(0.5px); }
+    .icon-btn.flagged {
+      color: #C68A2C;  /* ochre — different note from the accent terracotta */
+    }
+    .icon-btn.flagged :where(svg) { fill: currentColor; }
+    .icon-btn.danger:hover {
+      color: var(--danger);
+      background: var(--danger-soft);
+    }
+
+    /* ─────────── Message list (top pane) ─────────── */
+
+    .list {
+      display: flex;
+      flex-direction: column;
+      background: var(--bg);
+      overflow: hidden;
+    }
+    .list > header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px 11px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+    }
+    .list > header > span:not(.search-icon) {
+      font-family: var(--font-display);
+      font-size: var(--text-lg);
+      font-weight: 400;
+      letter-spacing: -0.015em;
+      color: var(--text);
+      font-variation-settings: 'opsz' 144;
+    }
+
     .search-wrap {
-      position: relative;
       flex: 1;
-      max-width: 220px;
+      max-width: 480px;
+      margin-left: auto;
+      position: relative;
+      display: flex;
+      align-items: center;
     }
     .search-icon {
       position: absolute;
-      left: 8px;
-      top: 50%;
-      transform: translateY(-50%);
-      color: var(--text-muted);
+      left: 11px;
+      color: var(--text-soft);
       pointer-events: none;
     }
     .search {
-      width: 100%;
-      padding: 5px 8px 5px 26px;
-      font-size: 12px;
-      font-weight: normal;
+      flex: 1;
+      padding: 7px 12px 7px 32px;
+      font-size: var(--text-sm);
+      background: var(--bg-muted);
+      border: 1px solid transparent;
       border-radius: 6px;
+      color: var(--text);
     }
-    /* Message-list rows: avatar | sender+subject+snippet | date.
-       Hover gives a subtle nudge; active is the selected message. */
+    .search:hover:not(:focus) { background: var(--bg-sunken); }
+    .search:focus {
+      background: var(--bg);
+      border-color: var(--accent);
+    }
+
+    /* List body — vertical scroller. The rows themselves are the
+       primary visual. Hairlines between, not boxes. */
+    .list > header + p,
+    .list > header ~ p,
+    .list > header ~ .row,
+    .list > header ~ div {
+      flex-shrink: 0;
+    }
+    .list > p.hint { padding: 24px; text-align: center; color: var(--text-soft); }
+    .list > p.hint:only-of-type::before {
+      content: '✦';
+      display: block;
+      font-family: var(--font-display);
+      font-size: 28px;
+      color: var(--accent);
+      margin-bottom: 8px;
+      opacity: 0.5;
+    }
+    .list { overflow-y: auto; }
+
+    /* Row — the central unit of the list. Grid: avatar | content | right cluster. */
     .row {
+      position: relative;
       display: grid;
       grid-template-columns: auto 1fr auto;
-      gap: 10px;
+      gap: 12px;
       width: 100%;
       text-align: left;
       border: none;
-      border-bottom: 1px solid var(--border);
+      border-bottom: 1px solid var(--border-soft);
       border-radius: 0;
       background: transparent;
-      padding: 12px 14px;
+      padding: 9px 14px 10px;
       cursor: pointer;
-      transition: background 80ms ease;
-      position: relative;
+      transition: background 100ms var(--ease-quick);
     }
+    .row::before {
+      /* Unread indicator — left-edge stripe. Invisible at rest;
+         accent on unread. Sits on the inside of the row so it
+         doesn't disturb the grid track widths. */
+      content: '';
+      position: absolute;
+      top: 0; bottom: 0; left: 0;
+      width: 3px;
+      background: transparent;
+      transition: background 140ms var(--ease-quick);
+    }
+    .row.unread::before { background: var(--accent); }
     .row:hover {
       background: var(--bg-muted);
     }
-    /* Right-edge cluster: star (always shown) + action strip
-       (hover-only). The wrapper gives both elements a single grid
-       cell to share and a vertical center alignment. */
-    .row-right {
-      display: inline-flex;
-      align-items: center;
-      gap: 2px;
-      align-self: center;
-    }
-    /* The star is always visible. Muted by default; the .flagged
-       state lights it up yellow via the existing .icon-btn.flagged
-       rule below (shared with the reader's star). */
-    .row-star {
-      width: 28px;
-      height: 28px;
-      color: var(--text-muted);
-    }
-    /* Hover-only quick actions on the right of each row. Hidden by
-       default (display: none keeps them out of layout so the row
-       doesn't reserve space and shift). Visible on row hover or
-       when any child has keyboard focus. */
-    .row-actions {
-      display: none;
-      align-items: center;
-      gap: 2px;
-    }
-    .row:hover .row-actions,
-    .row-actions:focus-within {
-      display: inline-flex;
-    }
-    /* Slightly smaller icon buttons inside row actions so they
-       don't visually compete with the avatar. */
-    .row-actions .icon-btn {
-      width: 28px;
-      height: 28px;
-    }
     .row.active {
-      background: var(--bg-sunken);
+      background: var(--accent-faint);
     }
+    .row:focus-visible {
+      outline: none;
+      box-shadow: inset 0 0 0 2px var(--accent-ring);
+    }
+
+    /* Avatar — circular initials. The size is intentionally smaller
+       (32px) than the previous 36 so a comfortable row height
+       lands at ~52px without crowding the snippet. */
     .avatar {
       display: inline-grid;
       place-items: center;
-      width: 36px;
-      height: 36px;
+      width: 32px;
+      height: 32px;
       border-radius: 50%;
       color: white;
-      font-size: 13px;
+      font-family: var(--font-ui);
+      font-size: 12px;
       font-weight: 600;
+      letter-spacing: 0.02em;
       flex-shrink: 0;
-      user-select: none;
+      box-shadow: 0 0 0 2px var(--bg);
     }
+    .row.active .avatar { box-shadow: 0 0 0 2px var(--bg); }
     .avatar.large {
-      width: 44px;
-      height: 44px;
-      font-size: 15px;
+      width: 36px;
+      height: 36px;
+      font-size: 13px;
     }
+
     .row-main {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
       min-width: 0;
     }
     .row-top {
@@ -845,179 +921,182 @@ interface UndoState {
     }
     .row-from {
       color: var(--text);
-      font-size: 13px;
+      font-size: var(--text-base);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      display: inline-flex;
+      align-items: baseline;
+      gap: 4px;
+    }
+    .row.unread .row-from {
+      font-weight: 600;
+      color: var(--unread);
     }
     .row-date {
-      color: var(--text-muted);
-      font-size: 11px;
+      color: var(--text-soft);
+      font-size: var(--text-xs);
       flex-shrink: 0;
-    }
-    .row.unread .row-from,
-    .row.unread .row-subject {
-      color: var(--unread);
-      font-weight: 600;
+      font-feature-settings: 'tnum' 1;
+      letter-spacing: 0.01em;
+      text-transform: uppercase;
     }
     .row-subject {
-      font-size: 13px;
+      font-family: var(--font-display);
+      font-size: var(--text-md);
+      font-weight: 400;
+      letter-spacing: -0.012em;
+      color: var(--text);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
       margin-top: 2px;
+      font-variation-settings: 'opsz' 18;
+    }
+    .row.unread .row-subject {
+      font-weight: 500;
+      color: var(--unread);
     }
     .row-snippet {
-      font-size: 12px;
+      font-size: var(--text-sm);
       color: var(--text-muted);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
       margin-top: 2px;
+      letter-spacing: -0.003em;
     }
-    /* Inline count badge on a thread row, e.g. "Alice, Bob (3)". A
-       small muted parenthetical that doesn't compete with the sender
-       names for attention — gmail keeps the thread length subtle
-       there. */
     .thread-count {
-      color: var(--text-muted);
-      font-weight: 400;
-      font-size: 12px;
-      margin-left: 4px;
-    }
-    /* Reader's thread navigation strip — a vertical list of
-       per-message rows shown above the message header when the open
-       message lives in a thread of 2+. Each row is clickable and
-       swaps the open message. The currently-open one is muted; an
-       unread sibling renders in the same bold/accent style as an
-       unread list row. */
-    .thread-strip {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-      padding: 8px 12px;
-      border-bottom: 1px solid var(--border);
-      background: var(--bg-sunken);
-    }
-    .thread-strip-head {
+      font-family: var(--font-mono);
+      color: var(--accent);
+      font-weight: 500;
       font-size: 11px;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      margin-bottom: 4px;
+      letter-spacing: -0.02em;
+      margin-left: 2px;
     }
-    .thread-strip-row {
-      display: flex;
-      align-items: baseline;
-      gap: 8px;
-      padding: 4px 8px;
-      border: none;
-      background: transparent;
-      color: var(--text-muted);
-      border-radius: 4px;
-      cursor: pointer;
-      text-align: left;
-      font: inherit;
+
+    /* Right cluster — star (always) + hover-only quick actions. */
+    .row-right {
+      display: inline-flex;
+      align-items: center;
+      gap: 1px;
+      align-self: center;
     }
-    .thread-strip-row:hover {
-      background: var(--bg);
+    .row-star { width: 28px; height: 28px; color: var(--text-soft); }
+    .row-star:hover { color: #C68A2C; background: transparent; }
+    .row-actions {
+      display: none;
+      align-items: center;
+      gap: 0;
     }
-    .thread-strip-row.active {
-      background: var(--bg);
-      color: var(--text);
-    }
-    .thread-strip-row.unread {
-      color: var(--unread);
-      font-weight: 600;
-    }
-    .thread-strip-from {
-      flex-shrink: 0;
-      font-size: 13px;
-    }
-    .thread-strip-snippet {
-      flex: 1;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-size: 12px;
-    }
-    .thread-strip-date {
-      flex-shrink: 0;
-      font-size: 11px;
-      color: var(--text-muted);
-    }
+    .row:hover .row-actions,
+    .row-actions:focus-within { display: inline-flex; }
+    .row-actions .icon-btn { width: 28px; height: 28px; }
+
+    /* ─────────── Reader (bottom pane) ─────────── */
+
     .reader {
       display: flex;
       flex-direction: column;
       overflow-y: auto;
+      background: var(--bg-muted);
+      border-top: 1px solid var(--border);
     }
-    /* Conversation view (stacked-card thread render).
-       conversation-head holds the subject + length hint;
-       conversation-stack is the vertical list of cards; each
-       conv-card is one message, with conv-card-head always visible
-       and conv-card-body shown only when expanded. The collapsed
-       state mirrors gmail's one-line summary: avatar + sender +
-       snippet + date + star. Click anywhere on the header expands. */
+
+    /* Conversation chrome. The subject is the headline; the count
+       sits in a small caps mark beside it. */
     .conversation-head {
       display: flex;
       align-items: center;
-      gap: 12px;
-      padding: 16px 20px;
-      border-bottom: 1px solid var(--border);
+      gap: 14px;
+      padding: 18px 24px 14px;
+      background: var(--bg-muted);
+      border-bottom: 1px solid var(--border-soft);
     }
     .conversation-head h2 {
       margin: 0;
-      font-size: 18px;
-      font-weight: 500;
+      font-family: var(--font-display);
+      font-size: clamp(20px, 1.6vw + 12px, 28px);
+      font-weight: 380;
+      line-height: 1.1;
+      letter-spacing: -0.022em;
+      color: var(--text);
       flex: 1;
+      min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      font-variation-settings: 'opsz' 144, 'SOFT' 60;
     }
     .conversation-count {
-      font-size: 12px;
-      color: var(--text-muted);
+      font-family: var(--font-ui);
+      font-size: 10.5px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: var(--text-soft);
       flex-shrink: 0;
+      padding: 4px 9px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--bg);
     }
+
     .conversation-stack {
       display: flex;
       flex-direction: column;
-      gap: 8px;
-      padding: 12px 16px 24px;
+      gap: 10px;
+      padding: 16px 20px 28px;
     }
+
     .conv-card {
-      border: 1px solid var(--border);
-      border-radius: 8px;
       background: var(--bg);
+      border: 1px solid var(--border-soft);
+      border-radius: 10px;
       overflow: hidden;
+      box-shadow: var(--shadow-line);
+      transition:
+        box-shadow 200ms var(--ease),
+        border-color 140ms var(--ease-quick);
+    }
+    .conv-card.expanded {
+      box-shadow: var(--shadow-card);
+      border-color: var(--border);
     }
     .conv-card.unread {
-      border-color: var(--accent);
+      box-shadow:
+        inset 3px 0 0 var(--accent),
+        var(--shadow-line);
     }
+    .conv-card.unread.expanded {
+      box-shadow:
+        inset 3px 0 0 var(--accent),
+        var(--shadow-card);
+    }
+
     .conv-card-head {
       display: flex;
-      gap: 10px;
+      gap: 12px;
       align-items: flex-start;
-      padding: 10px 14px;
+      padding: 12px 16px;
       cursor: pointer;
-      transition: background 80ms ease;
+      transition: background 100ms var(--ease-quick);
     }
-    .conv-card-head:hover {
-      background: var(--bg-muted);
-    }
+    .conv-card-head:hover { background: var(--bg-muted); }
     .conv-card.expanded .conv-card-head {
-      border-bottom: 1px solid var(--border);
+      border-bottom: 1px solid var(--border-soft);
     }
+
     .conv-card-meta {
       flex: 1;
       min-width: 0;
-      font-size: 13px;
+      font-size: var(--text-sm);
       color: var(--text-muted);
     }
     .conv-card-from {
       color: var(--text);
       font-weight: 500;
-      font-size: 14px;
+      font-size: var(--text-base);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -1031,117 +1110,140 @@ interface UndoState {
       text-overflow: ellipsis;
       white-space: nowrap;
       margin-top: 2px;
+      color: var(--text-muted);
     }
     .conv-card-date {
       flex-shrink: 0;
-      font-size: 12px;
-      color: var(--text-muted);
+      font-size: var(--text-xs);
+      color: var(--text-soft);
+      font-feature-settings: 'tnum' 1;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
       align-self: flex-start;
+      padding-top: 3px;
     }
     .conv-card-body {
-      padding: 12px 16px 16px;
+      padding: 16px 18px 18px;
+      background: var(--bg);
+      border-top: 1px solid var(--border-soft);
     }
-    .reader-head {
-      padding: 18px 20px;
-      border-bottom: 1px solid var(--border);
-    }
-    .reader-meta {
-      display: flex;
-      gap: 12px;
-      align-items: flex-start;
-      margin: 10px 0;
-    }
-    .meta {
-      flex: 1;
-      font-size: 13px;
-      color: var(--text-muted);
-    }
-    .meta-from {
-      color: var(--text);
-      font-weight: 500;
-      font-size: 14px;
-    }
+
     .meta-line {
       margin-top: 2px;
-    }
-    .meta .date {
-      margin-top: 4px;
-      font-size: 12px;
-    }
-    /* Action toolbar — icon buttons with a subtle hover, divider
-       between thread actions and message-state actions. */
-    .actions {
-      display: flex;
-      gap: 2px;
-      margin-top: 8px;
-      align-items: center;
-    }
-    .icon-btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 34px;
-      height: 34px;
-      border: none;
-      background: transparent;
-      border-radius: 6px;
+      font-size: var(--text-sm);
       color: var(--text-muted);
-      cursor: pointer;
-      transition: background 100ms ease, color 100ms ease;
     }
-    .icon-btn:hover {
-      background: var(--bg-sunken);
+    .meta-line.date {
+      margin-top: 6px;
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      letter-spacing: 0.01em;
+      color: var(--text-soft);
+    }
+
+    /* Body — readable. We deliberately keep the column width
+       generous (max-width on the body element) so prose doesn't
+       run edge to edge. */
+    .html-body, .text-body {
+      max-width: 72ch;
       color: var(--text);
-    }
-    .icon-btn.flagged {
-      color: #f5a623;
-    }
-    .icon-btn.danger:hover {
-      background: rgba(220, 53, 69, 0.1);
-      color: var(--danger);
-    }
-    .divider {
-      width: 1px;
-      height: 20px;
-      background: var(--border);
-      margin: 0 6px;
-    }
-    .reader-body {
-      padding: 16px;
-      flex: 1;
+      font-size: var(--text-md);
+      line-height: 1.6;
     }
     .text-body {
-      margin: 0;
+      font-family: var(--font-ui);
       white-space: pre-wrap;
-      word-wrap: break-word;
-      font: inherit;
+      margin: 0;
     }
+    .html-body :where(p) { margin: 0 0 12px; }
+    .html-body :where(blockquote) {
+      border-left: 2px solid var(--border);
+      padding-left: 12px;
+      margin: 12px 0;
+      color: var(--text-muted);
+    }
+    .html-body :where(a) { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+    .html-body :where(pre, code) {
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      background: var(--bg-muted);
+      padding: 0 4px;
+      border-radius: 3px;
+    }
+
     .attachments {
-      padding: 12px 16px;
-      border-top: 1px solid var(--border);
       display: flex;
       flex-wrap: wrap;
-      gap: 8px;
       align-items: center;
-      font-size: 13px;
+      gap: 8px;
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px dashed var(--border);
+    }
+    .attachments strong {
+      font-family: var(--font-ui);
+      font-size: 10.5px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: var(--text-soft);
+      margin-right: 4px;
     }
     .chip {
-      background: var(--bg-sunken);
-      border-radius: 6px;
-      padding: 3px 8px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      background: var(--bg-muted);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: var(--text-sm);
+      font-family: var(--font-mono);
+      color: var(--text);
+      cursor: pointer;
+      transition: all 140ms var(--ease-quick);
     }
-    .hint {
-      color: var(--text-muted);
-      padding: 16px;
+    .chip::before {
+      content: '◊';
+      color: var(--accent);
+      font-family: var(--font-display);
     }
-    .hint.center {
-      display: grid;
-      place-items: center;
-      height: 100%;
+    .chip:hover {
+      background: var(--bg);
+      border-color: var(--accent);
+      color: var(--accent);
     }
-    /* Undo toast — floats bottom-left, above the page chrome. Slide-in
-       animation cues that something just happened; clicking outside it
-       doesn't dismiss (so users have the full timeout to react). */
+    .chip:disabled { opacity: 0.5; cursor: default; }
+
+    /* Empty state in the reader — a quiet typographic moment. */
+    .reader .hint.center {
+      margin: auto;
+      padding: 48px;
+      text-align: center;
+      max-width: 360px;
+      color: var(--text-soft);
+      font-family: var(--font-display);
+      font-style: italic;
+      font-size: var(--text-lg);
+      line-height: 1.4;
+      letter-spacing: -0.01em;
+    }
+    .reader .hint.center::before {
+      content: '';
+      display: block;
+      width: 32px;
+      height: 1px;
+      background: var(--text-soft);
+      margin: 0 auto 18px;
+      opacity: 0.5;
+    }
+
+    /* ─────────── Compose button + thread-strip (kept for back-compat) ─────────── */
+
+    .thread-strip { /* dead post-conversation-view; safe no-op */ display: none; }
+
+    /* ─────────── Undo toast ─────────── */
+
     .undo-toast {
       position: fixed;
       left: 24px;
@@ -1151,55 +1253,68 @@ interface UndoState {
       align-items: center;
       gap: 12px;
       padding: 10px 12px 10px 16px;
-      background: #2d3748;
-      color: white;
-      border-radius: 8px;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
-      font-size: 13px;
+      background: var(--text);
+      color: var(--bg);
+      border-radius: 999px;
+      box-shadow: var(--shadow-card);
+      font-size: var(--text-sm);
       max-width: min(420px, calc(100vw - 48px));
-      animation: undo-slide-in 160ms ease-out;
+      animation: undo-slide-in 200ms var(--ease-quick);
     }
     @keyframes undo-slide-in {
       from { transform: translateY(8px); opacity: 0; }
       to { transform: translateY(0); opacity: 1; }
     }
-    .undo-label {
-      flex: 1;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
+    .undo-label { flex: 1; }
     .undo-action {
       background: transparent;
+      color: var(--accent);
       border: none;
-      color: #93c5fd;
+      padding: 4px 10px;
       font-weight: 600;
-      padding: 4px 8px;
-      border-radius: 4px;
+      font-size: var(--text-sm);
       cursor: pointer;
+      letter-spacing: 0.02em;
       text-transform: uppercase;
-      font-size: 12px;
-      letter-spacing: 0.04em;
     }
-    .undo-action:hover {
-      background: rgba(255, 255, 255, 0.08);
-    }
+    .undo-action:hover { background: rgba(250, 247, 240, 0.08); }
     .undo-dismiss {
       background: transparent;
+      color: rgba(250, 247, 240, 0.6);
       border: none;
-      color: rgba(255, 255, 255, 0.6);
-      width: 24px;
-      height: 24px;
-      border-radius: 4px;
-      cursor: pointer;
+      padding: 4px 6px;
       font-size: 14px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
+      line-height: 1;
+      cursor: pointer;
     }
     .undo-dismiss:hover {
-      background: rgba(255, 255, 255, 0.08);
-      color: white;
+      background: rgba(250, 247, 240, 0.08);
+      color: var(--bg);
+    }
+
+    /* ─────────── Responsive ─────────── */
+
+    .mobile-only { display: none; }
+    @media (max-width: 720px) {
+      .app { grid-template-columns: 1fr; }
+      .app > * { display: none; }
+      .divider, .hdivider { display: none !important; }
+      .app[data-view='folders'] .folders { display: flex; }
+      .app[data-view='list'] .main,
+      .app[data-view='reader'] .main { display: flex; flex-direction: column; }
+      .app[data-view='list'] .main .reader { display: none; }
+      .app[data-view='reader'] .main .list { display: none; }
+      .mobile-only.icon-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        background: transparent;
+        border: none;
+        color: var(--text-muted);
+        margin-right: 4px;
+      }
     }
   `,
 })
@@ -1930,18 +2045,31 @@ export class MailboxComponent implements OnInit, OnDestroy {
     return (parts[0][0] + parts[1][0]).toUpperCase();
   }
 
-  // avatarColor maps a sender to a stable HSL background so the same
-  // sender always gets the same colour across reloads. Hash the
-  // senderName for hue selection; saturation + lightness are fixed
-  // to a palette that reads on both light and dark themes.
+  // avatarColor maps a sender to a stable colour from a hand-picked,
+  // warm-leaning palette so every avatar harmonises with the page's
+  // terracotta accent. The previous implementation picked from the
+  // whole HSL wheel and surfaced electric blues / greens that
+  // clashed with the editorial palette. The current set are eight
+  // saturated-but-muted shades chosen to read on both light and
+  // dark themes — terracotta family + earth tones with one cool
+  // counterpoint (slate) for visual variety.
   protected avatarColor(from: string): string {
+    const palette = [
+      '#B8430E', // terracotta (page accent)
+      '#94432A', // rust
+      '#C68A2C', // ochre
+      '#7C5C2C', // dark goldenrod
+      '#6A8267', // sage
+      '#6F7C2C', // olive
+      '#4E5E78', // slate (the cool counterpoint)
+      '#7C3F5F', // plum
+    ];
     const name = this.senderName(from);
     let hash = 0;
     for (let i = 0; i < name.length; i++) {
       hash = (hash * 31 + name.charCodeAt(i)) | 0;
     }
-    const hue = Math.abs(hash) % 360;
-    return `hsl(${hue}, 55%, 48%)`;
+    return palette[Math.abs(hash) % palette.length];
   }
 
   private refreshMailboxes(): void {

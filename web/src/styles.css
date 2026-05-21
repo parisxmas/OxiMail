@@ -1,31 +1,106 @@
-/* OxiMail webmail — global styles. Component-specific styles live
-   inline in each component. */
+/* OxiMail webmail — global design tokens.
+ *
+ * Aesthetic: "Editorial Mail Terminal". A warm parchment palette with
+ * a single saturated terracotta accent. Serif (Fraunces) for display
+ * and subjects; grotesque (Geist) for chrome and body; Geist Mono for
+ * code paths. Component-specific styles live inline in each
+ * @Component decorator and consume these variables.
+ *
+ * Rules of the road:
+ *   - --accent is rare and deliberate. Use it for affirmative actions,
+ *     unread indicators (as a stripe — never a full pill), focus
+ *     rings, and selected state. Don't paint surfaces with it.
+ *   - The neutrals are warm (slight ochre tint). Pure greys would
+ *     feel like a CRM; the tint is what makes this read as personal.
+ *   - --shadow-line is the dominant separator. Real drop shadows are
+ *     used only on the compose dialog and on focus.
+ */
 
 :root {
-  --bg: #ffffff;
-  --bg-muted: #f4f5f7;
-  --bg-sunken: #ebecef;
-  --border: #d9dbe0;
-  --text: #1d1f24;
-  --text-muted: #6b7280;
-  --accent: #2563eb;
-  --accent-text: #ffffff;
-  --danger: #b91c1c;
-  --unread: #1d1f24;
+  /* Surfaces (light) — graded warmth from page to chrome. */
+  --bg:           #FAF7F0;  /* warm parchment, the page */
+  --bg-muted:    #F2EDE2;  /* hover backgrounds, headers */
+  --bg-sunken:   #E8E1D2;  /* selected state, sidebar inset */
+  --border:      #DDD4C0;  /* hairline separators */
+  --border-soft: #EAE3D2;  /* softer separators inside cards */
+
+  /* Type colors (light). */
+  --text:        #1B1814;  /* warm ink */
+  --text-muted:  #6F665A;  /* warm grey for secondary text */
+  --text-soft:   #8E847B;  /* tertiary — dates, hints */
+  --unread:      #1B1814;  /* same as ink + bold weight does the work */
+
+  /* The single saturated voice. */
+  --accent:        #B8430E;  /* deep terracotta */
+  --accent-text:   #FAF7F0;
+  --accent-soft:   rgba(184, 67, 14, 0.10);   /* fills, focus rings */
+  --accent-faint:  rgba(184, 67, 14, 0.04);   /* whisper-quiet rows */
+  --accent-ring:   rgba(184, 67, 14, 0.32);   /* focus-visible glow */
+
+  /* Status. Maroon harmonized with the accent, not generic red. */
+  --danger:        #8B2A1A;
+  --danger-soft:   rgba(139, 42, 26, 0.08);
+
+  /* Elevation. We use shadows sparingly — mostly the compose dialog
+     and a hairline above the toolbar. */
+  --shadow-line:   0 1px 0 rgba(27, 24, 20, 0.04);
+  --shadow-card:   0 1px 2px rgba(27, 24, 20, 0.04),
+                   0 12px 32px -8px rgba(27, 24, 20, 0.12);
+  --shadow-modal:  0 8px 24px rgba(27, 24, 20, 0.10),
+                   0 24px 64px -12px rgba(27, 24, 20, 0.18);
+
+  /* Motion. The same easing across all transitions so the surface
+     feels of one piece. */
+  --ease:        cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-quick:  cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Type stack. UI grotesque first, then a refined system fallback. */
+  --font-ui:     'Geist', 'Inter', system-ui, -apple-system, 'Segoe UI',
+                 'SF Pro Text', sans-serif;
+  --font-display:'Fraunces', 'Iowan Old Style', 'Georgia', serif;
+  --font-mono:   'Geist Mono', 'JetBrains Mono', ui-monospace,
+                 'SF Mono', 'Menlo', monospace;
+
+  /* Type metrics — tightened from the system defaults. The
+     editorial scale is intentionally smaller than the previous
+     14px/13px norm, but the line-height stays comfortable. */
+  --text-xs:    11px;
+  --text-sm:    12.5px;
+  --text-base: 13.5px;
+  --text-md:   15px;
+  --text-lg:   18px;
+  --text-xl:   22px;
+  --text-2xl:  28px;
+  --leading:   1.45;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1a1c20;
-    --bg-muted: #22252b;
-    --bg-sunken: #2b2f37;
-    --border: #3a3f48;
-    --text: #e6e8eb;
-    --text-muted: #9aa0aa;
-    --accent: #3b82f6;
-    --accent-text: #ffffff;
-    --danger: #f87171;
-    --unread: #ffffff;
+    --bg:           #1A1815;
+    --bg-muted:    #211F1B;
+    --bg-sunken:   #2A2723;
+    --border:      #3A3631;
+    --border-soft: #2F2C28;
+
+    --text:        #EEE6D4;
+    --text-muted:  #ACA194;
+    --text-soft:   #7E7468;
+    --unread:      #FFF7E6;
+
+    --accent:        #E76732;
+    --accent-text:   #1A1815;
+    --accent-soft:   rgba(231, 103, 50, 0.14);
+    --accent-faint:  rgba(231, 103, 50, 0.05);
+    --accent-ring:   rgba(231, 103, 50, 0.40);
+
+    --danger:        #E58072;
+    --danger-soft:   rgba(229, 128, 114, 0.10);
+
+    --shadow-line:   0 1px 0 rgba(0, 0, 0, 0.4);
+    --shadow-card:   0 1px 2px rgba(0, 0, 0, 0.3),
+                     0 12px 32px -8px rgba(0, 0, 0, 0.5);
+    --shadow-modal:  0 8px 24px rgba(0, 0, 0, 0.4),
+                     0 24px 64px -12px rgba(0, 0, 0, 0.7);
   }
 }
 
@@ -40,10 +115,24 @@ body {
 }
 
 body {
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  font-size: 14px;
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  font-feature-settings: 'cv11' 1, 'ss01' 1, 'ss03' 1; /* Geist stylistic alts */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  letter-spacing: -0.005em;
+  line-height: var(--leading);
   color: var(--text);
   background: var(--bg);
+  /* A whisper-quiet warmth on the page surface — two translucent
+     radial gradients that read as light grain on paper, not as a
+     fill colour. Negligible CPU cost; background-attachment: fixed
+     keeps them stationary as panes scroll. */
+  background-image:
+    radial-gradient(900px 600px at 12% -10%, var(--accent-faint), transparent 60%),
+    radial-gradient(700px 500px at 95% 0%, var(--accent-faint), transparent 55%);
+  background-attachment: fixed;
 }
 
 oximail-root {
@@ -51,43 +140,148 @@ oximail-root {
   height: 100%;
 }
 
+/* Selection — terracotta to keep the brand voice consistent even in a
+   browser-native interaction. */
+::selection {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+/* Scrollbars — slim, neutral. Visible on hover only so the chrome
+   stays calm. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border: 3px solid var(--bg);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--text-soft);
+}
+
+/* Base controls — explicitly designed instead of inheriting browser
+   defaults. Every control is a flex inline element with consistent
+   sizing, hairline borders, and the focus-visible ring. */
 button {
   font: inherit;
+  letter-spacing: -0.005em;
   cursor: pointer;
   border: 1px solid var(--border);
-  background: var(--bg-muted);
+  background: var(--bg);
   color: var(--text);
   border-radius: 6px;
   padding: 6px 12px;
+  transition:
+    background 140ms var(--ease-quick),
+    border-color 140ms var(--ease-quick),
+    color 140ms var(--ease-quick),
+    box-shadow 140ms var(--ease-quick),
+    transform 140ms var(--ease-quick);
 }
 
 button:hover {
-  background: var(--bg-sunken);
+  background: var(--bg-muted);
+  border-color: var(--text-soft);
+}
+
+button:active {
+  transform: translateY(0.5px);
 }
 
 button.primary {
   background: var(--accent);
   color: var(--accent-text);
   border-color: var(--accent);
+  font-weight: 500;
 }
 
-button:disabled {
-  opacity: 0.55;
+button.primary:hover {
+  background: color-mix(in oklab, var(--accent), black 8%);
+  border-color: color-mix(in oklab, var(--accent), black 8%);
+}
+
+button:disabled,
+button.primary:disabled {
+  opacity: 0.5;
   cursor: default;
+  transform: none;
 }
 
 input,
-textarea {
+textarea,
+select {
   font: inherit;
+  letter-spacing: -0.005em;
   color: var(--text);
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 8px 10px;
+  padding: 8px 11px;
+  transition:
+    border-color 140ms var(--ease-quick),
+    box-shadow 140ms var(--ease-quick),
+    background 140ms var(--ease-quick);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-soft);
+}
+
+input:hover:not(:focus),
+textarea:hover:not(:focus),
+select:hover:not(:focus) {
+  border-color: var(--text-soft);
 }
 
 input:focus,
-textarea:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: -1px;
+textarea:focus,
+select:focus,
+button:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+/* Keyboard-only focus on buttons gets the ring; mouse-only doesn't.
+   :focus-visible handles this natively in modern browsers. */
+button:focus { outline: none; }
+
+/* Refined checkbox — accent-tinted, more squared than the system. */
+input[type='checkbox'] {
+  accent-color: var(--accent);
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+}
+
+/* Small uppercase labels (the typographic flourish that ties the
+   editorial feel together — see TO / CC / SUBJECT, settings tabs,
+   thread strip header, etc.). */
+.label-text,
+.uppercase-label {
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-soft);
+}
+
+/* A utility hint paragraph used in empty states and form helpers. */
+.hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.55;
 }

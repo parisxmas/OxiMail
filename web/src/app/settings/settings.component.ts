@@ -335,38 +335,213 @@ import { AccountProfile, ApiService, SieveScript, VacationRule } from '../api.se
     </div>
   `,
   styles: `
-    :host { display: block; height: 100%; overflow-y: auto; background: var(--bg-muted); }
-    .page { max-width: 720px; margin: 0 auto; padding: 24px 16px 64px; }
-    header { display: flex; align-items: baseline; justify-content: space-between; }
-    h1 { margin: 0; font-size: 20px; }
-    .back { color: var(--text-muted); text-decoration: none; }
-    .tabs { display: flex; gap: 8px; margin: 16px 0; }
-    .tab { padding: 6px 12px; border: 1px solid var(--border); background: var(--bg); border-radius: 6px; }
-    .tab.active { background: var(--bg-sunken); font-weight: 600; }
-    .card {
-      display: flex; flex-direction: column; gap: 12px;
-      padding: 20px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    :host {
+      display: block;
+      height: 100%;
+      overflow-y: auto;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-ui);
     }
-    .card h2 { margin: 0; font-size: 16px; }
-    .hint { margin: 0; color: var(--text-muted); font-size: 13px; }
-    .row { display: flex; align-items: center; gap: 8px; }
-    label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--text-muted); }
-    textarea { resize: vertical; font-family: ui-monospace, monospace; font-size: 13px; }
-    textarea.script { min-height: 240px; }
-    .example { background: var(--bg-sunken); padding: 10px 12px; border-radius: 6px;
-               font-size: 12px; white-space: pre-wrap; }
-    .error { margin: 0; color: var(--danger); font-size: 13px; }
-    .ok { margin: 0; color: var(--accent); font-size: 13px; }
-    footer { display: flex; justify-content: flex-end; gap: 8px; }
-    .danger { color: var(--danger); }
-    /* Rule-builder form: dropdowns + value input + folder input on a
-       wrapping flex row. rb-grow lets the value / folder inputs
-       expand to fill the remaining horizontal space; the dropdowns
-       keep their natural width. */
-    .rule-builder { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
-    .rb-field { flex: 0 0 auto; min-width: 120px; }
+    .page {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 36px 24px 80px;
+    }
+
+    /* Page header — editorial. Kicker label, serif headline, link
+       back to mail. The whole strip carries the brand. */
+    header.page-head, header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 24px;
+    }
+    h1 {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: 36px;
+      font-weight: 380;
+      letter-spacing: -0.025em;
+      line-height: 1.05;
+      color: var(--text);
+      font-variation-settings: 'opsz' 144;
+    }
+    .back {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: var(--text-sm);
+      transition: color 140ms var(--ease-quick);
+    }
+    .back:hover { color: var(--accent); }
+
+    /* Tabs — typographic, no buttons. Active tab carries the
+       accent underline. */
+    .tabs {
+      display: flex;
+      gap: 6px;
+      margin: 0 0 22px;
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .tab {
+      padding: 10px 14px;
+      border: none;
+      background: transparent;
+      border-radius: 0;
+      color: var(--text-muted);
+      font-size: var(--text-sm);
+      font-weight: 500;
+      letter-spacing: -0.005em;
+      cursor: pointer;
+      position: relative;
+      margin-bottom: -1px;
+      transition: color 140ms var(--ease-quick);
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .tab.active::after {
+      content: '';
+      position: absolute;
+      left: 14px; right: 14px;
+      bottom: -1px;
+      height: 2px;
+      background: var(--accent);
+      border-radius: 1px;
+    }
+
+    /* Cards — clean parchment slabs with a hairline border. */
+    .card {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding: 24px 26px;
+      background: var(--bg);
+      border: 1px solid var(--border-soft);
+      border-radius: 12px;
+      box-shadow: var(--shadow-line);
+      margin-bottom: 18px;
+    }
+    .card h2 {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: var(--text-xl);
+      font-weight: 400;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      font-variation-settings: 'opsz' 144;
+    }
+    .hint {
+      margin: 0;
+      color: var(--text-muted);
+      font-size: var(--text-sm);
+      line-height: 1.55;
+    }
+    .hint code {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      background: var(--bg-muted);
+      padding: 1px 6px;
+      border-radius: 3px;
+      color: var(--text);
+    }
+
+    .row { display: flex; align-items: center; gap: 10px; }
+    label {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: var(--text-base);
+      color: var(--text);
+    }
+    label .label-text {
+      font-size: 10.5px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: var(--text-soft);
+    }
+    input, select, textarea {
+      padding: 9px 12px;
+      font-size: var(--text-base);
+    }
+    textarea {
+      resize: vertical;
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      line-height: 1.55;
+    }
+    textarea.script {
+      min-height: 280px;
+      background: var(--bg-muted);
+      border: 1px solid var(--border-soft);
+    }
+    .example {
+      background: var(--bg-muted);
+      padding: 14px 16px;
+      border-radius: 8px;
+      border: 1px solid var(--border-soft);
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      color: var(--text-muted);
+    }
+    .error {
+      margin: 0;
+      padding: 8px 12px;
+      color: var(--danger);
+      background: var(--danger-soft);
+      border-radius: 6px;
+      font-size: var(--text-sm);
+      border: 1px solid color-mix(in oklab, var(--danger), transparent 75%);
+    }
+    .ok {
+      margin: 0;
+      padding: 6px 10px;
+      color: var(--accent);
+      background: var(--accent-soft);
+      border-radius: 6px;
+      font-size: var(--text-sm);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .ok::before { content: '✓'; font-weight: 700; }
+    footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      padding-top: 6px;
+      border-top: none;
+      margin-bottom: 0;
+    }
+    .danger { color: var(--danger); border-color: color-mix(in oklab, var(--danger), transparent 60%); }
+    .danger:hover { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
+
+    /* Rule-builder mini-form: pretty wrapping flex row. */
+    .rule-builder {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: flex-end;
+      padding: 14px 16px;
+      background: var(--bg-muted);
+      border: 1px solid var(--border-soft);
+      border-radius: 10px;
+    }
+    .rb-field {
+      flex: 0 0 auto;
+      min-width: 130px;
+      gap: 4px;
+    }
     .rb-field.rb-grow { flex: 1 1 200px; }
-    .rb-field select, .rb-field input { padding: 6px 8px; }
+    .rb-field select, .rb-field input { padding: 7px 10px; }
   `,
 })
 export class SettingsComponent {

@@ -201,15 +201,26 @@ export interface ComposeSeed {
       position: fixed;
       inset: 0;
       z-index: 10;
+      font-family: var(--font-ui);
+      color: var(--text);
     }
+
     .backdrop {
       position: absolute;
       inset: 0;
-      background: rgba(0, 0, 0, 0.4);
+      background: rgba(27, 24, 20, 0.32);
+      backdrop-filter: blur(2px);
+      animation: backdrop-in 200ms var(--ease-quick);
     }
-    /* Compact mode — bottom-right, like Gmail's snap-out composer.
-       Right for quick replies; the expand button promotes it to the
-       large centered .expanded variant. */
+    @keyframes backdrop-in {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    /* Compact mode — bottom-right snap-out, ~640px wide. The editor
+       feels like a letterpress slip: warm paper background, a quiet
+       hairline border, generous shadow that suggests it floats above
+       the page. */
     .dialog {
       position: absolute;
       right: 24px;
@@ -218,25 +229,27 @@ export interface ComposeSeed {
       max-height: calc(100vh - 48px);
       display: flex;
       flex-direction: column;
-      gap: 10px;
-      padding: 18px 18px 14px;
+      gap: 12px;
+      padding: 18px 20px 14px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 12px;
-      box-shadow: 0 20px 48px rgba(0, 0, 0, 0.28);
-      transition: width 160ms ease, height 160ms ease,
-                  inset 160ms ease, border-radius 160ms ease;
-      /* The Quill editor's contenteditable area expands with content
-         and, in some browsers, overdraws past its flex parent. With
-         the dialog's overflow at its default (visible), that overdraw
-         would cover the footer and intercept pointer events — the
-         buttons stay visible but clicks land on the invisible editor
-         instead. Clip at the dialog and let inner regions scroll. */
+      border-radius: 14px;
+      box-shadow: var(--shadow-modal);
       overflow: hidden;
+      animation: dialog-in 260ms var(--ease) backwards;
     }
-    /* Expanded mode — large centered modal. ~min(960px, 80vw) wide,
-       fills 86vh tall. The editor body grows to take the slack so the
-       user has a real surface to write into. */
+    @keyframes dialog-in {
+      from {
+        opacity: 0;
+        transform: translateY(12px) scale(0.99);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
+    /* Expanded mode — centered modal, full-bleed editor surface. */
     .dialog.expanded {
       right: auto;
       bottom: auto;
@@ -247,35 +260,29 @@ export interface ComposeSeed {
       height: 86vh;
       max-height: 86vh;
     }
-    .dialog.expanded ::ng-deep quill-editor {
-      flex: 1;
-      min-height: 0;
-    }
-    .dialog.expanded ::ng-deep .ql-container.ql-snow {
-      flex: 1;
-      min-height: 0;
-    }
-    .dialog.expanded textarea {
-      flex: 1;
-      min-height: 0;
-    }
-    .header-actions {
-      display: inline-flex;
-      gap: 2px;
-      align-items: center;
-    }
+    .dialog.expanded ::ng-deep quill-editor { flex: 1; min-height: 0; }
+    .dialog.expanded ::ng-deep .ql-container.ql-snow { flex: 1; min-height: 0; }
+    .dialog.expanded textarea { flex: 1; min-height: 0; }
+
+    /* Header */
     header {
       display: flex;
       align-items: center;
       justify-content: space-between;
       padding-bottom: 4px;
-      border-bottom: 1px solid var(--border);
+      border-bottom: 1px solid var(--border-soft);
     }
     h2 {
       margin: 0;
-      font-size: 15px;
-      font-weight: 600;
+      font-family: var(--font-display);
+      font-size: var(--text-lg);
+      font-weight: 400;
+      letter-spacing: -0.015em;
+      color: var(--text);
+      font-variation-settings: 'opsz' 144;
     }
+    .header-actions { display: inline-flex; align-items: center; gap: 2px; }
+
     .icon-btn {
       display: inline-flex;
       align-items: center;
@@ -287,28 +294,53 @@ export interface ComposeSeed {
       border-radius: 6px;
       color: var(--text-muted);
       cursor: pointer;
-      transition: background 120ms ease, color 120ms ease;
+      transition:
+        background 140ms var(--ease-quick),
+        color 140ms var(--ease-quick);
     }
     .icon-btn:hover {
-      background: var(--bg-sunken);
+      background: var(--bg-muted);
       color: var(--text);
     }
+
+    /* Recipient + subject fields. Underline-only treatment — feels
+       like filling in a printed slip rather than a CRM form. */
     label {
       display: flex;
       flex-direction: column;
       gap: 3px;
     }
     .label-text {
-      font-size: 11px;
-      color: var(--text-muted);
+      font-family: var(--font-ui);
+      font-size: 10.5px;
+      font-weight: 500;
       text-transform: uppercase;
-      letter-spacing: 0.04em;
+      letter-spacing: 0.14em;
+      color: var(--text-soft);
     }
-    textarea {
-      resize: vertical;
-      min-height: 220px;
-      font-family: inherit;
+    label input {
+      padding: 6px 0;
+      background: transparent;
+      border: none;
+      border-bottom: 1px solid var(--border);
+      border-radius: 0;
+      font-size: var(--text-md);
+      color: var(--text);
+      transition: border-color 140ms var(--ease-quick);
     }
+    label input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: none;
+    }
+    label input::placeholder {
+      color: var(--text-soft);
+      font-style: italic;
+      font-family: var(--font-display);
+      font-size: var(--text-md);
+    }
+
+    /* Format toggle — segment-control pair of buttons, Apple-style. */
     .format-toggle {
       display: inline-flex;
       gap: 0;
@@ -316,118 +348,188 @@ export interface ComposeSeed {
       border-radius: 6px;
       padding: 2px;
       align-self: flex-start;
+      background: var(--bg-muted);
     }
     .toggle {
       display: inline-flex;
       align-items: center;
       gap: 4px;
       padding: 4px 10px;
-      font-size: 12px;
+      font-size: var(--text-xs);
+      font-weight: 500;
       border: none;
       background: transparent;
       border-radius: 4px;
       color: var(--text-muted);
       cursor: pointer;
+      letter-spacing: 0.005em;
     }
     .toggle.active {
       background: var(--bg);
-      box-shadow: 0 0 0 1px var(--border);
+      box-shadow: 0 0 0 1px var(--border-soft), 0 1px 2px rgba(27, 24, 20, 0.04);
       color: var(--text);
       font-weight: 600;
     }
-    /* Quill editor overrides — match the surrounding form's typography
-       and let the editor body grow with the dialog. */
+
+    /* Plain-text textarea */
+    textarea {
+      resize: vertical;
+      min-height: 220px;
+      font-family: var(--font-ui);
+      font-size: var(--text-md);
+      line-height: 1.6;
+      background: var(--bg);
+      border: 1px solid var(--border-soft);
+      border-radius: 8px;
+      padding: 12px 14px;
+    }
+
+    /* Quill editor overrides — paint the toolbar in our chrome so the
+       editor stops looking like a generic Quill demo. */
     ::ng-deep quill-editor {
       display: flex;
       flex-direction: column;
       min-height: 280px;
+      border-radius: 8px;
+      overflow: hidden;
     }
     ::ng-deep .ql-toolbar.ql-snow {
-      border-color: var(--border);
-      border-top-left-radius: 6px;
-      border-top-right-radius: 6px;
+      border: 1px solid var(--border-soft) !important;
+      border-bottom: 1px solid var(--border) !important;
+      border-top-left-radius: 8px;
+      border-top-right-radius: 8px;
+      background: var(--bg-muted);
+      padding: 6px 8px !important;
+    }
+    ::ng-deep .ql-toolbar.ql-snow button,
+    ::ng-deep .ql-toolbar.ql-snow .ql-picker-label {
+      border-radius: 4px;
+      transition: background 100ms var(--ease-quick);
+    }
+    ::ng-deep .ql-toolbar.ql-snow button:hover,
+    ::ng-deep .ql-toolbar.ql-snow button.ql-active,
+    ::ng-deep .ql-toolbar.ql-snow .ql-picker-label:hover,
+    ::ng-deep .ql-toolbar.ql-snow .ql-picker-label.ql-active {
+      background: var(--bg);
+      color: var(--accent);
+    }
+    ::ng-deep .ql-toolbar.ql-snow .ql-stroke {
+      stroke: var(--text-muted);
+      transition: stroke 100ms var(--ease-quick);
+    }
+    ::ng-deep .ql-toolbar.ql-snow .ql-fill {
+      fill: var(--text-muted);
+      transition: fill 100ms var(--ease-quick);
+    }
+    ::ng-deep .ql-toolbar.ql-snow button:hover .ql-stroke,
+    ::ng-deep .ql-toolbar.ql-snow button.ql-active .ql-stroke {
+      stroke: var(--accent);
+    }
+    ::ng-deep .ql-toolbar.ql-snow button:hover .ql-fill,
+    ::ng-deep .ql-toolbar.ql-snow button.ql-active .ql-fill {
+      fill: var(--accent);
+    }
+    ::ng-deep .ql-toolbar.ql-snow .ql-picker {
+      color: var(--text-muted);
     }
     ::ng-deep .ql-container.ql-snow {
-      border-color: var(--border);
-      border-bottom-left-radius: 6px;
-      border-bottom-right-radius: 6px;
+      border: 1px solid var(--border-soft) !important;
+      border-top: none !important;
+      border-bottom-left-radius: 8px;
+      border-bottom-right-radius: 8px;
       min-height: 220px;
-      font-family: inherit;
-      font-size: 14px;
-      /* Pin overflow on the container — when the editor content
-         exceeds the dialog's body region, content scrolls inside
-         this container rather than pushing the footer offscreen
-         or overdrawing other regions. */
+      font-family: var(--font-ui);
+      font-size: var(--text-md);
+      line-height: 1.6;
       overflow: auto;
+      background: var(--bg);
     }
+    ::ng-deep .ql-editor {
+      padding: 14px 16px !important;
+      color: var(--text);
+    }
+    ::ng-deep .ql-editor.ql-blank::before {
+      color: var(--text-soft) !important;
+      font-style: italic !important;
+      font-family: var(--font-display);
+      left: 16px !important;
+    }
+
     .error {
       margin: 0;
+      padding: 8px 12px;
       color: var(--danger);
-      font-size: 13px;
+      background: var(--danger-soft);
+      border-radius: 6px;
+      font-size: var(--text-sm);
+      border: 1px solid color-mix(in oklab, var(--danger), transparent 70%);
     }
+
+    /* Footer (Cancel / Attach / Save draft / Send) */
     footer {
       display: flex;
       justify-content: flex-end;
       gap: 8px;
-      padding-top: 4px;
-      border-top: 1px solid var(--border);
-      /* Hard pin: the action row must never shrink. Without this, a
-         tall body (long draft, big Quill toolbar dropdown) can squash
-         the footer to 0 height in tight flex layouts. */
+      padding-top: 6px;
+      border-top: 1px solid var(--border-soft);
       flex-shrink: 0;
     }
-    .icon-text {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
+    .icon-text { display: inline-flex; align-items: center; gap: 6px; }
     .ghost {
       background: transparent;
       border: 1px solid var(--border);
+      color: var(--text-muted);
     }
-    .ghost:hover:not(:disabled) {
-      background: var(--bg-sunken);
+    .ghost:hover {
+      background: var(--bg-muted);
+      color: var(--text);
+      border-color: var(--text-soft);
     }
-    /* Attachment chips — one per file the user has picked, plus a
-       total-size label at the end. Removable via the inline ✕. */
+    button.primary {
+      padding: 7px 14px;
+      font-size: var(--text-sm);
+      font-weight: 500;
+      letter-spacing: -0.005em;
+    }
+
+    /* Attachment chips */
     .attachments {
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
       align-items: center;
-      padding: 6px 0;
     }
     .att-chip {
       display: inline-flex;
       align-items: center;
       gap: 6px;
       padding: 4px 8px;
-      background: var(--bg-sunken);
-      border: 1px solid var(--border);
+      background: var(--bg-muted);
+      border: 1px solid var(--border-soft);
       border-radius: 999px;
-      font-size: 12px;
+      font-size: var(--text-xs);
+      font-family: var(--font-mono);
       color: var(--text);
     }
-    .att-size {
-      color: var(--text-muted);
-      font-size: 11px;
-    }
+    .att-size { color: var(--text-soft); }
     .att-remove {
       background: transparent;
       border: none;
-      color: var(--text-muted);
+      color: var(--text-soft);
+      padding: 0 2px;
       cursor: pointer;
-      padding: 0 0 0 2px;
-      font-size: 12px;
+      font-size: 13px;
       line-height: 1;
+      transition: color 100ms var(--ease-quick);
     }
-    .att-remove:hover {
-      color: var(--danger);
-    }
+    .att-remove:hover { color: var(--danger); }
     .att-total {
-      font-size: 11px;
-      color: var(--text-muted);
-      margin-left: 4px;
+      font-size: 10.5px;
+      font-family: var(--font-ui);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--text-soft);
+      margin-left: auto;
     }
   `,
 })
