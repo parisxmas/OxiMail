@@ -65,6 +65,13 @@ services:
       # mount this volume at /run/avd; avd creates avd.sock there
       # with umask 000 so the rspamd uid can dial it.
       - avd-socket:/run/avd
+      # External signature databases. The image ships only the
+      # EICAR built-in; for real-world coverage the operator
+      # syncs ClamAV's main.cvd (~85MB, ~6M signatures) and
+      # optionally daily.cvd / bytecode.cvd into this directory
+      # on the host, then sets OXIMAIL_AV_EXTRA_ARGS in .env
+      # to point --cvd / --hdb at them.
+      - ${OXIMAIL_AV_SIGS_DIR:-/opt/avd-sigs}:/etc/avd/extra:ro
     networks:
       - oximail
     healthcheck:
