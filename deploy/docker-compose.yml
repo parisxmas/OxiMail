@@ -61,6 +61,14 @@ services:
       # container restarts. Without this, every restart wipes the
       # adaptive parts and quality slowly degrades.
       - rspamd-data:/var/lib/rspamd
+      # Local config drop-ins — modules we don't use are disabled
+      # here (neural, fuzzy_check, clickhouse, history_redis, p0f,
+      # metric_exporter, replies, bayes). Each file is a one-liner
+      # `enabled = false;` that tells rspamd to skip the module's
+      # init + symbol registration. Saves ~60-80 MB of RSS on a
+      # personal mailbox where none of the disabled modules have
+      # the backing service (redis, p0f, clickhouse) to be useful.
+      - ./rspamd/local.d:/etc/rspamd/local.d:ro
     healthcheck:
       # Use bash explicitly: the Debian slim base ships dash as
       # /bin/sh and dash has no /dev/tcp builtin. 11334 is the
