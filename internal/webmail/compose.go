@@ -7,10 +7,35 @@ import (
 	"fmt"
 	"mime"
 	"mime/multipart"
+	"net/mail"
 	"net/textproto"
 	"strings"
 	"time"
 )
+
+// formatFromHeader returns a From-header value suitable for an
+// outbound RFC 5322 message. When displayName is empty we emit the
+// bare address — most senders historically had no display name and the
+// recipient clients show the address either way; we keep that exact
+// wire shape so older tests / threading heuristics don't drift.
+//
+// When displayName is set we delegate to net/mail.Address.String,
+// which:
+//   - emits "Alice" <addr@x> for pure-ASCII names with no specials,
+//   - escapes/quotes ASCII names containing RFC 5322 specials
+//     (e.g. "Alice, Inc." <addr@x>),
+//   - encodes non-ASCII names as RFC 2047 encoded-words
+//     (e.g. =?utf-8?q?Al=C3=AEce?= <addr@x>).
+//
+// That covers what any modern receiving client needs to render the
+// human name; we don't need to re-implement the rules ourselves.
+func formatFromHeader(displayName, address string) string {
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		return address
+	}
+	return (&mail.Address{Name: displayName, Address: address}).String()
+}
 
 // attachment is one file the user attached to an outbound message.
 // Content is the raw bytes (already base64-decoded by the handler);

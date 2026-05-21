@@ -2,7 +2,7 @@ import { Component, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Router, RouterLink } from '@angular/router';
 
-import { ApiService, SieveScript, VacationRule } from '../api.service';
+import { AccountProfile, ApiService, SieveScript, VacationRule } from '../api.service';
 
 @Component({
   selector: 'oximail-settings',
@@ -15,6 +15,14 @@ import { ApiService, SieveScript, VacationRule } from '../api.service';
       </header>
 
       <div class="tabs">
+        <button
+          type="button"
+          class="tab"
+          [class.active]="tab() === 'profile'"
+          (click)="tab.set('profile')"
+        >
+          Profile
+        </button>
         <button
           type="button"
           class="tab"
@@ -41,7 +49,51 @@ import { ApiService, SieveScript, VacationRule } from '../api.service';
         </button>
       </div>
 
-      @if (tab() === 'password') {
+      @if (tab() === 'profile') {
+        <section class="card">
+          <h2>Profile</h2>
+          <p class="hint">
+            The display name appears in the From line of mail you send,
+            so recipients see "Display Name &lt;{{ profileAddress() }}&gt;"
+            instead of just the bare address. Leave it empty to send as
+            the address alone.
+          </p>
+
+          <label>
+            Email address
+            <input type="email" [value]="profileAddress()" disabled />
+          </label>
+
+          <label>
+            Display name
+            <input
+              type="text"
+              maxlength="80"
+              placeholder="e.g. Baris Akin"
+              [(ngModel)]="profileDisplayName"
+              name="profile-display-name"
+            />
+          </label>
+
+          @if (profileError()) {
+            <p class="error">{{ profileError() }}</p>
+          }
+          @if (profileSavedAt()) {
+            <p class="ok">Profile updated.</p>
+          }
+
+          <footer>
+            <button
+              type="button"
+              class="primary"
+              [disabled]="profileBusy()"
+              (click)="saveProfile()"
+            >
+              {{ profileBusy() ? 'Saving…' : 'Save profile' }}
+            </button>
+          </footer>
+        </section>
+      } @else if (tab() === 'password') {
         <section class="card">
           <h2>Change password</h2>
           <p class="hint">
@@ -249,7 +301,16 @@ export class SettingsComponent {
   private readonly api = inject(ApiService);
   private readonly router = inject(Router);
 
-  readonly tab = signal<'vacation' | 'sieve' | 'password'>('vacation');
+  readonly tab = signal<'profile' | 'vacation' | 'sieve' | 'password'>('profile');
+
+  // Profile form. The address is the immutable login identity — shown
+  // as a disabled input for context, never PATCHed. Only display_name
+  // is sent on save.
+  readonly profileAddress = signal('');
+  profileDisplayName = '';
+  readonly profileBusy = signal(false);
+  readonly profileError = signal('');
+  readonly profileSavedAt = signal<number>(0);
 
   // Change-password form state. All three fields are kept in the
   // component (not the API) so a navigate-away doesn't persist
@@ -286,6 +347,15 @@ export class SettingsComponent {
   readonly sieveSavedAt = signal<number>(0);
 
   ngOnInit(): void {
+    // Load profile up front: it's the default tab, so the user
+    // sees the current display name immediately on landing.
+    this.api.getProfile().subscribe({
+      next: (p) => {
+        this.profileAddress.set(p.address);
+        this.profileDisplayName = p.display_name ?? '';
+      },
+      error: () => void this.router.navigate(['/login']),
+    });
     this.api.getVacation().subscribe({
       next: (v) => {
         // Server returns the all-zero default when nothing is set;
@@ -395,6 +465,29 @@ export class SettingsComponent {
       error: (err) => {
         this.pwError.set(err.error?.error || 'Could not change the password.');
         this.pwBusy.set(false);
+      },
+    });
+  }
+
+  // saveProfile sends the (possibly empty) display name to the server.
+  // We don't validate length client-side beyond the maxlength=80 the
+  // input already enforces; the server's normaliser is authoritative
+  // and returns the post-trim value so we can reflect what it
+  // actually stored.
+  saveProfile(): void {
+    this.profileBusy.set(true);
+    this.profileError.set('');
+    this.profileSavedAt.set(0);
+    this.api.updateProfile(this.profileDisplayName).subscribe({
+      next: (p) => {
+        this.profileDisplayName = p.display_name ?? '';
+        this.profileSavedAt.set(Date.now());
+        this.profileBusy.set(false);
+        setTimeout(() => this.profileSavedAt.set(0), 5_000);
+      },
+      error: (err) => {
+        this.profileError.set(err.error?.error || 'Could not save the profile.');
+        this.profileBusy.set(false);
       },
     });
   }

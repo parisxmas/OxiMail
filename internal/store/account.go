@@ -29,6 +29,10 @@ type Account struct {
 	UsedBytes    int64  `json:"used_bytes"`
 	Active       bool   `json:"active"`
 	CreatedAt    string `json:"created_at"`
+	// DisplayName is the human-readable name placed in outbound From
+	// headers, e.g. `"Alice Example" <alice@example.com>`. Empty means
+	// the outbound From is the bare address. Not used for auth.
+	DisplayName string `json:"display_name,omitempty"`
 }
 
 // Alias forwards an address to one or more destination addresses, which
@@ -111,6 +115,25 @@ func (s *Store) SetAccountPassword(accountID uint64, passwordHash string) error 
 	)
 	if err != nil {
 		return fmt.Errorf("store: set password for account %d: %w", accountID, err)
+	}
+	if doc == nil {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetAccountDisplayName updates the human-readable name placed in
+// outbound From headers. Pass an empty string to clear it. The caller
+// must have validated/normalised the value already — the store accepts
+// whatever it's given.
+func (s *Store) SetAccountDisplayName(accountID uint64, displayName string) error {
+	doc, err := s.db.FindAndModify(
+		CollAccounts,
+		map[string]any{"_id": accountID},
+		map[string]any{"$set": map[string]any{"display_name": displayName}},
+	)
+	if err != nil {
+		return fmt.Errorf("store: set display name for account %d: %w", accountID, err)
 	}
 	if doc == nil {
 		return ErrNotFound

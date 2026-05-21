@@ -172,6 +172,24 @@ export class ApiService {
       new_password: newPassword,
     });
   }
+
+  // getProfile returns the editable profile fields for the signed-in
+  // account. The only field today is display_name; address is echoed
+  // for convenience so the profile page is self-contained.
+  getProfile() {
+    return this.http.get<AccountProfile>('/api/account/profile');
+  }
+
+  // updateProfile writes the display name. An empty string clears it,
+  // and the next outbound message reverts to the bare address. The
+  // server normalises (trim + control-char reject + length cap) and
+  // returns the post-normalisation value so the SPA can reflect what
+  // was actually stored.
+  updateProfile(displayName: string) {
+    return this.http.patch<AccountProfile>('/api/account/profile', {
+      display_name: displayName,
+    });
+  }
 }
 
 // AttachmentUpload mirrors internal/webmail.attachmentInput — one file
@@ -196,6 +214,15 @@ export interface VacationRule {
 export interface SieveScript {
   source: string;
   updated_at?: string;
+}
+
+// AccountProfile mirrors internal/webmail.profileResponse — the fields
+// a logged-in account can read/edit about itself. display_name is the
+// human-readable name placed in outbound From headers; empty means
+// recipients see the bare address.
+export interface AccountProfile {
+  address: string;
+  display_name: string;
 }
 
 // readCookie returns the value of cookie `name`, or '' if absent. It is

@@ -370,7 +370,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, acc *store.A
 
 	messageID := randomID() + "@" + addressDomain(acc.Address)
 	raw := buildMessage(composeFields{
-		from:        acc.Address,
+		from:        formatFromHeader(acc.DisplayName, acc.Address),
 		to:          req.To,
 		cc:          req.Cc,
 		subject:     req.Subject,
@@ -437,7 +437,7 @@ func (s *Server) handleSaveDraft(w http.ResponseWriter, r *http.Request, acc *st
 	}
 	messageID := randomID() + "@" + addressDomain(acc.Address)
 	raw := buildMessage(composeFields{
-		from:        acc.Address,
+		from:        formatFromHeader(acc.DisplayName, acc.Address),
 		to:          req.To,
 		cc:          req.Cc,
 		subject:     req.Subject,
