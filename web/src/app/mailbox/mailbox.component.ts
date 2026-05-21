@@ -483,22 +483,54 @@ interface UndoState {
     .main .reader {
       min-height: 0;
     }
-    /* Thin gutter between list and reader. Same hover treatment as
-       the vertical divider; cursor advertises the resize affordance
-       even though we don't wire drag-to-resize yet (the 50/50
-       split is the gmail/outlook default and most users don't
-       need to retune it). */
+    /* Gutter between list and reader. The transparent-until-hover
+       design from the folders divider was invisible here — users
+       reported they couldn't find the drop zone. Give it a visible
+       neutral line at rest (matches the rest of the chrome) and
+       use ::before to extend the pointer hit area without
+       widening the visual gutter. Three states stack cleanly:
+         rest    — thin grey line
+         hover   — accent-tinted band
+         active  — accent-tinted band, slightly stronger */
     .hdivider {
+      position: relative;
       height: 6px;
-      background: transparent;
+      background: var(--border);
       cursor: row-resize;
       transition: background 120ms ease;
+    }
+    .hdivider::before {
+      /* 12px-tall hit pad centred on the visible line. Users with
+         imprecise mice and trackpads can grab anywhere in that
+         band; the visual gutter stays a calm 6px. */
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: -4px;
+      bottom: -4px;
     }
     .hdivider:hover,
     .hdivider:active {
       background: var(--accent);
-      opacity: 0.4;
     }
+    .hdivider:hover { opacity: 0.5; }
+    .hdivider:active { opacity: 0.8; }
+    /* Same visible-at-rest treatment for the folders divider so
+       the two axes feel consistent. Without this the user only
+       discovers the sidebar resize by accident. */
+    .divider {
+      background: var(--border);
+    }
+    .divider::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: -4px;
+      right: -4px;
+    }
+    .divider { position: relative; }
     /* The drag handle itself. 6px wide, transparent until hover/active
        so it reads as a thin gutter at rest. col-resize cursor advertises
        the affordance. */
