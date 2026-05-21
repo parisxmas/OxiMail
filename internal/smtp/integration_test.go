@@ -80,8 +80,12 @@ func TestInboundSMTP(t *testing.T) {
 		if got.MessageID != "itest-1@elsewhere.test" {
 			t.Errorf("message-id = %q (brackets should be stripped)", got.MessageID)
 		}
-		if got.FromAddr != "sender@elsewhere.test" {
-			t.Errorf("from = %q (should be the bare address)", got.FromAddr)
+		// FromAddr keeps the display name when the header has one so
+		// the inbox-list renders `"Sender" <addr>` instead of just
+		// the bare address. Receipt-side parsing in the SPA already
+		// handles both shapes.
+		if got.FromAddr != `"Sender" <sender@elsewhere.test>` {
+			t.Errorf("from = %q (should preserve display name + address)", got.FromAddr)
 		}
 		body, err := st.FetchBody(&got)
 		if err != nil {

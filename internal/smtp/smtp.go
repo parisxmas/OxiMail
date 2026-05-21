@@ -625,7 +625,15 @@ func parseHeaders(raw []byte) (subject, messageID, fromAddr string) {
 	subject = msg.Header.Get("Subject")
 	messageID = strings.Trim(msg.Header.Get("Message-Id"), "<>")
 	if addr, err := mail.ParseAddress(msg.Header.Get("From")); err == nil {
-		fromAddr = addr.Address
+		// Keep the display name on FromAddr when present so the
+		// inbox-list rendering can show `"Alice" <addr>` instead of
+		// stripping to the bare address. Empty Name → bare address,
+		// the historical shape (and what older clients expect).
+		if addr.Name != "" {
+			fromAddr = addr.String()
+		} else {
+			fromAddr = addr.Address
+		}
 	}
 	return subject, messageID, fromAddr
 }

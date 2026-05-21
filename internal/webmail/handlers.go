@@ -384,7 +384,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, acc *store.A
 	in := store.IncomingMessage{
 		Raw:       raw,
 		Subject:   req.Subject,
-		FromAddr:  acc.Address,
+		FromAddr:  formatFromHeader(acc.DisplayName, acc.Address),
 		MessageID: messageID,
 	}
 
@@ -451,7 +451,7 @@ func (s *Server) handleSaveDraft(w http.ResponseWriter, r *http.Request, acc *st
 	in := store.IncomingMessage{
 		Raw:       raw,
 		Subject:   req.Subject,
-		FromAddr:  acc.Address,
+		FromAddr:  formatFromHeader(acc.DisplayName, acc.Address),
 		MessageID: messageID,
 		Flags:     []string{`\Draft`},
 	}

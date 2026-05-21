@@ -97,7 +97,14 @@ func parseIncoming(raw []byte) store.IncomingMessage {
 	in.Subject = msg.Header.Get("Subject")
 	in.MessageID = strings.Trim(msg.Header.Get("Message-Id"), "<>")
 	if addr, err := mail.ParseAddress(msg.Header.Get("From")); err == nil {
-		in.FromAddr = addr.Address
+		// Preserve the display name when the From header carries one,
+		// so the list view renders `"Alice" <addr>` instead of the bare
+		// address. Empty Name keeps the historical bare-address shape.
+		if addr.Name != "" {
+			in.FromAddr = addr.String()
+		} else {
+			in.FromAddr = addr.Address
+		}
 	}
 	return in
 }
