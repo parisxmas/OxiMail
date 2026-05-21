@@ -99,12 +99,18 @@ func TestLoadExtraSignatures(t *testing.T) {
 	}
 }
 
-func TestLoadMissingExtraErrors(t *testing.T) {
-	// A non-existent extra path is a real error — operator
-	// misconfigured the env var. Better to fail loudly than
-	// silently skip the file they thought they were loading.
-	if _, err := New("/no/such/file.sigdb"); err == nil {
-		t.Fatal("expected error for missing extra sigdb")
+func TestLoadMissingExtraIsTolerated(t *testing.T) {
+	// A non-existent extra path is intentionally TOLERATED — the
+	// updater writes to its configured path on the first tick,
+	// not at process start, so a freshly-booted daemon must come
+	// up cleanly when the file doesn't exist yet. The builtin
+	// set stays loaded.
+	c, err := New("/no/such/file.sigdb")
+	if err != nil {
+		t.Fatalf("New: missing extra sigdb should be tolerated, got: %v", err)
+	}
+	if got := c.SignatureCount(); got != 1 {
+		t.Errorf("signatures = %d, want 1 (builtin) when extra is missing", got)
 	}
 }
 

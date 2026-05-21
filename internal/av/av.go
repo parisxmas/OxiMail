@@ -6,8 +6,9 @@
 // container in the compose graph for what — in our scope — is a
 // SHA-256 hash lookup. We collapse the whole thing into a pure-Go
 // scanner that's compiled into the oximail binary; signatures live in
-// a small text file embedded at build time, with an optional
-// operator-provided extension loaded at start.
+// a small text file embedded at build time, plus zero or more
+// operator-provided extension files loaded at start (and reloaded by
+// the Updater when fresh data arrives).
 //
 // API surface mirrors the previous daemon client so the call sites
 // in cmd/oximail/main.go, internal/smtp/smtp.go, and internal/webmail
@@ -23,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 )
 
 // Verdict is the result of a single scan. Threat is the human-readable
@@ -41,57 +43,91 @@ type Verdict struct {
 var ErrUnreachable = errors.New("av: scanner unreachable")
 
 // builtinSigdb is the EICAR-only minimum that ships with every build.
-// More entries can be appended via OXIMAIL_AV_SIGDB; the parser is
-// the same shape.
+// More entries land via extraPaths configured on New().
 //
 //go:embed builtin.sigdb
 var builtinSigdb string
 
-// Client is the scanner. Stateless from the caller's perspective —
-// every Scan call hashes the payload and looks it up. The internal
-// signature table is read-only after construction; New is the only
-// writer, so reads need no locking.
+// Client is the scanner. The signature map sits behind an
+// atomic.Pointer so Reload() can swap a fresh version in without
+// taking a lock on the hot Scan path. Scan reads the pointer once
+// and does a map lookup against the snapshot it observed —
+// concurrent reads + concurrent reload are both lock-free.
 //
 // A nil *Client returns clean from Scan; the null-object idiom keeps
 // "AV disabled" branchless at every call site.
 type Client struct {
-	sigs map[[32]byte]string
+	// extraPaths are the operator-provided sigdb files reloaded on
+	// every Reload() call. Each path is opened, parsed, and merged
+	// on top of the builtin set. An empty entry is skipped — that
+	// matches how main.go threads the env var through (the variadic
+	// New() accepts the env value even when unset).
+	extraPaths []string
+
+	// sigs holds the current signature map. We use atomic.Pointer so
+	// the Updater can atomically swap a fresh map in without
+	// blocking concurrent Scan callers, and Scan never needs to
+	// lock anything.
+	sigs atomic.Pointer[map[[32]byte]string]
 }
 
-// New constructs a scanner. The builtin signature set is always
-// loaded; extraPath, when non-empty, is read and merged on top —
-// duplicate hashes win for the later entry, which matches the
-// "operator override beats builtin" intent.
-//
-// An empty extraPath is fine; a non-existent extraPath errors. The
-// caller can choose to treat a missing extra DB as fatal or warn-and-
-// continue — main.go logs and continues, treating extra sigs as
-// strictly additive.
-func New(extraPath string) (*Client, error) {
-	c := &Client{sigs: make(map[[32]byte]string)}
-	if err := c.loadInto(c.sigs, builtinSigdb, "<builtin>"); err != nil {
-		// Shouldn't happen — the builtin file is in our own tree.
-		return nil, fmt.Errorf("av: load builtin sigs: %w", err)
-	}
-	if extraPath != "" {
-		raw, err := os.ReadFile(extraPath)
-		if err != nil {
-			return nil, fmt.Errorf("av: read %s: %w", extraPath, err)
-		}
-		if err := c.loadInto(c.sigs, string(raw), extraPath); err != nil {
-			return nil, fmt.Errorf("av: parse %s: %w", extraPath, err)
-		}
+// New constructs a scanner and loads the builtin signature set plus
+// every non-empty extraPath. Empty path entries are skipped — that
+// lets callers thread an unset env var straight through without
+// guarding it themselves.
+func New(extraPaths ...string) (*Client, error) {
+	c := &Client{extraPaths: extraPaths}
+	if err := c.Reload(); err != nil {
+		return nil, err
 	}
 	return c, nil
 }
 
-// SignatureCount returns the number of distinct hashes loaded. Useful
-// for the startup log so operators can confirm their extra DB landed.
+// Reload rebuilds the signature map from the builtin embed plus the
+// current contents of every extraPath, then atomically swaps the new
+// map in. Concurrent Scan callers see either the old map or the new
+// map for the duration of any single call; never a partial state.
+//
+// A missing extraPath is tolerated as "the Updater hasn't written it
+// yet" rather than an error — the first call to Reload before the
+// Updater fires would otherwise hard-fail and refuse to boot the
+// daemon. Other I/O errors and parse errors do propagate.
+func (c *Client) Reload() error {
+	m := map[[32]byte]string{}
+	if err := c.loadInto(m, builtinSigdb, "<builtin>"); err != nil {
+		return fmt.Errorf("av: load builtin sigs: %w", err)
+	}
+	for _, p := range c.extraPaths {
+		if p == "" {
+			continue
+		}
+		raw, err := os.ReadFile(p)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("av: read %s: %w", p, err)
+		}
+		if err := c.loadInto(m, string(raw), p); err != nil {
+			return fmt.Errorf("av: parse %s: %w", p, err)
+		}
+	}
+	c.sigs.Store(&m)
+	return nil
+}
+
+// SignatureCount returns the number of distinct hashes currently
+// loaded. Useful for the startup log and for the Updater's "refreshed
+// — n hashes" line.
 func (c *Client) SignatureCount() int {
 	if c == nil {
 		return 0
 	}
-	return len(c.sigs)
+	m := c.sigs.Load()
+	if m == nil {
+		return 0
+	}
+	return len(*m)
 }
 
 // Scan computes SHA-256(data) and returns a verdict. A nil receiver
@@ -99,10 +135,10 @@ func (c *Client) SignatureCount() int {
 // stay branchless.
 //
 // The ctx is honoured by the cheapest possible mechanism: a check at
-// entry and one at end. SHA-256 over a 25 MB attachment takes well
-// under 100 ms on any reasonable CPU, so finer-grained cancellation
-// would only ever masquerade as cancellation while the OS finishes
-// the in-flight hash anyway.
+// entry. SHA-256 over a 25 MB attachment takes well under 100 ms on
+// any reasonable CPU, so finer-grained cancellation would only ever
+// masquerade as cancellation while the OS finishes the in-flight
+// hash anyway.
 func (c *Client) Scan(ctx context.Context, data []byte) (Verdict, error) {
 	if c == nil {
 		return Verdict{OK: true}, nil
@@ -111,8 +147,11 @@ func (c *Client) Scan(ctx context.Context, data []byte) (Verdict, error) {
 		return Verdict{}, err
 	}
 	sum := sha256.Sum256(data)
-	if name, hit := c.sigs[sum]; hit {
-		return Verdict{OK: false, Threat: name}, nil
+	m := c.sigs.Load()
+	if m != nil {
+		if name, hit := (*m)[sum]; hit {
+			return Verdict{OK: false, Threat: name}, nil
+		}
 	}
 	return Verdict{OK: true}, nil
 }

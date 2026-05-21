@@ -97,6 +97,27 @@ type Config struct {
 	// env var at it.
 	AVSigDB string
 
+	// AVUpdateURL turns on a background goroutine that periodically
+	// fetches a SHA-256 feed (one hash per line; abuse.ch's
+	// `/export/txt/sha256/recent/` is the default shape), writes
+	// it to AVAutoSigDB, and triggers a hot reload of the scanner.
+	// Empty = no automated refresh.
+	AVUpdateURL string
+
+	// AVUpdateInterval is the cadence between refreshes. Defaults to
+	// 6h via internal/av so it's safe to leave at zero.
+	AVUpdateInterval time.Duration
+
+	// AVAutoSigDB is the path the updater writes to. Loaded
+	// alongside AVSigDB on every Reload, so operators can mix
+	// the auto-managed feed with their own manual list.
+	AVAutoSigDB string
+
+	// AVUpdateSource labels every hash the updater imports — shows
+	// up as the signature name in scan verdicts. Default
+	// "MalwareBazaar" matches the default URL.
+	AVUpdateSource string
+
 	// DNSBLZones is the comma-separated list of DNS blocklist zones
 	// queried at connection-time (see internal/spam/dnsbl.go). The
 	// default — "zen.spamhaus.org" — only works when OxiMail resolves
@@ -165,7 +186,11 @@ func Load() Config {
 		OxiDBHost:      env("OXIMAIL_OXIDB_HOST", "127.0.0.1"),
 		OxiDBPort:      envInt("OXIMAIL_OXIDB_PORT", 4444),
 		RspamdURL:      env("OXIMAIL_RSPAMD_URL", ""),
-		AVSigDB:        env("OXIMAIL_AV_SIGDB", ""),
+		AVSigDB:          env("OXIMAIL_AV_SIGDB", ""),
+		AVUpdateURL:      env("OXIMAIL_AV_UPDATE_URL", ""),
+		AVUpdateInterval: envDuration("OXIMAIL_AV_UPDATE_INTERVAL", 0),
+		AVAutoSigDB:      env("OXIMAIL_AV_AUTO_SIGDB", "/var/lib/oximail/av/auto.sigdb"),
+		AVUpdateSource:   env("OXIMAIL_AV_UPDATE_SOURCE", ""),
 		DNSBLZones:     splitCSV(envOrDefault("OXIMAIL_DNSBL_ZONES", "zen.spamhaus.org")),
 		GreylistDelay:  envDuration("OXIMAIL_GREYLIST_DELAY", time.Minute),
 		SRSSecret:      env("OXIMAIL_SRS_SECRET", ""),

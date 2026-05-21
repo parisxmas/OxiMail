@@ -121,6 +121,17 @@ services:
       # so a fresh deploy is virus-aware. Setting OXIMAIL_AV_SIGDB
       # to a file path mounts an operator-extended list on top.
       - OXIMAIL_AV_SIGDB=${OXIMAIL_AV_SIGDB-}
+      # AV auto-updater. When OXIMAIL_AV_UPDATE_URL is set, oximail
+      # spawns a goroutine that periodically fetches a SHA-256
+      # feed (default: abuse.ch MalwareBazaar recent dump), writes
+      # the hashes to OXIMAIL_AV_AUTO_SIGDB, and hot-reloads the
+      # scanner. The default value below opts every fresh deploy
+      # into the abuse.ch feed; set this to empty in .env to
+      # disable the network refresh entirely.
+      - OXIMAIL_AV_UPDATE_URL=${OXIMAIL_AV_UPDATE_URL-https://bazaar.abuse.ch/export/txt/sha256/recent/}
+      - OXIMAIL_AV_UPDATE_INTERVAL=${OXIMAIL_AV_UPDATE_INTERVAL-6h}
+      - OXIMAIL_AV_AUTO_SIGDB=${OXIMAIL_AV_AUTO_SIGDB-/var/lib/oximail/av/auto.sigdb}
+      - OXIMAIL_AV_UPDATE_SOURCE=${OXIMAIL_AV_UPDATE_SOURCE-MalwareBazaar}
     ports:
       - "25:25"        # SMTP MX (inbound)
       - "465:465"      # SMTPS submission
@@ -132,16 +143,18 @@ services:
       - "9090:9090"    # /metrics, /healthz, /readyz
     volumes:
       - oximail-acme:/var/lib/oximail/acme-cache
-      # Optional extra AV signature database. When the operator
-      # sets OXIMAIL_AV_SIGDB, mount the host path here so the
-      # in-process scanner can load it alongside the builtin set.
-      # No mount needed for the EICAR-only default.
+      # AV updater writes its auto-managed sigdb here. Persisted
+      # via a named volume so we keep the last good hash list
+      # across restarts and don't lean on a successful HTTP
+      # refresh at every boot.
+      - oximail-av:/var/lib/oximail/av
     networks:
       - oximail
 
 volumes:
   oxidb-data:
   oximail-acme:
+  oximail-av:
   rspamd-data:
 
 networks:

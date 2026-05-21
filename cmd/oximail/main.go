@@ -84,12 +84,28 @@ func main() {
 	// Components, in start order. The implicit-TLS surfaces are only
 	// brought up when a certificate is configured.
 	pipeline := spam.New(cfg.RspamdURL, cfg.DNSBLZones, cfg.GreylistDelay)
-	avClient, err := av.New(cfg.AVSigDB)
+	// The AV scanner takes any non-empty extra-sigdb paths the
+	// operator + the auto-updater have wired up; missing files are
+	// tolerated (the updater writes its file on first refresh,
+	// so on a fresh boot the auto path may not exist yet).
+	avClient, err := av.New(cfg.AVSigDB, cfg.AVAutoSigDB)
 	if err != nil {
 		log.Fatalf("av: %v", err)
 	}
-	log.Printf("AV: in-process scanner ready — signatures=%d extra_db=%q",
-		avClient.SignatureCount(), cfg.AVSigDB)
+	log.Printf("AV: in-process scanner ready — signatures=%d sigdb=%q auto_sigdb=%q",
+		avClient.SignatureCount(), cfg.AVSigDB, cfg.AVAutoSigDB)
+	// Background updater — only spun up when the operator gave a
+	// feed URL. Refresh cadence defaults to 6h via the av package;
+	// every successful refresh hot-swaps the scanner's signature
+	// map under a lock-free atomic pointer. The goroutine is
+	// spawned later in main once the signal-aware ctx exists; we
+	// just construct the value here so the log line lands next to
+	// the av-init line.
+	avUpdater := av.NewUpdater(avClient, cfg.AVUpdateURL, cfg.AVAutoSigDB, cfg.AVUpdateSource, cfg.AVUpdateInterval)
+	if avUpdater != nil {
+		log.Printf("AV: updater enabled — url=%s out=%s interval=%v",
+			cfg.AVUpdateURL, cfg.AVAutoSigDB, cfg.AVUpdateInterval)
+	}
 	webmailSrv := webmail.New(cfg.WebmailAddr, cfg.WebmailStatic, st, tlsConfig, webmail.MTASTSPolicy{
 		Mode:   cfg.MTASTSMode,
 		MX:     mtastsMX(cfg),
@@ -127,6 +143,16 @@ func main() {
 	// Run each component until the process is asked to stop.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// AV updater goroutine, if configured. Ctx-aware so a SIGTERM
+	// stops the refresh loop alongside everything else.
+	if avUpdater != nil {
+		go func() {
+			if err := avUpdater.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("av-updater: stopped: %v", err)
+			}
+		}()
+	}
 
 	// SIGHUP reloads what we can without a restart. Today: re-read the
 	// static TLS cert from disk so certbot renew (or any out-of-band
