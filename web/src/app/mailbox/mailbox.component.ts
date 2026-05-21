@@ -139,7 +139,7 @@ interface UndoState {
         </button>
       </aside>
 
-      <!-- Divider: folders | list. Drag to resize. Double-click resets. -->
+      <!-- Divider: folders | main. Drag to resize. Double-click resets. -->
       <div
         class="divider"
         role="separator"
@@ -147,6 +147,12 @@ interface UndoState {
         (mousedown)="startResize($event, 'folders')"
         (dblclick)="resetWidth('folders')"
       ></div>
+
+      <!-- Main column: list on top, reader stacked below it
+           (Outlook-style "reading pane: bottom"). Both visible at
+           the same time; clicking a row fills the reader without
+           losing the list above. -->
+      <div class="main">
 
       <!-- Message list -->
       <section class="list">
@@ -271,15 +277,26 @@ interface UndoState {
         }
       </section>
 
-      <!-- Reader. Lives in the same grid column as the list; CSS
-           shows whichever matches the 'view' signal. No divider —
-           the gmail-style switch view has nothing to resize between. -->
+      <!-- Horizontal divider between list (top) and reader (bottom).
+           Only present at desktop widths; the narrow-breakpoint media
+           query stacks list and reader as full-screen alternatives
+           via the 'view' signal instead, so this gutter is hidden. -->
+      <div
+        class="hdivider"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize message list / reader split"
+      ></div>
+
+      <!-- Reader. Bottom row of the main column. Always visible at
+           desktop widths (empty-state hint when nothing's selected);
+           on narrow screens, view='reader' toggles to full-screen. -->
       <section class="reader">
         @if (openMessage(); as msg) {
           <!-- Conversation header: subject + thread length hint -->
           <div class="conversation-head">
             <button
-              class="back icon-btn"
+              class="back mobile-only icon-btn"
               type="button"
               (click)="view.set('list')"
               aria-label="Back to list"
@@ -399,6 +416,7 @@ interface UndoState {
           <p class="hint center">Select a message to read it.</p>
         }
       </section>
+      </div>
     </div>
 
     @if (composing()) {
@@ -428,25 +446,47 @@ interface UndoState {
   styles: `
     .app {
       display: grid;
-      /* Gmail-style two-pane layout: folders sidebar + a single
-         main column that shows either the list or the reader (never
-         both side-by-side). One drag handle between them; the main
-         column gets the full remaining width on every breakpoint. */
+      /* Two columns at desktop widths: folders sidebar | main. The
+         main column is itself a vertical stack of [list, divider,
+         reader] — Outlook-style "reading pane: bottom". */
       grid-template-columns:
         var(--folders-width, 200px)
         6px
         1fr;
       height: 100%;
     }
-    /* Show only one of list / reader at a time, picked by the
-       'view' signal on the host. This is what makes the layout
-       feel like gmail: clicking a row REPLACES the inbox with the
-       conversation; the back button returns. Default view is
-       'list' so a fresh page load lands on the inbox. */
-    .app[data-view='list'] .reader { display: none; }
-    .app[data-view='reader'] .list { display: none; }
-    .app[data-view='folders'] .list { display: none; }
-    .app[data-view='folders'] .reader { display: none; }
+    /* Main column: list on top, hdivider, reader below. flex:1 +
+       min-height:0 on each pane is what makes them share the
+       available vertical space and scroll their OWN overflow
+       independently — without min-height:0 the children's intrinsic
+       content height wins and the whole column scrolls instead. */
+    .main {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 0;
+    }
+    .main .list,
+    .main .reader {
+      flex: 1 1 0;
+      min-height: 0;
+    }
+    /* Thin gutter between list and reader. Same hover treatment as
+       the vertical divider; cursor advertises the resize affordance
+       even though we don't wire drag-to-resize yet (the 50/50
+       split is the gmail/outlook default and most users don't
+       need to retune it). */
+    .hdivider {
+      height: 6px;
+      background: transparent;
+      cursor: row-resize;
+      transition: background 120ms ease;
+    }
+    .hdivider:hover,
+    .hdivider:active {
+      background: var(--accent);
+      opacity: 0.4;
+    }
     /* The drag handle itself. 6px wide, transparent until hover/active
        so it reads as a thin gutter at rest. col-resize cursor advertises
        the affordance. */
@@ -471,10 +511,17 @@ interface UndoState {
         grid-template-columns: 1fr;
       }
       .app > * { display: none; }
-      .divider { display: none !important; }
+      .divider, .hdivider { display: none !important; }
       .app[data-view='folders'] .folders { display: flex; }
-      .app[data-view='list'] .list { display: flex; flex-direction: column; }
-      .app[data-view='reader'] .reader { display: flex; }
+      /* At narrow widths the stacked main column is awkward — show
+         only ONE pane at a time and let the back buttons toggle. The
+         desktop flex stack is overridden to a single-pane container
+         here so list and reader can each fill the screen on their
+         turn. */
+      .app[data-view='list'] .main,
+      .app[data-view='reader'] .main { display: flex; }
+      .app[data-view='list'] .main .reader { display: none; }
+      .app[data-view='reader'] .main .list { display: none; }
       .mobile-only.icon-btn {
         display: inline-flex;
         align-items: center;
