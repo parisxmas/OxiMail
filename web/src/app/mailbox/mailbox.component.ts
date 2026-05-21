@@ -1,5 +1,6 @@
 import { Component, HostListener, OnDestroy, OnInit, computed, inject, signal } from '@angular/core';
 import { DatePipe } from '@angular/common';
+import { forkJoin } from 'rxjs';
 import { Router, RouterLink } from '@angular/router';
 import {
   LucideAngularModule,
@@ -250,34 +251,8 @@ interface UndoState {
       <!-- Reader -->
       <section class="reader">
         @if (openMessage(); as msg) {
-          @if (openThread(); as thread) {
-            <!-- Thread navigation strip — appears only when the open
-                 message lives in a thread with siblings. Each row is a
-                 clickable summary; the currently-open one is muted. -->
-            <div class="thread-strip" role="list" [attr.aria-label]="thread.messages.length + ' messages in this conversation'">
-              <div class="thread-strip-head">
-                {{ thread.messages.length }} messages in this conversation
-              </div>
-              @for (tm of thread.messages; track tm.id) {
-                <button
-                  type="button"
-                  role="listitem"
-                  class="thread-strip-row"
-                  [class.active]="tm.id === msg.id"
-                  [class.unread]="!tm.seen"
-                  (click)="open(tm.id)"
-                  [title]="tm.subject"
-                >
-                  <span class="thread-strip-from">{{ senderName(tm.from) }}</span>
-                  @if (tm.snippet) {
-                    <span class="thread-strip-snippet">{{ tm.snippet }}</span>
-                  }
-                  <span class="thread-strip-date">{{ tm.date | date: 'shortDate' }}</span>
-                </button>
-              }
-            </div>
-          }
-          <div class="reader-head">
+          <!-- Conversation header: subject + thread length hint -->
+          <div class="conversation-head">
             <button
               class="back mobile-only icon-btn"
               type="button"
@@ -287,90 +262,114 @@ interface UndoState {
               <i-lucide [img]="icons.ChevronLeft" [size]="20"></i-lucide>
             </button>
             <h2>{{ msg.subject || '(no subject)' }}</h2>
-            <div class="reader-meta">
-              <span class="avatar large" [style.background]="avatarColor(msg.from)">{{ initials(msg.from) }}</span>
-              <div class="meta">
-                <div class="meta-from">{{ msg.from }}</div>
-                @if (msg.to?.length) {
-                  <div class="meta-line">to {{ msg.to.join(', ') }}</div>
-                }
-                @if (msg.cc?.length) {
-                  <div class="meta-line">cc {{ msg.cc.join(', ') }}</div>
-                }
-                <div class="meta-line date">{{ msg.date | date: 'medium' }}</div>
-              </div>
-            </div>
-            <div class="actions">
-              <button class="icon-btn" type="button" (click)="reply(msg, false)" title="Reply" aria-label="Reply">
-                <i-lucide [img]="icons.Reply" [size]="18"></i-lucide>
-              </button>
-              <button class="icon-btn" type="button" (click)="reply(msg, true)" title="Reply all" aria-label="Reply all">
-                <i-lucide [img]="icons.ReplyAll" [size]="18"></i-lucide>
-              </button>
-              <button class="icon-btn" type="button" (click)="forward(msg)" title="Forward" aria-label="Forward">
-                <i-lucide [img]="icons.Forward" [size]="18"></i-lucide>
-              </button>
-              <span class="divider"></span>
-              <button
-                class="icon-btn"
-                type="button"
-                (click)="toggleFlagged(msg)"
-                [title]="isFlagged(msg) ? 'Unflag' : 'Flag'"
-                [attr.aria-label]="isFlagged(msg) ? 'Unflag' : 'Flag'"
-                [class.flagged]="isFlagged(msg)"
-              >
-                <i-lucide [img]="icons.Star" [size]="18"></i-lucide>
-              </button>
-              <button class="icon-btn" type="button" (click)="markUnread(msg)" title="Mark unread" aria-label="Mark unread">
-                <i-lucide [img]="icons.MailOpen" [size]="18"></i-lucide>
-              </button>
-              <button
-                class="icon-btn"
-                type="button"
-                (click)="archive(msg)"
-                title="Archive"
-                aria-label="Archive"
-              >
-                <i-lucide [img]="icons.Archive" [size]="18"></i-lucide>
-              </button>
-              <button
-                class="icon-btn danger"
-                type="button"
-                (click)="deleteOrTrash(msg)"
-                [title]="inTrash() ? 'Delete permanently' : 'Move to Trash'"
-                [attr.aria-label]="inTrash() ? 'Delete permanently' : 'Move to Trash'"
-              >
-                <i-lucide [img]="icons.Trash2" [size]="18"></i-lucide>
-              </button>
-            </div>
-          </div>
-          <div class="reader-body">
-            @if (msg.html) {
-              <!-- Angular sanitizes [innerHTML]; a production client
-                   should render email HTML in a sandboxed iframe with a
-                   strict CSP. -->
-              <div class="html-body" [innerHTML]="msg.html"></div>
-            } @else if (msg.text) {
-              <pre class="text-body">{{ msg.text }}</pre>
-            } @else {
-              <p class="hint">(empty message)</p>
+            @if (openThreadDetails().length > 1) {
+              <span class="conversation-count">{{ openThreadDetails().length }} messages</span>
             }
           </div>
-          @if (msg.attachments.length) {
-            <div class="attachments">
-              <strong>Attachments</strong>
-              @for (a of msg.attachments; track $index) {
-                <button
-                  type="button"
-                  class="chip"
-                  (click)="download(msg, $index, a.filename)"
-                  [disabled]="downloading() === $index"
-                >
-                  {{ a.filename || '(unnamed)' }} · {{ a.size }} bytes
-                </button>
-              }
-            </div>
-          }
+
+          <!-- Stack of message cards. Single-message threads degrade
+               to a one-card stack — same content as the pre-thread
+               reader, just wrapped in <article>. -->
+          <div class="conversation-stack">
+            @for (cm of openThreadDetails(); track cm.id) {
+              <article
+                class="conv-card"
+                [class.expanded]="isExpanded(cm.id)"
+                [class.unread]="!cm.seen"
+              >
+                <!-- Card header — clickable to expand/collapse. Stops
+                     propagation on inner action buttons so they don't
+                     also toggle the card under the cursor. -->
+                <header class="conv-card-head" (click)="toggleExpand(cm)">
+                  <span class="avatar" [style.background]="avatarColor(cm.from)">{{ initials(cm.from) }}</span>
+                  <div class="conv-card-meta">
+                    <div class="conv-card-from">{{ cm.from }}</div>
+                    @if (isExpanded(cm.id)) {
+                      @if (cm.to?.length) {
+                        <div class="meta-line">to {{ cm.to.join(', ') }}</div>
+                      }
+                      @if (cm.cc?.length) {
+                        <div class="meta-line">cc {{ cm.cc.join(', ') }}</div>
+                      }
+                      <div class="meta-line date">{{ cm.date | date: 'medium' }}</div>
+                    } @else if (cm.snippet) {
+                      <div class="conv-card-snippet">{{ cm.snippet }}</div>
+                    }
+                  </div>
+                  <span class="conv-card-date">{{ cm.date | date: 'shortDate' }}</span>
+                  <!-- Always-visible star on each card — gmail does
+                       this. stopPropagation stops the header's
+                       toggle-expand from also firing. -->
+                  <button
+                    type="button"
+                    class="icon-btn"
+                    [class.flagged]="isFlagged(cm)"
+                    (click)="$event.stopPropagation(); toggleFlagged(cm)"
+                    [title]="isFlagged(cm) ? 'Unflag' : 'Flag'"
+                    [attr.aria-label]="isFlagged(cm) ? 'Unflag' : 'Flag'"
+                  >
+                    <i-lucide [img]="icons.Star" [size]="18"></i-lucide>
+                  </button>
+                  @if (isExpanded(cm.id)) {
+                    <button class="icon-btn" type="button" (click)="$event.stopPropagation(); reply(cm, false)" title="Reply" aria-label="Reply">
+                      <i-lucide [img]="icons.Reply" [size]="18"></i-lucide>
+                    </button>
+                    <button class="icon-btn" type="button" (click)="$event.stopPropagation(); reply(cm, true)" title="Reply all" aria-label="Reply all">
+                      <i-lucide [img]="icons.ReplyAll" [size]="18"></i-lucide>
+                    </button>
+                    <button class="icon-btn" type="button" (click)="$event.stopPropagation(); forward(cm)" title="Forward" aria-label="Forward">
+                      <i-lucide [img]="icons.Forward" [size]="18"></i-lucide>
+                    </button>
+                    <button class="icon-btn" type="button" (click)="$event.stopPropagation(); markUnread(cm)" title="Mark unread" aria-label="Mark unread">
+                      <i-lucide [img]="icons.MailOpen" [size]="18"></i-lucide>
+                    </button>
+                    <button class="icon-btn" type="button" (click)="$event.stopPropagation(); archive(cm)" title="Archive" aria-label="Archive">
+                      <i-lucide [img]="icons.Archive" [size]="18"></i-lucide>
+                    </button>
+                    <button
+                      class="icon-btn danger"
+                      type="button"
+                      (click)="$event.stopPropagation(); deleteOrTrash(cm)"
+                      [title]="inTrash() ? 'Delete permanently' : 'Move to Trash'"
+                      [attr.aria-label]="inTrash() ? 'Delete permanently' : 'Move to Trash'"
+                    >
+                      <i-lucide [img]="icons.Trash2" [size]="18"></i-lucide>
+                    </button>
+                  }
+                </header>
+
+                @if (isExpanded(cm.id)) {
+                  <div class="conv-card-body">
+                    @if (cm.html) {
+                      <!-- Angular sanitizes [innerHTML]; a production
+                           client should render email HTML in a sandboxed
+                           iframe with a strict CSP. -->
+                      <div class="html-body" [innerHTML]="cm.html"></div>
+                    } @else if (cm.text) {
+                      <pre class="text-body">{{ cm.text }}</pre>
+                    } @else {
+                      <p class="hint">(empty message)</p>
+                    }
+                  </div>
+                  @if (cm.attachments.length) {
+                    <div class="attachments">
+                      <strong>Attachments</strong>
+                      @for (a of cm.attachments; track $index) {
+                        <button
+                          type="button"
+                          class="chip"
+                          (click)="download(cm, $index, a.filename)"
+                          [disabled]="downloading() === $index"
+                        >
+                          {{ a.filename || '(unnamed)' }} · {{ a.size }} bytes
+                        </button>
+                      }
+                    </div>
+                  }
+                }
+              </article>
+            }
+          </div>
         } @else {
           <p class="hint center">Select a message to read it.</p>
         }
@@ -785,6 +784,96 @@ interface UndoState {
       flex-direction: column;
       overflow-y: auto;
     }
+    /* Conversation view (stacked-card thread render).
+       conversation-head holds the subject + length hint;
+       conversation-stack is the vertical list of cards; each
+       conv-card is one message, with conv-card-head always visible
+       and conv-card-body shown only when expanded. The collapsed
+       state mirrors gmail's one-line summary: avatar + sender +
+       snippet + date + star. Click anywhere on the header expands. */
+    .conversation-head {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    .conversation-head h2 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 500;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .conversation-count {
+      font-size: 12px;
+      color: var(--text-muted);
+      flex-shrink: 0;
+    }
+    .conversation-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px 16px 24px;
+    }
+    .conv-card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      overflow: hidden;
+    }
+    .conv-card.unread {
+      border-color: var(--accent);
+    }
+    .conv-card-head {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      padding: 10px 14px;
+      cursor: pointer;
+      transition: background 80ms ease;
+    }
+    .conv-card-head:hover {
+      background: var(--bg-muted);
+    }
+    .conv-card.expanded .conv-card-head {
+      border-bottom: 1px solid var(--border);
+    }
+    .conv-card-meta {
+      flex: 1;
+      min-width: 0;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .conv-card-from {
+      color: var(--text);
+      font-weight: 500;
+      font-size: 14px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .conv-card.unread .conv-card-from {
+      color: var(--unread);
+      font-weight: 600;
+    }
+    .conv-card-snippet {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin-top: 2px;
+    }
+    .conv-card-date {
+      flex-shrink: 0;
+      font-size: 12px;
+      color: var(--text-muted);
+      align-self: flex-start;
+    }
+    .conv-card-body {
+      padding: 12px 16px 16px;
+    }
     .reader-head {
       padding: 18px 20px;
       border-bottom: 1px solid var(--border);
@@ -985,6 +1074,16 @@ export class MailboxComponent implements OnInit, OnDestroy {
   readonly messages = signal<MessageSummary[]>([]);
   readonly openMessage = signal<MessageDetail | null>(null);
 
+  // Stacked-conversation state. When a row is opened we fetch every
+  // message in its thread (parallel /api/messages/{id} GETs) so the
+  // reader can render them as a vertical stack, gmail-style. The
+  // array is sorted newest-first so the reader's scroll position
+  // lines up with the list-view ordering. expandedIds tracks which
+  // cards are open; we start with just the clicked message expanded
+  // and let the user click headers to expand the rest.
+  readonly openThreadDetails = signal<MessageDetail[]>([]);
+  readonly expandedIds = signal<Set<number>>(new Set());
+
   // Threads derived from messages() — a computed signal so we never
   // store and risk drifting from the source list. Drafts and Sent
   // benefit from threading just as much as INBOX, so we don't
@@ -1129,19 +1228,67 @@ export class MailboxComponent implements OnInit, OnDestroy {
     });
   }
 
+  // open does double duty: it loads the clicked message AND every
+  // other message in its thread so the reader can render the full
+  // conversation as a stack. Single-message threads degrade to a
+  // one-element fetch with no behaviour change.
+  //
+  // Marking-as-read fires only for the clicked message (the one
+  // initially expanded). Other messages get marked when the user
+  // expands their card.
   open(id: number): void {
-    this.api.message(id).subscribe({
-      next: (msg) => {
-        this.openMessage.set(msg);
+    // Pick the thread that contains this id. If we somehow miss
+    // (e.g. the list refreshed and dropped the row mid-click), fall
+    // back to a single-message fetch — safer than crashing.
+    const thread = this.threads().find((t) => t.messages.some((m) => m.id === id));
+    const ids = thread ? thread.messages.map((m) => m.id) : [id];
+    // forkJoin over an empty array completes synchronously with no
+    // emissions, so we only enter it when there's something to fetch.
+    if (ids.length === 0) return;
+    forkJoin(ids.map((mid) => this.api.message(mid))).subscribe({
+      next: (details) => {
+        details.sort((a, b) => +new Date(b.date) - +new Date(a.date));
+        this.openThreadDetails.set(details);
+        const primary = details.find((m) => m.id === id) ?? details[0] ?? null;
+        this.openMessage.set(primary);
+        this.expandedIds.set(new Set(primary ? [primary.id] : []));
         this.view.set('reader');
-        // The API does not auto-mark on read, so the client does it.
-        if (!msg.seen) {
-          this.api.setFlags(id, 'add', [FLAG_SEEN]).subscribe({
+        // Mark only the clicked message as read — older cards stay
+        // unread until the user expands them, like gmail.
+        if (primary && !primary.seen) {
+          this.api.setFlags(primary.id, 'add', [FLAG_SEEN]).subscribe({
             next: (updated) => this.applyUpdate(updated),
           });
         }
       },
     });
+  }
+
+  // toggleExpand flips a card's collapsed/expanded state. When
+  // expanding a previously-unread message we also mark it read so a
+  // user "skimming the conversation" doesn't have to do that
+  // explicitly — matches the click-to-open contract elsewhere.
+  protected toggleExpand(m: MessageDetail): void {
+    const cur = this.expandedIds();
+    const next = new Set(cur);
+    const wasExpanded = next.has(m.id);
+    if (wasExpanded) {
+      next.delete(m.id);
+    } else {
+      next.add(m.id);
+    }
+    this.expandedIds.set(next);
+    if (!wasExpanded && !m.seen) {
+      this.api.setFlags(m.id, 'add', [FLAG_SEEN]).subscribe({
+        next: (updated) => this.applyUpdate(updated),
+      });
+    }
+  }
+
+  // isExpanded is a tiny convenience for the template — Sets don't
+  // have a clean Angular template syntax for membership tests.
+  protected isExpanded(id: number): boolean {
+    return this.expandedIds().has(id);
   }
 
   // isFlagged / toggleFlagged are called from both the reader (with a
