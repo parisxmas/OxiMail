@@ -135,9 +135,10 @@ interface UndoState {
             <input
               class="search"
               type="search"
-              placeholder="Search…"
+              placeholder="Search… (try from:alice, subject:foo, has:attachment, after:2024-01-01)"
               [value]="query()"
               (input)="onSearchInput($event)"
+              [attr.aria-label]="'Search messages. Supports from:, to:, subject:, has:attachment, before:, after:'"
             />
           </div>
         </header>

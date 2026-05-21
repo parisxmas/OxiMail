@@ -1,11 +1,15 @@
 package webmail
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/mail"
 	"sort"
 	"strconv"
 	"strings"
@@ -81,13 +85,51 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request, acc 
 
 	// store.ListMessages is UID-ascending; a mailbox view wants newest
 	// first.
-	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	query := ParseSearchQuery(strings.TrimSpace(r.URL.Query().Get("q")))
 	limit := parseLimit(r)
 	wantSnippets := r.URL.Query().Get("snippets") == "1"
 	out := make([]messageSummary, 0, len(msgs))
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := &msgs[i]
-		if query != "" && !s.matchesQuery(m, query) {
+		// Lazy body/header/attachment fetchers — only realised when
+		// the query actually needs them, so a metadata-only search
+		// (from:/subject:) stays off the blob store entirely.
+		var (
+			bodyText        string
+			bodyTextFetched bool
+			toHeader        string
+			toHeaderFetched bool
+			hasAtt          bool
+			hasAttFetched   bool
+		)
+		fetchBodyText := func() string {
+			if !bodyTextFetched {
+				if raw, err := s.store.FetchBody(m); err == nil {
+					bodyText = renderText(raw)
+				}
+				bodyTextFetched = true
+			}
+			return bodyText
+		}
+		fetchToHeader := func() string {
+			if !toHeaderFetched {
+				if raw, err := s.store.FetchBody(m); err == nil {
+					toHeader = readToHeader(raw)
+				}
+				toHeaderFetched = true
+			}
+			return toHeader
+		}
+		fetchHasAttachment := func() bool {
+			if !hasAttFetched {
+				if raw, err := s.store.FetchBody(m); err == nil {
+					hasAtt = messageHasAttachment(raw)
+				}
+				hasAttFetched = true
+			}
+			return hasAtt
+		}
+		if !query.matches(m, fetchBodyText, fetchToHeader, fetchHasAttachment) {
 			continue
 		}
 		sum := summarize(m)
@@ -124,19 +166,57 @@ func (s *Server) computeSnippet(m *store.Message) string {
 // default font size without forcing the layout to scroll.
 const snippetMax = 140
 
-// matchesQuery reports whether m's metadata or body contains query.
-// Subject and From are cheap (in memory); the body is fetched only when
-// the metadata didn't already match, so a typical search stays fast.
-func (s *Server) matchesQuery(m *store.Message, query string) bool {
-	if strings.Contains(strings.ToLower(m.Subject), query) ||
-		strings.Contains(strings.ToLower(m.FromAddr), query) {
-		return true
+// readToHeader returns the raw "To:" header value (comma-joined
+// addresses, no parsing) from a stored RFC 5322 message. Used by the
+// `to:` search operator. An unparseable message yields "" — the
+// search operator then sees no match and reports a clean "no
+// results" rather than a 500.
+func readToHeader(raw []byte) string {
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return ""
 	}
-	raw, err := s.store.FetchBody(m)
+	return msg.Header.Get("To")
+}
+
+// messageHasAttachment reports whether the message has at least one
+// MIME part with Content-Disposition: attachment (or with a
+// filename parameter on Content-Type, which some legacy senders use
+// in place of disposition). Used by the `has:attachment` operator.
+func messageHasAttachment(raw []byte) bool {
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {
 		return false
 	}
-	return strings.Contains(strings.ToLower(renderText(raw)), query)
+	ct := msg.Header.Get("Content-Type")
+	if !strings.HasPrefix(strings.ToLower(ct), "multipart/") {
+		return false
+	}
+	_, params, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return false
+	}
+	mr := multipart.NewReader(msg.Body, boundary)
+	for {
+		p, err := mr.NextPart()
+		if err != nil {
+			return false
+		}
+		if disp := p.Header.Get("Content-Disposition"); disp != "" {
+			if d, _, err := mime.ParseMediaType(disp); err == nil && strings.EqualFold(d, "attachment") {
+				return true
+			}
+		}
+		if pct := p.Header.Get("Content-Type"); pct != "" {
+			if _, p2, err := mime.ParseMediaType(pct); err == nil && p2["name"] != "" {
+				return true
+			}
+		}
+	}
 }
 
 // messageDetail is the GET /api/messages/{id} response — metadata plus
