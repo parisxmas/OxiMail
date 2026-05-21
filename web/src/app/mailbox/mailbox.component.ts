@@ -84,19 +84,51 @@ interface UndoState {
           Compose
         </button>
         @for (mb of mailboxes(); track mb.name) {
-          <button
-            class="folder icon-text"
-            [class.active]="mb.name === selected()"
-            [class.has-unread]="mb.unseen > 0"
-            (click)="selectMailbox(mb.name)"
-          >
-            <i-lucide [img]="folderIcon(mb.name)" [size]="16"></i-lucide>
-            <span class="folder-name">{{ mb.name }}</span>
-            @if (mb.unseen > 0) {
-              <span class="badge">{{ mb.unseen }}</span>
+          <div class="folder-row">
+            <button
+              class="folder icon-text"
+              [class.active]="mb.name === selected()"
+              [class.has-unread]="mb.unseen > 0"
+              (click)="selectMailbox(mb.name)"
+            >
+              <i-lucide [img]="folderIcon(mb.name)" [size]="16"></i-lucide>
+              <span class="folder-name">{{ mb.name }}</span>
+              @if (mb.unseen > 0) {
+                <span class="badge">{{ mb.unseen }}</span>
+              }
+            </button>
+            @if (!mb.is_system) {
+              <!-- Hover-only rename/delete cluster on user-created
+                   folders. System folders (INBOX/Sent/…) intentionally
+                   have no controls — the server refuses anyway, this
+                   just keeps the UI honest. -->
+              <span class="folder-actions">
+                <button
+                  type="button"
+                  class="icon-btn"
+                  (click)="promptRenameFolder(mb.name)"
+                  title="Rename folder"
+                  aria-label="Rename folder"
+                >
+                  <i-lucide [img]="icons.Edit3" [size]="14"></i-lucide>
+                </button>
+                <button
+                  type="button"
+                  class="icon-btn danger"
+                  (click)="promptDeleteFolder(mb.name, mb.total)"
+                  title="Delete folder"
+                  aria-label="Delete folder"
+                >
+                  <i-lucide [img]="icons.Trash2" [size]="14"></i-lucide>
+                </button>
+              </span>
             }
-          </button>
+          </div>
         }
+        <button class="new-folder icon-text" type="button" (click)="promptNewFolder()">
+          <i-lucide [img]="icons.Folder" [size]="16"></i-lucide>
+          New folder
+        </button>
         <a class="settings icon-text" routerLink="/settings">
           <i-lucide [img]="icons.Settings" [size]="16"></i-lucide>
           Settings
@@ -486,6 +518,14 @@ interface UndoState {
       align-items: center;
       gap: 8px;
     }
+    /* Folder rows: the folder button + a hover-only rename/delete
+       cluster sit on a flex row so the actions tuck against the
+       right edge without pushing the folder name. */
+    .folder-row {
+      display: flex;
+      align-items: stretch;
+      gap: 2px;
+    }
     .folder {
       display: flex;
       align-items: center;
@@ -498,9 +538,44 @@ interface UndoState {
       color: var(--text);
       transition: background 100ms ease;
       cursor: pointer;
+      flex: 1;
+      min-width: 0;
     }
     .folder:hover {
       background: var(--bg-sunken);
+    }
+    .folder-actions {
+      display: none;
+      align-items: center;
+      gap: 0;
+    }
+    .folder-row:hover .folder-actions,
+    .folder-actions:focus-within {
+      display: inline-flex;
+    }
+    .folder-actions .icon-btn {
+      width: 26px;
+      height: 26px;
+    }
+    /* New-folder button — same row geometry as the folder list, but
+       muted so it reads as an affordance, not a navigation item. */
+    .new-folder {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      text-align: left;
+      border: none;
+      background: transparent;
+      padding: 8px 10px;
+      border-radius: 6px;
+      color: var(--text-muted);
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 100ms ease, color 100ms ease;
+    }
+    .new-folder:hover {
+      background: var(--bg-sunken);
+      color: var(--text);
     }
     .folder.active {
       background: var(--bg-sunken);
@@ -1044,7 +1119,7 @@ export class MailboxComponent implements OnInit, OnDestroy {
   // are imported above. Adding a new icon means adding it both to
   // the import list and to this map.
   protected readonly icons = {
-    Archive, ChevronLeft, Edit3, Forward, Inbox, LogOut, MailOpen,
+    Archive, ChevronLeft, Edit3, Folder, Forward, Inbox, LogOut, MailOpen,
     Reply, ReplyAll, Search, Send, Settings, Star, Trash2,
   };
 
@@ -1426,6 +1501,62 @@ export class MailboxComponent implements OnInit, OnDestroy {
       text: forwardBody(msg),
     });
     this.composing.set(true);
+  }
+
+  // promptNewFolder / promptRenameFolder / promptDeleteFolder are
+  // intentionally low-tech for now: they use the browser's native
+  // prompt() / confirm() dialogs instead of a custom modal. The
+  // backend already validates the name (length, control chars,
+  // collision); the SPA passes the input through and surfaces server
+  // errors as a window.alert. A proper inline-edit UI is the next
+  // improvement here, but native dialogs let us ship the feature in
+  // one commit rather than three.
+  protected promptNewFolder(): void {
+    const name = window.prompt('New folder name')?.trim();
+    if (!name) return;
+    this.api.createMailbox(name).subscribe({
+      next: () => {
+        this.refreshMailboxes();
+        this.selectMailbox(name);
+      },
+      error: (err) => window.alert(err.error?.error || 'Could not create folder.'),
+    });
+  }
+
+  protected promptRenameFolder(current: string): void {
+    const next = window.prompt(`Rename folder "${current}" to:`, current)?.trim();
+    if (!next || next === current) return;
+    this.api.renameMailbox(current, next).subscribe({
+      next: () => {
+        // If the user was viewing the folder we just renamed, follow
+        // it to the new name so they don't end up on an empty page.
+        if (this.selected() === current) this.selected.set(next);
+        this.refreshMailboxes();
+        this.loadMessages();
+      },
+      error: (err) => window.alert(err.error?.error || 'Could not rename folder.'),
+    });
+  }
+
+  protected promptDeleteFolder(name: string, total: number): void {
+    const note = total > 0
+      ? ` This will permanently delete ${total} message${total === 1 ? '' : 's'} inside it.`
+      : '';
+    if (!window.confirm(`Delete folder "${name}"?${note}`)) return;
+    this.api.deleteMailbox(name).subscribe({
+      next: () => {
+        // Bounce back to INBOX if the deleted folder was active —
+        // showing "messages from a folder that no longer exists" is
+        // the worst possible post-delete state.
+        if (this.selected() === name) {
+          this.selected.set('INBOX');
+          this.openMessage.set(null);
+        }
+        this.refreshMailboxes();
+        this.loadMessages();
+      },
+      error: (err) => window.alert(err.error?.error || 'Could not delete folder.'),
+    });
   }
 
   // openCompose starts a fresh message — no seed.

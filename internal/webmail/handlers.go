@@ -18,11 +18,160 @@ import (
 )
 
 // mailboxSummary is one mailbox in the GET /api/mailboxes response.
+// IsSystem flags the standard set so the SPA can hide the
+// rename/delete affordances for them.
 type mailboxSummary struct {
 	Name       string `json:"name"`
 	Subscribed bool   `json:"subscribed"`
 	Total      int    `json:"total"`
 	Unseen     int    `json:"unseen"`
+	IsSystem   bool   `json:"is_system"`
+}
+
+// systemFolders are the names we refuse to delete or rename via the
+// webmail API. They're the standard IMAP set that every account
+// owns; reshuffling them on a whim breaks Sieve rules, mail-client
+// bookmarks, and the SPA's own routing assumptions. User-created
+// folders (anything else) are free to manage.
+var systemFolders = map[string]struct{}{
+	"INBOX": {}, "Sent": {}, "Drafts": {}, "Junk": {},
+	"Archive": {}, "Trash": {},
+}
+
+func isSystemFolder(name string) bool {
+	_, ok := systemFolders[name]
+	return ok
+}
+
+// MaxFolderNameLength caps the length of a user-created folder. Big
+// enough for any sensible label, small enough that someone pasting a
+// novel into the name field doesn't generate a 10 KB filesystem entry.
+const MaxFolderNameLength = 80
+
+// folderRequest is the JSON body of POST /api/mailboxes and the
+// rename endpoint. Whitespace is trimmed in the handler; control
+// characters / slashes are rejected so the name stays safe as a
+// filesystem fragment.
+type folderRequest struct {
+	Name string `json:"name"`
+}
+
+// normaliseFolderName trims whitespace and rejects control chars,
+// slash (IMAP hierarchy delimiter we don't yet support), and empty
+// names. Returns the cleaned name on success.
+func normaliseFolderName(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", fmt.Errorf("folder name must not be empty")
+	}
+	if len(s) > MaxFolderNameLength {
+		return "", fmt.Errorf("folder name is too long")
+	}
+	if strings.ContainsAny(s, "\r\n\x00/") {
+		return "", fmt.Errorf("folder name must not contain control characters or '/'")
+	}
+	return s, nil
+}
+
+// handleCreateMailbox creates a new folder for the signed-in account.
+// Conflicts with an existing name return 409.
+func (s *Server) handleCreateMailbox(w http.ResponseWriter, r *http.Request, acc *store.Account) {
+	var req folderRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	name, err := normaliseFolderName(req.Name)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := s.store.GetMailboxByName(acc.ID, name); err == nil {
+		writeError(w, http.StatusConflict, "a folder with that name already exists")
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, "could not check for existing folder")
+		return
+	}
+	mb, err := s.store.CreateMailbox(acc.ID, name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not create folder")
+		return
+	}
+	writeJSON(w, http.StatusCreated, mailboxSummary{
+		Name: mb.Name, Subscribed: mb.Subscribed,
+	})
+}
+
+// handleDeleteMailbox removes a user-created folder and every
+// message it holds. System folders (INBOX, Sent, …) are refused —
+// deleting them would break too much downstream.
+func (s *Server) handleDeleteMailbox(w http.ResponseWriter, r *http.Request, acc *store.Account) {
+	name := r.PathValue("mailbox")
+	if isSystemFolder(name) {
+		writeError(w, http.StatusForbidden, "system folders cannot be deleted")
+		return
+	}
+	mb, err := s.store.GetMailboxByName(acc.ID, name)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "no such folder")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not look up folder")
+		return
+	}
+	if err := s.store.DeleteMailbox(acc.ID, mb.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not delete folder")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRenameMailbox renames a user-created folder. System folders
+// are off-limits and renaming to one of their names is also blocked
+// (would shadow the real one).
+func (s *Server) handleRenameMailbox(w http.ResponseWriter, r *http.Request, acc *store.Account) {
+	name := r.PathValue("mailbox")
+	if isSystemFolder(name) {
+		writeError(w, http.StatusForbidden, "system folders cannot be renamed")
+		return
+	}
+	var req folderRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	newName, err := normaliseFolderName(req.Name)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if isSystemFolder(newName) {
+		writeError(w, http.StatusBadRequest, "cannot rename to a system folder name")
+		return
+	}
+	mb, err := s.store.GetMailboxByName(acc.ID, name)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "no such folder")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not look up folder")
+		return
+	}
+	if _, err := s.store.GetMailboxByName(acc.ID, newName); err == nil {
+		writeError(w, http.StatusConflict, "a folder with that name already exists")
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, "could not check for existing folder")
+		return
+	}
+	if err := s.store.RenameMailbox(acc.ID, mb.ID, newName); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not rename folder")
+		return
+	}
+	writeJSON(w, http.StatusOK, mailboxSummary{Name: newName, Subscribed: mb.Subscribed})
 }
 
 // handleMailboxes lists the account's mailboxes with message counts.
@@ -44,6 +193,7 @@ func (s *Server) handleMailboxes(w http.ResponseWriter, _ *http.Request, acc *st
 			Subscribed: mb.Subscribed,
 			Total:      stats.Total,
 			Unseen:     stats.Unseen,
+			IsSystem:   isSystemFolder(mb.Name),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

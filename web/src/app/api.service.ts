@@ -68,6 +68,24 @@ export class ApiService {
     return this.http.get<Mailbox[]>('/api/mailboxes');
   }
 
+  // Folder CRUD. The server validates names (trim, length, control
+  // chars, slashes), refuses to rename/delete the system folder set,
+  // and returns 409 on a name conflict.
+  createMailbox(name: string) {
+    return this.http.post<{ name: string }>('/api/mailboxes', { name });
+  }
+
+  deleteMailbox(name: string) {
+    return this.http.delete<void>(`/api/mailboxes/${encodeURIComponent(name)}`);
+  }
+
+  renameMailbox(currentName: string, newName: string) {
+    return this.http.post<{ name: string }>(
+      `/api/mailboxes/${encodeURIComponent(currentName)}/rename`,
+      { name: newName },
+    );
+  }
+
   messages(mailbox: string, query = '') {
     // Always opt in to body snippets — the SPA renders them in the
     // list row, and the per-message body fetch cost is acceptable

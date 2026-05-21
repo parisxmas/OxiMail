@@ -6,6 +6,10 @@ export interface Mailbox {
   subscribed: boolean;
   total: number;
   unseen: number;
+  // is_system marks the standard folder set (INBOX/Sent/Drafts/
+  // Junk/Archive/Trash). The SPA uses it to hide the rename/delete
+  // affordances on those rows — the server enforces the same rule.
+  is_system: boolean;
 }
 
 export interface MessageSummary {
