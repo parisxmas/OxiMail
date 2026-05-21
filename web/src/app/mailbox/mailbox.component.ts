@@ -173,6 +173,24 @@ interface UndoState {
                   <div class="row-snippet">{{ t.messages[0].snippet }}</div>
                 }
               </div>
+              <!-- Right-edge cluster: always-visible star + hover-only
+                   action strip share one grid column so the layout
+                   doesn't shift between hover states. -->
+              <div class="row-right">
+                <!-- Star: always visible (gmail-style). Clicking
+                     toggles \\Flagged on the thread's newest message;
+                     stopPropagation keeps the row from opening
+                     underneath. -->
+                <button
+                  type="button"
+                  class="row-star icon-btn"
+                  [class.flagged]="isFlagged(t.messages[0])"
+                  (click)="$event.stopPropagation(); toggleFlagged(t.messages[0])"
+                  [title]="isFlagged(t.messages[0]) ? 'Unstar' : 'Star'"
+                  [attr.aria-label]="isFlagged(t.messages[0]) ? 'Unstar' : 'Star'"
+                >
+                  <i-lucide [img]="icons.Star" [size]="16"></i-lucide>
+                </button>
               <!-- Hover-only action strip. Stop click propagation so the
                    button doesn't also open the thread underneath. The
                    actions apply to the thread's newest message (the one
@@ -213,6 +231,7 @@ interface UndoState {
                     <i-lucide [img]="icons.MailOpen" [size]="16"></i-lucide>
                   </button>
                 }
+              </div>
               </div>
             </div>
           }
@@ -593,6 +612,23 @@ interface UndoState {
     .row:hover {
       background: var(--bg-muted);
     }
+    /* Right-edge cluster: star (always shown) + action strip
+       (hover-only). The wrapper gives both elements a single grid
+       cell to share and a vertical center alignment. */
+    .row-right {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      align-self: center;
+    }
+    /* The star is always visible. Muted by default; the .flagged
+       state lights it up yellow via the existing .icon-btn.flagged
+       rule below (shared with the reader's star). */
+    .row-star {
+      width: 28px;
+      height: 28px;
+      color: var(--text-muted);
+    }
     /* Hover-only quick actions on the right of each row. Hidden by
        default (display: none keeps them out of layout so the row
        doesn't reserve space and shift). Visible on row hover or
@@ -601,7 +637,6 @@ interface UndoState {
       display: none;
       align-items: center;
       gap: 2px;
-      align-self: center;
     }
     .row:hover .row-actions,
     .row-actions:focus-within {
@@ -1109,11 +1144,16 @@ export class MailboxComponent implements OnInit, OnDestroy {
     });
   }
 
-  isFlagged(msg: MessageDetail): boolean {
+  // isFlagged / toggleFlagged are called from both the reader (with a
+  // MessageDetail) and the list rows + 's' shortcut (with a
+  // MessageSummary). Both shapes have id+flags, which is all we need
+  // — narrow the parameter type to the structural minimum so the same
+  // method serves every caller.
+  isFlagged(msg: { flags: string[] }): boolean {
     return msg.flags.includes(FLAG_FLAGGED);
   }
 
-  toggleFlagged(msg: MessageDetail): void {
+  toggleFlagged(msg: { id: number; flags: string[] }): void {
     const op = this.isFlagged(msg) ? 'remove' : 'add';
     this.api.setFlags(msg.id, op, [FLAG_FLAGGED]).subscribe({
       next: (updated) => this.applyUpdate(updated),
@@ -1309,6 +1349,17 @@ export class MailboxComponent implements OnInit, OnDestroy {
         if (target) {
           e.preventDefault();
           this.deleteOrTrash(target);
+        }
+        break;
+      }
+      case 's': {
+        // Toggle the star on the open message; fall back to the
+        // first thread when nothing's open (matches the e/# fallback
+        // and lets a freshly-loaded inbox star the top row).
+        const target = this.openMessage() ?? this.threads()[0]?.messages[0];
+        if (target) {
+          e.preventDefault();
+          this.toggleFlagged(target);
         }
         break;
       }
