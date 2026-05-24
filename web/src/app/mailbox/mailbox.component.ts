@@ -467,11 +467,11 @@ interface UndoState {
      * updates via the resize signals; drag-to-resize stays smooth
      * because we change a variable, not the structure.
      *
-     * Visual language: warm parchment background, terracotta accent,
-     * Fraunces (serif) for subjects + counts + headings, Geist for
-     * everything else. Unread state is a 3px left-edge accent
-     * stripe (a deliberate editorial mark) + bold ink — NOT a
-     * filled pill, which would compete with the action accents.
+     * Visual language: Gmail. Roboto everywhere, layered cool
+     * neutrals, the peach pill for Compose, Google Blue for focus
+     * + selected pills. Read vs unread is conveyed by row
+     * background and font weight — no colored stripe, no fills
+     * that compete with the action chrome.
      */
 
     :host {
@@ -549,10 +549,8 @@ interface UndoState {
       display: flex;
       flex-direction: column;
       gap: 2px;
-      padding: 18px 12px 14px;
-      background:
-        linear-gradient(180deg, var(--bg) 0%, var(--bg-muted) 60%, var(--bg-muted) 100%);
-      border-right: 1px solid var(--border);
+      padding: 8px 0 14px 0;
+      background: var(--bg);
       overflow-y: auto;
     }
 
@@ -561,110 +559,121 @@ interface UndoState {
        grotesque word. */
     .brand {
       display: flex;
-      align-items: baseline;
-      gap: 6px;
-      padding: 0 8px 14px;
+      align-items: center;
+      gap: 8px;
+      padding: 14px 20px 10px;
     }
     .brand-glyph {
-      font-family: var(--font-display);
+      font-family: var(--font-ui);
       font-size: 22px;
       line-height: 1;
-      color: var(--accent);
-      font-variation-settings: 'opsz' 144;
+      color: var(--danger);
+      font-weight: 700;
     }
     .brand-word {
-      font-family: var(--font-display);
-      font-size: 16px;
-      font-weight: 480;
-      letter-spacing: -0.005em;
+      font-family: var(--font-ui);
+      font-size: 18px;
+      font-weight: 500;
+      letter-spacing: 0;
       color: var(--text);
-      font-variation-settings: 'opsz' 144;
     }
 
     .me {
       display: flex;
       align-items: center;
       gap: 8px;
-      padding: 0 8px 12px;
-      font-family: var(--font-mono);
-      font-size: 11.5px;
+      padding: 0 24px 12px;
+      font-family: var(--font-ui);
+      font-size: 12px;
       color: var(--text-muted);
-      letter-spacing: 0.005em;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      border-bottom: 1px solid var(--border-soft);
-      margin-bottom: 12px;
+      margin-bottom: 4px;
     }
     .folders-label {
-      padding: 0 10px 6px;
+      padding: 12px 24px 4px;
       margin-top: 4px;
     }
     .me::before {
       content: '';
-      width: 7px;
-      height: 7px;
+      width: 8px;
+      height: 8px;
       border-radius: 50%;
-      background: var(--accent);
+      background: #34a853;     /* Google green — online dot */
       flex-shrink: 0;
-      box-shadow: 0 0 0 3px var(--accent-soft);
     }
 
+    /* The Compose button — Gmail's signature peach pill. Sits at
+       the top of the sidebar with a soft elevation. */
     .compose-btn {
-      margin-bottom: 14px;
-      padding: 10px 14px;
-      font-size: var(--text-md);
+      margin: 4px 16px 14px;
+      padding: 14px 22px 14px 20px;
+      font-size: var(--text-base);
       font-weight: 500;
-      border-radius: 8px;
+      border: none;
+      border-radius: 999px;
+      background: var(--compose-bg) !important;
+      color: var(--compose-text) !important;
       display: inline-flex;
       align-items: center;
-      gap: 8px;
-      justify-content: center;
-      letter-spacing: -0.005em;
-      box-shadow: 0 1px 0 rgba(27, 24, 20, 0.06);
+      gap: 12px;
+      justify-content: flex-start;
+      box-shadow: var(--shadow-compose);
+      letter-spacing: 0;
+      align-self: flex-start;
+    }
+    .compose-btn:hover {
+      background: var(--compose-bg-hover) !important;
+      box-shadow:
+        var(--shadow-compose),
+        0 0 0 8px rgba(252, 229, 205, 0.18);
     }
 
+    /* Sidebar items — Gmail's signature right-pill. They live in a
+       full-bleed container; only the right edge is rounded so they
+       read as attached to the sidebar's left edge. Active state is
+       the peach pill that matches the Compose button. */
     .folder-row {
       display: flex;
       align-items: stretch;
-      gap: 2px;
+      gap: 0;
       position: relative;
+      padding-right: 12px;
     }
     .folder {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 18px;
       text-align: left;
-      border: 1px solid transparent;
+      border: none;
       background: transparent;
-      padding: 7px 10px;
-      border-radius: 6px;
-      color: var(--text-muted);
+      padding: 0 12px 0 26px;
+      height: 32px;
+      border-radius: 0 999px 999px 0;
+      color: var(--text);
       font-size: var(--text-base);
       transition:
-        background 140ms var(--ease-quick),
-        color 140ms var(--ease-quick),
-        border-color 140ms var(--ease-quick);
+        background 80ms var(--ease-quick),
+        color 80ms var(--ease-quick);
       cursor: pointer;
       flex: 1;
       min-width: 0;
     }
     .folder:hover {
-      background: rgba(255, 255, 255, 0.4);
-      color: var(--text);
+      background: var(--bg-muted);
     }
     .folder.active {
-      background: var(--bg);
+      background: var(--surface-active);
       color: var(--text);
-      font-weight: 500;
-      box-shadow:
-        inset 2px 0 0 var(--accent),
-        var(--shadow-line);
-      border-color: var(--border-soft);
+      font-weight: 700;
+    }
+    .folder.active:hover {
+      background: var(--surface-active-hover);
     }
     .folder.has-unread:not(.active) {
       color: var(--text);
-      font-weight: 500;
+      font-weight: 700;
     }
     .folder .folder-name {
       flex: 1;
@@ -673,20 +682,22 @@ interface UndoState {
       white-space: nowrap;
     }
     .badge {
-      background: var(--accent);
-      color: var(--accent-text);
-      border-radius: 999px;
-      padding: 1px 7px;
-      font-size: 10.5px;
-      font-weight: 600;
+      background: transparent;
+      color: var(--text-muted);
+      border-radius: 0;
+      padding: 0;
+      font-size: 12px;
+      font-weight: 400;
       font-feature-settings: 'tnum' 1;
-      letter-spacing: 0.02em;
+      letter-spacing: 0;
     }
-    .folder.active .badge { background: var(--text); color: var(--bg); }
+    .folder.has-unread .badge,
+    .folder.active .badge { color: var(--text); font-weight: 700; }
     .folder-actions {
       display: none;
       align-items: center;
       gap: 0;
+      margin-right: 4px;
     }
     .folder-row:hover .folder-actions,
     .folder-actions:focus-within { display: inline-flex; }
@@ -695,23 +706,22 @@ interface UndoState {
     .new-folder {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 18px;
       text-align: left;
-      border: 1px dashed var(--border);
+      border: none;
       background: transparent;
-      padding: 7px 10px;
-      margin-top: 4px;
-      border-radius: 6px;
-      color: var(--text-soft);
+      padding: 0 12px 0 26px;
+      height: 32px;
+      margin: 4px 12px 0 0;
+      border-radius: 0 999px 999px 0;
+      color: var(--text-muted);
       font-size: var(--text-sm);
       cursor: pointer;
-      transition: all 140ms var(--ease-quick);
+      transition: background 80ms var(--ease-quick);
     }
     .new-folder:hover {
-      background: var(--bg);
-      color: var(--accent);
-      border-color: var(--accent);
-      border-style: solid;
+      background: var(--bg-muted);
+      color: var(--text);
     }
 
     .settings,
@@ -719,21 +729,23 @@ interface UndoState {
       margin-top: auto;
       display: flex;
       align-items: center;
-      gap: 10px;
-      padding: 7px 10px;
-      color: var(--text-soft);
+      gap: 18px;
+      padding: 0 12px 0 26px;
+      height: 32px;
+      color: var(--text-muted);
       text-decoration: none;
-      font-size: var(--text-sm);
+      font-size: var(--text-base);
       border: none;
       background: transparent;
-      border-radius: 6px;
-      transition: all 140ms var(--ease-quick);
+      border-radius: 0 999px 999px 0;
+      margin-right: 12px;
+      transition: background 80ms var(--ease-quick);
       cursor: pointer;
     }
     .settings { margin-top: auto; }
     .logout { margin-top: 0; }
     .settings:hover, .logout:hover {
-      background: rgba(255, 255, 255, 0.4);
+      background: var(--bg-muted);
       color: var(--text);
     }
 
@@ -761,9 +773,6 @@ interface UndoState {
       color: var(--text);
     }
     .icon-btn:active { transform: translateY(0.5px); }
-    .icon-btn.flagged {
-      color: #C68A2C;  /* ochre — different note from the accent terracotta */
-    }
     .icon-btn.flagged :where(svg) { fill: currentColor; }
     .icon-btn.danger:hover {
       color: var(--danger);
@@ -775,53 +784,58 @@ interface UndoState {
     .list {
       display: flex;
       flex-direction: column;
-      background: var(--bg);
+      background: var(--surface);
       overflow: hidden;
     }
     .list > header {
       display: flex;
       align-items: center;
       gap: 12px;
-      padding: 12px 16px 11px;
-      border-bottom: 1px solid var(--border);
+      padding: 8px 16px;
       background: var(--bg);
+      border-bottom: 1px solid var(--border);
     }
     .list > header > span:not(.search-icon) {
-      font-family: var(--font-display);
-      font-size: var(--text-lg);
-      font-weight: 400;
-      letter-spacing: -0.015em;
+      font-family: var(--font-ui);
+      font-size: var(--text-md);
+      font-weight: 500;
+      letter-spacing: 0;
       color: var(--text);
-      font-variation-settings: 'opsz' 144;
     }
 
+    /* Gmail-style search bar — large rounded pill, centered, the
+       visual anchor of the chrome. */
     .search-wrap {
       flex: 1;
-      max-width: 480px;
-      margin-left: auto;
+      max-width: 720px;
+      margin: 0 auto;
       position: relative;
       display: flex;
       align-items: center;
     }
     .search-icon {
       position: absolute;
-      left: 11px;
-      color: var(--text-soft);
+      left: 18px;
+      color: var(--text-muted);
       pointer-events: none;
     }
     .search {
       flex: 1;
-      padding: 7px 12px 7px 32px;
-      font-size: var(--text-sm);
+      padding: 10px 16px 10px 48px;
+      font-size: var(--text-base);
       background: var(--bg-muted);
       border: 1px solid transparent;
-      border-radius: 6px;
+      border-radius: 8px;
       color: var(--text);
     }
-    .search:hover:not(:focus) { background: var(--bg-sunken); }
+    .search:hover:not(:focus) {
+      background: var(--surface);
+      box-shadow: var(--shadow-card);
+    }
     .search:focus {
-      background: var(--bg);
-      border-color: var(--accent);
+      background: var(--surface);
+      border-color: transparent;
+      box-shadow: var(--shadow-card);
     }
 
     /* List body — vertical scroller. The rows themselves are the
@@ -832,51 +846,54 @@ interface UndoState {
     .list > header ~ div {
       flex-shrink: 0;
     }
-    .list > p.hint { padding: 24px; text-align: center; color: var(--text-soft); }
-    .list > p.hint:only-of-type::before {
-      content: '✦';
-      display: block;
-      font-family: var(--font-display);
-      font-size: 28px;
-      color: var(--accent);
-      margin-bottom: 8px;
-      opacity: 0.5;
+    .list > p.hint {
+      padding: 64px 24px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: var(--text-md);
     }
     .list { overflow-y: auto; }
 
-    /* Row — the central unit of the list. Grid: avatar | content | right cluster. */
+    /* Row — Gmail layout: avatar | content | right cluster.
+       Read rows sit on the muted page bg; unread rows pop on white
+       with bold weight. No row borders — the bg shift between read
+       and unread does the separation work. */
     .row {
       position: relative;
       display: grid;
       grid-template-columns: auto 1fr auto;
-      gap: 12px;
+      gap: 14px;
       width: 100%;
       text-align: left;
       border: none;
-      border-bottom: 1px solid var(--border-soft);
       border-radius: 0;
-      background: transparent;
-      padding: 9px 14px 10px;
+      background: var(--bg-muted);  /* default = read */
+      padding: 8px 16px;
       cursor: pointer;
-      transition: background 100ms var(--ease-quick);
+      transition: background 80ms var(--ease-quick), box-shadow 80ms var(--ease-quick);
     }
-    .row::before {
-      /* Unread indicator — left-edge stripe. Invisible at rest;
-         accent on unread. Sits on the inside of the row so it
-         doesn't disturb the grid track widths. */
-      content: '';
-      position: absolute;
-      top: 0; bottom: 0; left: 0;
-      width: 3px;
-      background: transparent;
-      transition: background 140ms var(--ease-quick);
+    .row.unread {
+      background: var(--surface);
+      box-shadow: inset 0 -1px 0 var(--border);
     }
-    .row.unread::before { background: var(--accent); }
+    .row:not(.unread) {
+      box-shadow: inset 0 -1px 0 var(--border);
+    }
     .row:hover {
-      background: var(--bg-muted);
+      background: var(--surface);
+      box-shadow:
+        inset 0 -1px 0 var(--border),
+        inset 1px 0 0 var(--border),
+        inset -1px 0 0 var(--border),
+        0 1px 2px rgba(60, 64, 67, 0.10),
+        0 1px 3px 1px rgba(60, 64, 67, 0.06);
+      z-index: 1;
     }
     .row.active {
-      background: var(--accent-faint);
+      background: var(--accent-soft);
+    }
+    .row.active:hover {
+      background: var(--accent-soft);
     }
     .row:focus-visible {
       outline: none;
@@ -941,39 +958,42 @@ interface UndoState {
       letter-spacing: 0.01em;
       text-transform: uppercase;
     }
+    /* Gmail subject pattern — single-line layout where the subject
+       and snippet share the row, separated by an em-dash. The
+       subject keeps regular weight on read rows, bolds on unread. */
     .row-subject {
-      font-family: var(--font-display);
-      font-size: var(--text-md);
+      font-family: var(--font-ui);
+      font-size: var(--text-base);
       font-weight: 400;
-      letter-spacing: -0.012em;
+      letter-spacing: 0;
       color: var(--text);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      margin-top: 2px;
-      font-variation-settings: 'opsz' 18;
+      margin-top: 0;
     }
     .row.unread .row-subject {
-      font-weight: 500;
+      font-weight: 700;
       color: var(--unread);
     }
     .row-snippet {
-      font-size: var(--text-sm);
+      font-size: var(--text-base);
       color: var(--text-muted);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      margin-top: 2px;
-      letter-spacing: -0.003em;
+      margin-top: 0;
+      letter-spacing: 0;
     }
     .thread-count {
-      font-family: var(--font-mono);
-      color: var(--accent);
-      font-weight: 500;
-      font-size: 11px;
-      letter-spacing: -0.02em;
-      margin-left: 2px;
+      font-family: var(--font-ui);
+      color: var(--text-muted);
+      font-weight: 400;
+      font-size: 12px;
+      letter-spacing: 0;
+      margin-left: 4px;
     }
+    .row.unread .thread-count { color: var(--text); font-weight: 700; }
 
     /* Right cluster — star (always) + hover-only quick actions. */
     .row-right {
@@ -983,7 +1003,9 @@ interface UndoState {
       align-self: center;
     }
     .row-star { width: 28px; height: 28px; color: var(--text-soft); }
-    .row-star:hover { color: #C68A2C; background: transparent; }
+    .row-star:hover { color: #f4b400; background: transparent; }
+    .row-star.flagged,
+    .icon-btn.flagged { color: #f4b400; }
     .row-actions {
       display: none;
       align-items: center;
@@ -999,79 +1021,70 @@ interface UndoState {
       display: flex;
       flex-direction: column;
       overflow-y: auto;
-      background: var(--bg-muted);
+      background: var(--bg);
       border-top: 1px solid var(--border);
     }
 
-    /* Conversation chrome. The subject is the headline; the count
-       sits in a small caps mark beside it. */
+    /* Conversation header — subject as a headline; count sits to its
+       right in plain text. */
     .conversation-head {
       display: flex;
       align-items: center;
       gap: 14px;
       padding: 18px 24px 14px;
-      background: var(--bg-muted);
-      border-bottom: 1px solid var(--border-soft);
+      background: var(--bg);
     }
     .conversation-head h2 {
       margin: 0;
-      font-family: var(--font-display);
-      font-size: clamp(20px, 1.6vw + 12px, 28px);
-      font-weight: 380;
-      line-height: 1.1;
-      letter-spacing: -0.022em;
+      font-family: var(--font-ui);
+      font-size: 22px;
+      font-weight: 400;
+      line-height: 1.3;
+      letter-spacing: 0;
       color: var(--text);
       flex: 1;
       min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      font-variation-settings: 'opsz' 144, 'SOFT' 60;
     }
     .conversation-count {
       font-family: var(--font-ui);
-      font-size: 10.5px;
-      font-weight: 500;
-      text-transform: uppercase;
-      letter-spacing: 0.14em;
-      color: var(--text-soft);
+      font-size: 12px;
+      font-weight: 400;
+      text-transform: none;
+      letter-spacing: 0;
+      color: var(--text-muted);
       flex-shrink: 0;
-      padding: 4px 9px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      background: var(--bg);
+      padding: 0;
+      border: none;
+      background: transparent;
     }
 
     .conversation-stack {
       display: flex;
       flex-direction: column;
-      gap: 10px;
-      padding: 16px 20px 28px;
+      gap: 2px;
+      padding: 0 16px 28px;
     }
 
     .conv-card {
-      background: var(--bg);
-      border: 1px solid var(--border-soft);
-      border-radius: 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
       overflow: hidden;
-      box-shadow: var(--shadow-line);
+      box-shadow: none;
       transition:
         box-shadow 200ms var(--ease),
-        border-color 140ms var(--ease-quick);
+        border-color 120ms var(--ease-quick);
     }
+    .conv-card + .conv-card { margin-top: 2px; }
     .conv-card.expanded {
       box-shadow: var(--shadow-card);
-      border-color: var(--border);
+      border-color: transparent;
     }
-    .conv-card.unread {
-      box-shadow:
-        inset 3px 0 0 var(--accent),
-        var(--shadow-line);
-    }
-    .conv-card.unread.expanded {
-      box-shadow:
-        inset 3px 0 0 var(--accent),
-        var(--shadow-card);
+    .conv-card.unread .conv-card-from {
+      font-weight: 700;
     }
 
     .conv-card-head {
@@ -2045,24 +2058,22 @@ export class MailboxComponent implements OnInit, OnDestroy {
     return (parts[0][0] + parts[1][0]).toUpperCase();
   }
 
-  // avatarColor maps a sender to a stable colour from a hand-picked,
-  // warm-leaning palette so every avatar harmonises with the page's
-  // terracotta accent. The previous implementation picked from the
-  // whole HSL wheel and surfaced electric blues / greens that
-  // clashed with the editorial palette. The current set are eight
-  // saturated-but-muted shades chosen to read on both light and
-  // dark themes — terracotta family + earth tones with one cool
-  // counterpoint (slate) for visual variety.
+  // avatarColor maps a sender to a stable colour from Gmail's
+  // material palette. The set is wide-gamut on purpose — Gmail uses
+  // a colourful avatar wheel as one of the few places the chrome
+  // permits saturated colour, so the inbox reads as varied rather
+  // than monochrome. Picked from Google's Material-You signature
+  // accents (red, orange, yellow, green, teal, blue, purple, pink).
   protected avatarColor(from: string): string {
     const palette = [
-      '#B8430E', // terracotta (page accent)
-      '#94432A', // rust
-      '#C68A2C', // ochre
-      '#7C5C2C', // dark goldenrod
-      '#6A8267', // sage
-      '#6F7C2C', // olive
-      '#4E5E78', // slate (the cool counterpoint)
-      '#7C3F5F', // plum
+      '#ea4335', // Google red
+      '#f57c00', // orange
+      '#f9ab00', // yellow
+      '#34a853', // Google green
+      '#00897b', // teal
+      '#1a73e8', // Google blue
+      '#9334e6', // purple
+      '#d01884', // pink
     ];
     const name = this.senderName(from);
     let hash = 0;

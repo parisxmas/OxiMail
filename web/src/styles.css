@@ -1,106 +1,125 @@
 /* OxiMail webmail — global design tokens.
  *
- * Aesthetic: "Editorial Mail Terminal". A warm parchment palette with
- * a single saturated terracotta accent. Serif (Fraunces) for display
- * and subjects; grotesque (Geist) for chrome and body; Geist Mono for
- * code paths. Component-specific styles live inline in each
- * @Component decorator and consume these variables.
+ * Aesthetic: Gmail. Roboto everywhere, Material 3 neutrals with a
+ * single saturated Google Blue for affirmative actions and a peach
+ * pill for the Compose button. Component-specific styles live inline
+ * in each @Component decorator and consume these variables.
  *
  * Rules of the road:
- *   - --accent is rare and deliberate. Use it for affirmative actions,
- *     unread indicators (as a stripe — never a full pill), focus
- *     rings, and selected state. Don't paint surfaces with it.
- *   - The neutrals are warm (slight ochre tint). Pure greys would
- *     feel like a CRM; the tint is what makes this read as personal.
- *   - --shadow-line is the dominant separator. Real drop shadows are
- *     used only on the compose dialog and on focus.
+ *   - Surfaces are flat (no gradients, no radial washes). Hierarchy
+ *     comes from layered neutrals (page bg → surface → active pill).
+ *   - The accent (Google blue) is for focus rings, selected sidebar
+ *     state, and active checkboxes. Don't paint surfaces with it.
+ *   - The compose pill (peach) is the one pop of warmth in the chrome.
+ *   - Read vs. unread is conveyed by row background + weight, never
+ *     by a colored stripe.
  */
 
 :root {
-  /* Surfaces (light) — graded warmth from page to chrome. */
-  --bg:           #FAF7F0;  /* warm parchment, the page */
-  --bg-muted:    #F2EDE2;  /* hover backgrounds, headers */
-  --bg-sunken:   #E8E1D2;  /* selected state, sidebar inset */
-  --border:      #DDD4C0;  /* hairline separators */
-  --border-soft: #EAE3D2;  /* softer separators inside cards */
+  /* Surfaces (light) — layered cool neutrals, Gmail's signature. */
+  --bg:             #f6f8fc;  /* page bg */
+  --bg-muted:       #f0f4f9;  /* sidebar item hover, read-row bg */
+  --bg-sunken:      #e8eaed;  /* deeper neutral, dividers under hover */
+  --surface:        #ffffff;  /* inbox content area */
+  --surface-active: #fce5cd;  /* peach pill — active sidebar item */
+  --surface-active-hover: #f9dcb4;
+  --border:         #e8eaed;  /* hairline dividers, almost invisible */
+  --border-soft:    rgba(0,0,0,0.06);
 
-  /* Type colors (light). */
-  --text:        #1B1814;  /* warm ink */
-  --text-muted:  #6F665A;  /* warm grey for secondary text */
-  --text-soft:   #8E847B;  /* tertiary — dates, hints */
-  --unread:      #1B1814;  /* same as ink + bold weight does the work */
+  /* Type colors (light) — Material 3 on surface ramp. */
+  --text:        #202124;
+  --text-muted:  #5f6368;
+  --text-soft:   #80868b;
+  --unread:      #202124;  /* same as text + bold weight does the work */
 
-  /* The single saturated voice. */
-  --accent:        #B8430E;  /* deep terracotta */
-  --accent-text:   #FAF7F0;
-  --accent-soft:   rgba(184, 67, 14, 0.10);   /* fills, focus rings */
-  --accent-faint:  rgba(184, 67, 14, 0.04);   /* whisper-quiet rows */
-  --accent-ring:   rgba(184, 67, 14, 0.32);   /* focus-visible glow */
+  /* Google Blue — the affirmative voice. */
+  --accent:        #0b57d0;
+  --accent-text:   #ffffff;
+  --accent-soft:   #d3e3fd;            /* light-blue pill, selected row */
+  --accent-faint:  rgba(11, 87, 208, 0.04);
+  --accent-ring:   rgba(11, 87, 208, 0.28);
 
-  /* Status. Maroon harmonized with the accent, not generic red. */
-  --danger:        #8B2A1A;
-  --danger-soft:   rgba(139, 42, 26, 0.08);
+  /* Compose button — Gmail's peach pill. */
+  --compose-bg:    #fce5cd;
+  --compose-bg-hover: #f9dcb4;
+  --compose-text:  #1f1f1f;
 
-  /* Elevation. We use shadows sparingly — mostly the compose dialog
-     and a hairline above the toolbar. */
-  --shadow-line:   0 1px 0 rgba(27, 24, 20, 0.04);
-  --shadow-card:   0 1px 2px rgba(27, 24, 20, 0.04),
-                   0 12px 32px -8px rgba(27, 24, 20, 0.12);
-  --shadow-modal:  0 8px 24px rgba(27, 24, 20, 0.10),
-                   0 24px 64px -12px rgba(27, 24, 20, 0.18);
+  /* Status — Google red. */
+  --danger:        #d93025;
+  --danger-soft:   rgba(217, 48, 37, 0.08);
 
-  /* Motion. The same easing across all transitions so the surface
-     feels of one piece. */
-  --ease:        cubic-bezier(0.22, 0.61, 0.36, 1);
+  /* Elevation. Gmail uses very subtle shadows — mostly for the
+     compose dialog and the search bar's focus state. */
+  --shadow-line:   0 1px 0 rgba(60, 64, 67, 0.08);
+  --shadow-card:   0 1px 2px rgba(60, 64, 67, 0.10),
+                   0 1px 3px 1px rgba(60, 64, 67, 0.06);
+  --shadow-modal:  0 4px 8px 3px rgba(60, 64, 67, 0.15),
+                   0 1px 3px rgba(60, 64, 67, 0.30);
+  --shadow-compose: 0 1px 2px rgba(60, 64, 67, 0.10),
+                    0 2px 6px 2px rgba(60, 64, 67, 0.10);
+
+  /* Motion. */
+  --ease:        cubic-bezier(0.4, 0, 0.2, 1);
   --ease-quick:  cubic-bezier(0.4, 0, 0.2, 1);
 
-  /* Type stack. UI grotesque first, then a refined system fallback. */
-  --font-ui:     'Geist', 'Inter', system-ui, -apple-system, 'Segoe UI',
-                 'SF Pro Text', sans-serif;
-  --font-display:'Fraunces', 'Iowan Old Style', 'Georgia', serif;
-  --font-mono:   'Geist Mono', 'JetBrains Mono', ui-monospace,
-                 'SF Mono', 'Menlo', monospace;
+  /* Type stack — Roboto, with the same system fallbacks Gmail uses. */
+  --font-ui:      'Roboto', 'Arial', 'Helvetica Neue', -apple-system,
+                  BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  /* Alias: code used --font-display for headings in the previous
+     editorial pass. Gmail has no display serif; we keep the alias
+     so existing component CSS stays valid without producing a
+     serif-looking surprise. */
+  --font-display: var(--font-ui);
+  --font-mono:    'Roboto Mono', ui-monospace, 'SF Mono', 'Menlo',
+                  'Consolas', monospace;
 
-  /* Type metrics — tightened from the system defaults. The
-     editorial scale is intentionally smaller than the previous
-     14px/13px norm, but the line-height stays comfortable. */
+  /* Type metrics — Gmail body is 14px / 20px. */
   --text-xs:    11px;
-  --text-sm:    12.5px;
-  --text-base: 13.5px;
-  --text-md:   15px;
-  --text-lg:   18px;
-  --text-xl:   22px;
-  --text-2xl:  28px;
-  --leading:   1.45;
+  --text-sm:    12px;
+  --text-base:  14px;
+  --text-md:    15px;
+  --text-lg:    18px;
+  --text-xl:    22px;
+  --text-2xl:   28px;
+  --leading:    1.43;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg:           #1A1815;
-    --bg-muted:    #211F1B;
-    --bg-sunken:   #2A2723;
-    --border:      #3A3631;
-    --border-soft: #2F2C28;
+    --bg:             #1f1f1f;
+    --bg-muted:       #2a2a2a;
+    --bg-sunken:      #2d2e30;
+    --surface:        #1b1b1b;
+    --surface-active: #3c2f1f;
+    --surface-active-hover: #483722;
+    --border:         #3c4043;
+    --border-soft:    rgba(255,255,255,0.08);
 
-    --text:        #EEE6D4;
-    --text-muted:  #ACA194;
-    --text-soft:   #7E7468;
-    --unread:      #FFF7E6;
+    --text:        #e8eaed;
+    --text-muted:  #9aa0a6;
+    --text-soft:   #80868b;
+    --unread:      #ffffff;
 
-    --accent:        #E76732;
-    --accent-text:   #1A1815;
-    --accent-soft:   rgba(231, 103, 50, 0.14);
-    --accent-faint:  rgba(231, 103, 50, 0.05);
-    --accent-ring:   rgba(231, 103, 50, 0.40);
+    --accent:        #8ab4f8;
+    --accent-text:   #1f1f1f;
+    --accent-soft:   #2a3957;
+    --accent-faint:  rgba(138, 180, 248, 0.06);
+    --accent-ring:   rgba(138, 180, 248, 0.40);
 
-    --danger:        #E58072;
-    --danger-soft:   rgba(229, 128, 114, 0.10);
+    --compose-bg:    #fce5cd;
+    --compose-bg-hover: #f9dcb4;
+    --compose-text:  #1f1f1f;
+
+    --danger:        #f28b82;
+    --danger-soft:   rgba(242, 139, 130, 0.10);
 
     --shadow-line:   0 1px 0 rgba(0, 0, 0, 0.4);
-    --shadow-card:   0 1px 2px rgba(0, 0, 0, 0.3),
-                     0 12px 32px -8px rgba(0, 0, 0, 0.5);
-    --shadow-modal:  0 8px 24px rgba(0, 0, 0, 0.4),
-                     0 24px 64px -12px rgba(0, 0, 0, 0.7);
+    --shadow-card:   0 1px 2px rgba(0, 0, 0, 0.5),
+                     0 1px 3px 1px rgba(0, 0, 0, 0.3);
+    --shadow-modal:  0 4px 8px 3px rgba(0, 0, 0, 0.4),
+                     0 1px 3px rgba(0, 0, 0, 0.6);
+    --shadow-compose: 0 1px 2px rgba(0, 0, 0, 0.5),
+                      0 2px 6px 2px rgba(0, 0, 0, 0.4);
   }
 }
 
@@ -117,22 +136,13 @@ body {
 body {
   font-family: var(--font-ui);
   font-size: var(--text-base);
-  font-feature-settings: 'cv11' 1, 'ss01' 1, 'ss03' 1; /* Geist stylistic alts */
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
-  letter-spacing: -0.005em;
+  letter-spacing: 0.15px;
   line-height: var(--leading);
   color: var(--text);
   background: var(--bg);
-  /* A whisper-quiet warmth on the page surface — two translucent
-     radial gradients that read as light grain on paper, not as a
-     fill colour. Negligible CPU cost; background-attachment: fixed
-     keeps them stationary as panes scroll. */
-  background-image:
-    radial-gradient(900px 600px at 12% -10%, var(--accent-faint), transparent 60%),
-    radial-gradient(700px 500px at 95% 0%, var(--accent-faint), transparent 55%);
-  background-attachment: fixed;
 }
 
 oximail-root {
@@ -140,69 +150,64 @@ oximail-root {
   height: 100%;
 }
 
-/* Selection — terracotta to keep the brand voice consistent even in a
-   browser-native interaction. */
+/* Selection — soft Google blue. */
 ::selection {
   background: var(--accent-soft);
   color: var(--text);
 }
 
-/* Scrollbars — slim, neutral. Visible on hover only so the chrome
-   stays calm. */
+/* Scrollbars — slim, neutral, Gmail-quiet. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
+  scrollbar-color: #bdc1c6 transparent;
 }
 *::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
 }
 *::-webkit-scrollbar-track {
   background: transparent;
 }
 *::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border: 3px solid var(--bg);
+  background: #bdc1c6;
+  border: 3px solid transparent;
+  background-clip: padding-box;
   border-radius: 999px;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background: var(--text-soft);
+  background-color: #9aa0a6;
 }
 
-/* Base controls — explicitly designed instead of inheriting browser
-   defaults. Every control is a flex inline element with consistent
-   sizing, hairline borders, and the focus-visible ring. */
+/* Base controls — Material 3-flavoured. */
 button {
   font: inherit;
-  letter-spacing: -0.005em;
   cursor: pointer;
   border: 1px solid var(--border);
-  background: var(--bg);
+  background: var(--surface);
   color: var(--text);
-  border-radius: 6px;
-  padding: 6px 12px;
+  border-radius: 999px;        /* Gmail's pill shape everywhere */
+  padding: 8px 16px;
+  font-weight: 500;
   transition:
-    background 140ms var(--ease-quick),
-    border-color 140ms var(--ease-quick),
-    color 140ms var(--ease-quick),
-    box-shadow 140ms var(--ease-quick),
-    transform 140ms var(--ease-quick);
+    background 120ms var(--ease-quick),
+    border-color 120ms var(--ease-quick),
+    color 120ms var(--ease-quick),
+    box-shadow 120ms var(--ease-quick);
 }
 
 button:hover {
   background: var(--bg-muted);
-  border-color: var(--text-soft);
+  border-color: var(--bg-sunken);
 }
 
 button:active {
-  transform: translateY(0.5px);
+  background: var(--bg-sunken);
 }
 
 button.primary {
   background: var(--accent);
   color: var(--accent-text);
   border-color: var(--accent);
-  font-weight: 500;
 }
 
 button.primary:hover {
@@ -214,23 +219,21 @@ button:disabled,
 button.primary:disabled {
   opacity: 0.5;
   cursor: default;
-  transform: none;
 }
 
 input,
 textarea,
 select {
   font: inherit;
-  letter-spacing: -0.005em;
   color: var(--text);
-  background: var(--bg);
+  background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 11px;
+  border-radius: 8px;
+  padding: 8px 12px;
   transition:
-    border-color 140ms var(--ease-quick),
-    box-shadow 140ms var(--ease-quick),
-    background 140ms var(--ease-quick);
+    border-color 120ms var(--ease-quick),
+    box-shadow 120ms var(--ease-quick),
+    background 120ms var(--ease-quick);
 }
 
 input::placeholder,
@@ -250,38 +253,36 @@ select:focus,
 button:focus-visible {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-ring);
+  box-shadow: 0 0 0 2px var(--accent-ring);
 }
 
-/* Keyboard-only focus on buttons gets the ring; mouse-only doesn't.
-   :focus-visible handles this natively in modern browsers. */
 button:focus { outline: none; }
 
-/* Refined checkbox — accent-tinted, more squared than the system. */
+/* Checkbox — Google blue accent. */
 input[type='checkbox'] {
   accent-color: var(--accent);
-  width: 14px;
-  height: 14px;
-  border-radius: 4px;
+  width: 16px;
+  height: 16px;
+  border-radius: 2px;
 }
 
-/* Small uppercase labels (the typographic flourish that ties the
-   editorial feel together — see TO / CC / SUBJECT, settings tabs,
-   thread strip header, etc.). */
+/* Section labels — sentence case, no uppercase tracking. The class
+   name stays for compatibility with existing markup; only the
+   visual treatment changes. */
 .label-text,
 .uppercase-label {
   font-family: var(--font-ui);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--text-soft);
+  text-transform: none;
+  letter-spacing: 0.2px;
+  color: var(--text-muted);
 }
 
-/* A utility hint paragraph used in empty states and form helpers. */
+/* Empty-state / helper paragraphs. */
 .hint {
   margin: 0;
   color: var(--text-muted);
   font-size: var(--text-sm);
-  line-height: 1.55;
+  line-height: 1.5;
 }
