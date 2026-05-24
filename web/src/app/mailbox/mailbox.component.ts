@@ -1184,47 +1184,54 @@ interface UndoState {
       border-radius: 3px;
     }
 
+    /* Attachments block — lives outside conv-card-body so it can
+       carry its own divider, but the inner padding matches the body
+       so the chip strip sits in the same column as the message text. */
     .attachments {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       gap: 8px;
-      margin-top: 14px;
-      padding-top: 14px;
-      border-top: 1px dashed var(--border);
+      padding: 14px 18px 18px;
+      border-top: 1px solid var(--border);
     }
     .attachments strong {
       font-family: var(--font-ui);
-      font-size: 10.5px;
+      font-size: var(--text-sm);
       font-weight: 500;
-      text-transform: uppercase;
-      letter-spacing: 0.14em;
-      color: var(--text-soft);
-      margin-right: 4px;
+      text-transform: none;
+      letter-spacing: 0;
+      color: var(--text-muted);
+      margin-right: 8px;
     }
     .chip {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
-      padding: 6px 10px;
+      gap: 8px;
+      padding: 6px 14px;
       background: var(--bg-muted);
       border: 1px solid var(--border);
       border-radius: 999px;
       font-size: var(--text-sm);
-      font-family: var(--font-mono);
+      font-family: var(--font-ui);
       color: var(--text);
       cursor: pointer;
-      transition: all 140ms var(--ease-quick);
+      transition: all 120ms var(--ease-quick);
     }
     .chip::before {
-      content: '◊';
-      color: var(--accent);
-      font-family: var(--font-display);
+      content: '';
+      width: 14px;
+      height: 14px;
+      border-radius: 3px;
+      background:
+        linear-gradient(135deg, var(--accent) 50%, transparent 50%) #d3e3fd;
+      flex-shrink: 0;
     }
     .chip:hover {
-      background: var(--bg);
-      border-color: var(--accent);
-      color: var(--accent);
+      background: var(--surface);
+      border-color: var(--text-soft);
+      color: var(--text);
+      box-shadow: var(--shadow-card);
     }
     .chip:disabled { opacity: 0.5; cursor: default; }
 
