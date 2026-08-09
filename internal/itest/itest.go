@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -31,6 +32,7 @@ type Option func(*config)
 
 type config struct {
 	extraEnv []string
+	stop     *func()
 }
 
 // LazySync starts the server with OXIDB_LAZY_SYNC=true: commits are
@@ -42,6 +44,14 @@ type config struct {
 // lock-based in OxiDB, so it holds regardless of the sync mode.
 func LazySync() Option {
 	return func(c *config) { c.extraEnv = append(c.extraEnv, "OXIDB_LAZY_SYNC=true") }
+}
+
+// WithStop stores a function that kills the server mid-test, for tests
+// that need a genuinely dead backend (closing the client is not enough
+// — the store transparently redials a live server). Calling it more
+// than once is safe; teardown still runs harmlessly afterwards.
+func WithStop(stop *func()) Option {
+	return func(c *config) { c.stop = stop }
 }
 
 // StartOxiDB boots an oxidb-server in a fresh temp directory on a free
@@ -78,6 +88,15 @@ func StartOxiDB(t *testing.T, opts ...Option) (host string, port int) {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 		_, _ = cmd.Process.Wait()
 	})
+	if cfg.stop != nil {
+		var once sync.Once
+		*cfg.stop = func() {
+			once.Do(func() {
+				_ = cmd.Process.Kill()
+				_, _ = cmd.Process.Wait()
+			})
+		}
+	}
 
 	WaitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 	return "127.0.0.1", port

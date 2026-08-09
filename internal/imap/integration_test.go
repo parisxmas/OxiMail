@@ -65,7 +65,7 @@ func TestIMAP(t *testing.T) {
 		"Message-Id: <imap-1@elsewhere.test>\r\n" +
 		"\r\n" +
 		"the message body\r\n")
-	if _, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+	if _, err := st.AppendMessage(acc.ID, inbox.ID, store.IncomingMessage{
 		Raw: rawMsg, Subject: "Hello IMAP", MessageID: "imap-1@elsewhere.test",
 		FromAddr: "sender@elsewhere.test",
 	}); err != nil {
@@ -157,7 +157,7 @@ func TestIMAP(t *testing.T) {
 			t.Fatalf("STORE response flags = %v, want \\Seen present", msgs)
 		}
 		// Verify it was persisted, not just echoed.
-		stored, err := st.ListMessages(inbox.ID)
+		stored, err := st.ListMessages(acc.ID, inbox.ID)
 		if err != nil {
 			t.Fatalf("list messages: %v", err)
 		}
@@ -183,7 +183,7 @@ func TestIMAP(t *testing.T) {
 		if err != nil {
 			t.Fatalf("get Drafts: %v", err)
 		}
-		msgs, err := st.ListMessages(drafts.ID)
+		msgs, err := st.ListMessages(acc.ID, drafts.ID)
 		if err != nil {
 			t.Fatalf("list Drafts: %v", err)
 		}
@@ -209,7 +209,7 @@ func TestIMAP(t *testing.T) {
 		if len(seqNums) != 1 || seqNums[0] != 1 {
 			t.Fatalf("EXPUNGE reported %v, want [1]", seqNums)
 		}
-		if msgs, err := st.ListMessages(inbox.ID); err != nil || len(msgs) != 0 {
+		if msgs, err := st.ListMessages(acc.ID, inbox.ID); err != nil || len(msgs) != 0 {
 			t.Fatalf("message not removed from the store: %d (%v)", len(msgs), err)
 		}
 		// A fresh SELECT should now see an empty INBOX.
@@ -474,7 +474,7 @@ func TestIMAPSearch(t *testing.T) {
 		raw := []byte("From: " + from + "\r\nTo: " + testAddr + "\r\n" +
 			"Subject: " + subject + "\r\nDate: Wed, 14 May 2025 10:00:00 +0000\r\n" +
 			"\r\n" + body + "\r\n")
-		m, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+		m, err := st.AppendMessage(acc.ID, inbox.ID, store.IncomingMessage{
 			Raw: raw, Subject: subject, FromAddr: from, Flags: flags,
 		})
 		if err != nil {
@@ -634,7 +634,7 @@ func TestIMAPCondStore(t *testing.T) {
 	// mod-sequences (1 and 2) at append time.
 	seed := func(subject string) *store.Message {
 		raw := []byte("From: <s@x.test>\r\nSubject: " + subject + "\r\n\r\nbody\r\n")
-		m, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+		m, err := st.AppendMessage(acc.ID, inbox.ID, store.IncomingMessage{
 			Raw: raw, Subject: subject, FromAddr: "s@x.test",
 		})
 		if err != nil {
@@ -860,7 +860,7 @@ func TestIMAPQResync(t *testing.T) {
 		// than three EXPUNGE responses.
 		for i := 0; i < 3; i++ {
 			body := []byte(fmt.Sprintf("From: <s@x.test>\r\nSubject: qres-%d\r\n\r\nx\r\n", i))
-			if _, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+			if _, err := st.AppendMessage(acc.ID, inbox.ID, store.IncomingMessage{
 				Raw: body, Subject: fmt.Sprintf("qres-%d", i), FromAddr: "s@x.test",
 			}); err != nil {
 				t.Fatalf("seed: %v", err)
@@ -917,7 +917,7 @@ func TestIMAPQResync(t *testing.T) {
 		if err != nil {
 			t.Fatalf("get INBOX: %v", err)
 		}
-		uids, err := st.ExpungedSince(mb.ID, 0)
+		uids, err := st.ExpungedSince(acc.ID, mb.ID, 0)
 		if err != nil {
 			t.Fatalf("expunged-since: %v", err)
 		}
@@ -982,19 +982,19 @@ func TestIMAPQResync(t *testing.T) {
 		if err != nil {
 			t.Fatalf("get INBOX: %v", err)
 		}
-		first, err := st.AppendMessage(mb.ID, store.IncomingMessage{
+		first, err := st.AppendMessage(acc.ID, mb.ID, store.IncomingMessage{
 			Raw: []byte("From: <a@x>\r\nSubject: keep\r\n\r\nx\r\n"), Subject: "keep", FromAddr: "a@x",
 		})
 		if err != nil {
 			t.Fatalf("seed keep: %v", err)
 		}
-		gone, err := st.AppendMessage(mb.ID, store.IncomingMessage{
+		gone, err := st.AppendMessage(acc.ID, mb.ID, store.IncomingMessage{
 			Raw: []byte("From: <a@x>\r\nSubject: gone\r\n\r\nx\r\n"), Subject: "gone", FromAddr: "a@x",
 		})
 		if err != nil {
 			t.Fatalf("seed gone: %v", err)
 		}
-		if err := st.DeleteMessage(gone.ID); err != nil {
+		if err := st.DeleteMessage(acc.ID, gone.ID); err != nil {
 			t.Fatalf("delete gone: %v", err)
 		}
 
@@ -1131,7 +1131,7 @@ func TestIMAPIdle(t *testing.T) {
 	// the snapshot, and queue an EXISTS — which IDLE pushes to us.
 	raw := []byte("From: ping@elsewhere.test\r\nTo: " + testAddr + "\r\n" +
 		"Subject: IDLE wakeup\r\n\r\nhi\r\n")
-	if _, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+	if _, err := st.AppendMessage(acc.ID, inbox.ID, store.IncomingMessage{
 		Raw: raw, Subject: "IDLE wakeup", FromAddr: "ping@elsewhere.test",
 	}); err != nil {
 		t.Fatalf("append via store: %v", err)
@@ -1201,13 +1201,13 @@ func TestIMAPLiveBroadcast(t *testing.T) {
 	}
 	// Seed two messages so we have something to expunge AND
 	// something to flag-mutate.
-	doomed, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+	doomed, err := st.AppendMessage(acc.ID, inbox.ID, store.IncomingMessage{
 		Raw: []byte("From: <s@x>\r\nSubject: doomed\r\n\r\n"), Subject: "doomed", FromAddr: "s@x",
 	})
 	if err != nil {
 		t.Fatalf("seed doomed: %v", err)
 	}
-	survivor, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+	survivor, err := st.AppendMessage(acc.ID, inbox.ID, store.IncomingMessage{
 		Raw: []byte("From: <s@x>\r\nSubject: survivor\r\n\r\n"), Subject: "survivor", FromAddr: "s@x",
 	})
 	if err != nil {
@@ -1270,7 +1270,7 @@ func TestIMAPLiveBroadcast(t *testing.T) {
 	// (1) Cross-connection EXPUNGE: delete one of the seeded
 	// messages directly through the store. The IDLE'ing session
 	// should hear about it.
-	if err := st.DeleteMessage(doomed.ID); err != nil {
+	if err := st.DeleteMessage(acc.ID, doomed.ID); err != nil {
 		t.Fatalf("delete doomed: %v", err)
 	}
 	select {
@@ -1285,7 +1285,7 @@ func TestIMAPLiveBroadcast(t *testing.T) {
 	// (2) Cross-connection STORE: add \Flagged to the survivor.
 	// The IDLE'ing session should see a FETCH FLAGS with the new
 	// flag set.
-	if err := st.AddFlags(survivor.ID, `\Flagged`); err != nil {
+	if err := st.AddFlags(acc.ID, survivor.ID, `\Flagged`); err != nil {
 		t.Fatalf("flag survivor: %v", err)
 	}
 	select {
@@ -1337,7 +1337,7 @@ func TestIMAPLiveBroadcastQResync(t *testing.T) {
 		t.Fatalf("ensure mailboxes: %v", err)
 	}
 	inbox, _ := st.GetMailboxByName(acc.ID, "INBOX")
-	doomed, err := st.AppendMessage(inbox.ID, store.IncomingMessage{
+	doomed, err := st.AppendMessage(acc.ID, inbox.ID, store.IncomingMessage{
 		Raw: []byte("From: <s@x>\r\nSubject: doomed\r\n\r\n"), Subject: "doomed", FromAddr: "s@x",
 	})
 	if err != nil {
@@ -1383,7 +1383,7 @@ func TestIMAPLiveBroadcastQResync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("idle: %v", err)
 	}
-	if err := st.DeleteMessage(doomed.ID); err != nil {
+	if err := st.DeleteMessage(acc.ID, doomed.ID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	// Wait for the unilateral response. In QRESYNC mode the

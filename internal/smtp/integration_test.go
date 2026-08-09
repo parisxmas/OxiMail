@@ -65,7 +65,7 @@ func TestInboundSMTP(t *testing.T) {
 		if err != nil {
 			t.Fatalf("get INBOX (should have been created on first delivery): %v", err)
 		}
-		msgs, err := st.ListMessages(inbox.ID)
+		msgs, err := st.ListMessages(acc.ID, inbox.ID)
 		if err != nil {
 			t.Fatalf("list messages: %v", err)
 		}
@@ -161,29 +161,29 @@ func TestInboundSMTPSieve(t *testing.T) {
 			[]string{"rules@oximail.test"}, []byte(msg)); err != nil {
 			t.Fatalf("SendMail: %v", err)
 		}
-		if msgs, _ := st.ListMessages(reports.ID); len(msgs) != 1 {
+		if msgs, _ := st.ListMessages(acc.ID, reports.ID); len(msgs) != 1 {
 			t.Errorf("Reports has %d messages, want 1", len(msgs))
 		}
-		if msgs, _ := st.ListMessages(inbox.ID); len(msgs) != 0 {
+		if msgs, _ := st.ListMessages(acc.ID, inbox.ID); len(msgs) != 0 {
 			t.Errorf("INBOX has %d messages, want 0 (fileinto should have rerouted)", len(msgs))
 		}
 	})
 
 	t.Run("discard drops the message entirely", func(t *testing.T) {
-		before, _ := st.ListMessages(inbox.ID)
+		before, _ := st.ListMessages(acc.ID, inbox.ID)
 		msg := "From: alice@partners.test\r\nTo: rules@oximail.test\r\nSubject: spam alert\r\n\r\nbody\r\n"
 		if err := netsmtp.SendMail(addr, nil, "alice@partners.test",
 			[]string{"rules@oximail.test"}, []byte(msg)); err != nil {
 			t.Fatalf("SendMail: %v", err)
 		}
-		after, _ := st.ListMessages(inbox.ID)
+		after, _ := st.ListMessages(acc.ID, inbox.ID)
 		if len(after) != len(before) {
 			t.Errorf("INBOX grew from %d to %d on a discard'd message", len(before), len(after))
 		}
 		// Other folders unaffected too.
 		for _, name := range []string{"Reports", "Sent", "Drafts", "Trash", "Archive", "Junk"} {
 			mb, _ := st.GetMailboxByName(acc.ID, name)
-			msgs, _ := st.ListMessages(mb.ID)
+			msgs, _ := st.ListMessages(acc.ID, mb.ID)
 			for _, m := range msgs {
 				if m.Subject == "spam alert" {
 					t.Errorf("discard'd message turned up in %s", name)

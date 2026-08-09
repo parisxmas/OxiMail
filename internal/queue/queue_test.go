@@ -223,7 +223,7 @@ func TestQueue(t *testing.T) {
 		if err != nil {
 			t.Fatalf("get sender INBOX: %v", err)
 		}
-		msgs, err := st.ListMessages(inbox.ID)
+		msgs, err := st.ListMessages(sender.ID, inbox.ID)
 		if err != nil {
 			t.Fatalf("list sender INBOX: %v", err)
 		}

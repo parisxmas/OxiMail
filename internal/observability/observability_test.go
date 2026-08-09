@@ -19,7 +19,8 @@ import (
 )
 
 func TestObservability(t *testing.T) {
-	host, port := itest.StartOxiDB(t, itest.LazySync())
+	var stopDB func()
+	host, port := itest.StartOxiDB(t, itest.LazySync(), itest.WithStop(&stopDB))
 
 	st, err := store.Open(host, port)
 	if err != nil {
@@ -75,9 +76,10 @@ func TestObservability(t *testing.T) {
 	})
 
 	t.Run("/readyz with a dead store returns 503", func(t *testing.T) {
-		// Closing the store underneath the running server simulates a
-		// failed backend; readiness must turn red.
-		_ = st.Close()
+		// Killing the backend simulates a failed store; readiness must
+		// turn red. (Merely closing the client is not enough — the
+		// store redials a live server transparently.)
+		stopDB()
 		_, code := httpGet(t, base+"/readyz")
 		if code != http.StatusServiceUnavailable {
 			t.Errorf("status = %d, want 503", code)

@@ -97,7 +97,7 @@ func TestSubmission(t *testing.T) {
 		if err != nil {
 			t.Fatalf("get local INBOX: %v", err)
 		}
-		msgs, err := st.ListMessages(inbox.ID)
+		msgs, err := st.ListMessages(localRcpt.ID, inbox.ID)
 		if err != nil {
 			t.Fatalf("list local INBOX: %v", err)
 		}
@@ -268,7 +268,7 @@ func inboxCount(t *testing.T, st *store.Store, accountID uint64) int {
 	if err != nil {
 		t.Fatalf("get INBOX: %v", err)
 	}
-	msgs, err := st.ListMessages(inbox.ID)
+	msgs, err := st.ListMessages(accountID, inbox.ID)
 	if err != nil {
 		t.Fatalf("list INBOX: %v", err)
 	}
