@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -133,20 +134,20 @@ func TestReconnectSwapsLiveClient(t *testing.T) {
 	}
 	defer c.Close()
 
-	prev := c.cur.Load()
+	prev := c.conns[0].cur.Load()
 	if prev == nil {
 		t.Fatal("initial connection is nil")
 	}
 	f.waitForAccepts(t, 1)
 
-	fresh, rerr := c.reconnect(prev)
+	fresh, rerr := c.conns[0].reconnect(prev)
 	if rerr != nil {
 		t.Fatalf("reconnect: %v", rerr)
 	}
 	if fresh == prev {
 		t.Fatal("reconnect returned the same client pointer")
 	}
-	if c.cur.Load() != fresh {
+	if c.conns[0].cur.Load() != fresh {
 		t.Fatal("reconnect did not store the fresh client")
 	}
 	f.waitForAccepts(t, 2)
@@ -165,7 +166,7 @@ func TestReconnectIsRaceFree(t *testing.T) {
 	}
 	defer c.Close()
 
-	prev := c.cur.Load()
+	prev := c.conns[0].cur.Load()
 
 	const callers = 32
 	var wg sync.WaitGroup
@@ -173,7 +174,7 @@ func TestReconnectIsRaceFree(t *testing.T) {
 	for i := 0; i < callers; i++ {
 		go func() {
 			defer wg.Done()
-			if _, err := c.reconnect(prev); err != nil {
+			if _, err := c.conns[0].reconnect(prev); err != nil {
 				t.Errorf("reconnect: %v", err)
 			}
 		}()
@@ -269,5 +270,210 @@ func TestCallDBSurfacesOriginalErrorWhenReconnectFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "broken pipe") {
 		t.Fatalf("err = %v, want the original broken-pipe error preserved", err)
+	}
+}
+
+// frameServer speaks just enough of the oxidb framing to count requests.
+// The first `drop` connections die: each reads one request, as if the
+// server executed it, and closes without replying. Later connections
+// answer every request with `reply`.
+type frameServer struct {
+	listener net.Listener
+	port     int
+	reply    string
+	frames   atomic.Int32 // requests received, across all connections
+
+	mu   sync.Mutex
+	drop int
+}
+
+func newFrameServer(t *testing.T, drop int, reply string) *frameServer {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	f := &frameServer{listener: l, port: l.Addr().(*net.TCPAddr).Port, reply: reply, drop: drop}
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			f.mu.Lock()
+			dying := f.drop > 0
+			if dying {
+				f.drop--
+			}
+			f.mu.Unlock()
+			go f.serve(c, dying)
+		}
+	}()
+	return f
+}
+
+func (f *frameServer) serve(c net.Conn, dying bool) {
+	defer c.Close()
+	for {
+		var hdr [4]byte
+		if _, err := io.ReadFull(c, hdr[:]); err != nil {
+			return
+		}
+		if _, err := io.ReadFull(c, make([]byte, binary.LittleEndian.Uint32(hdr[:]))); err != nil {
+			return
+		}
+		f.frames.Add(1)
+		if dying {
+			return
+		}
+		binary.LittleEndian.PutUint32(hdr[:], uint32(len(f.reply)))
+		if _, err := c.Write(append(hdr[:], f.reply...)); err != nil {
+			return
+		}
+	}
+}
+
+func TestDeadConnectionRetryRules(t *testing.T) {
+	const reply = `{"ok":true,"data":{"id":1,"_id":1}}`
+	inc := map[string]any{"$inc": map[string]any{"count": 1}}
+	set := map[string]any{"$set": map[string]any{"count": 1}}
+
+	for _, tc := range []struct {
+		name  string
+		call  func(c *dbClient) error
+		retry bool
+	}{
+		{"Insert", func(c *dbClient) error {
+			_, err := c.Insert("x", map[string]any{"a": 1})
+			return err
+		}, false},
+		{"FindAndModify $inc", func(c *dbClient) error {
+			_, err := c.FindAndModify("x", map[string]any{}, inc)
+			return err
+		}, false},
+		{"FindAndModify $set", func(c *dbClient) error {
+			_, err := c.FindAndModify("x", map[string]any{}, set)
+			return err
+		}, true},
+		{"AllocCounter", func(c *dbClient) error {
+			_, err := c.AllocCounter("x", map[string]any{}, inc)
+			return err
+		}, true},
+		{"PutObject", func(c *dbClient) error {
+			_, err := c.PutObject("b", "k", []byte("x"), "", nil)
+			return err
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFrameServer(t, 1, reply)
+			c, err := dial("127.0.0.1", f.port, time.Second)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer c.Close()
+
+			err = tc.call(c)
+			if tc.retry {
+				if err != nil {
+					t.Fatalf("repeatable call failed: %v", err)
+				}
+				if n := f.frames.Load(); n != 2 {
+					t.Fatalf("server saw %d requests, want 2 (original + retry)", n)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("call that may have been applied reported success")
+			}
+			if n := f.frames.Load(); n != 1 {
+				t.Fatalf("server saw %d requests, want 1: a non-repeatable write was re-sent", n)
+			}
+			// No retry, but the connection must still have been healed.
+			if err := tc.call(c); err != nil {
+				t.Fatalf("next call on the redialed connection: %v", err)
+			}
+		})
+	}
+}
+
+func TestCallDBOnceRetriesOnlyUnsentRequests(t *testing.T) {
+	f := newFakeOxidb(t)
+	c, err := dial("127.0.0.1", f.port, 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+
+	for _, tc := range []struct {
+		failure  string
+		attempts int32
+	}{
+		{"oxidb: send: write tcp x->y: write: broken pipe", 2},
+		{"oxidb: read length: EOF", 1},
+		{"oxidb: read payload: read tcp: connection reset by peer", 1},
+	} {
+		var attempts atomic.Int32
+		_, _ = callDBOnce(c, func(cli *oxidb.Client) (string, error) {
+			if attempts.Add(1) == 1 {
+				return "", errors.New(tc.failure)
+			}
+			return "ok", nil
+		})
+		if n := attempts.Load(); n != tc.attempts {
+			t.Errorf("%q: attempts = %d, want %d", tc.failure, n, tc.attempts)
+		}
+	}
+}
+
+func TestIdleConnectionIsProbedBeforeAnInsert(t *testing.T) {
+	// The server dropped the connection during a quiet spell. The
+	// insert must not be the call that finds out, since it could not
+	// be re-run.
+	f := newFrameServer(t, 1, `{"ok":true,"data":{"id":1}}`)
+	c, err := dial("127.0.0.1", f.port, time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	c.conns[0].lastUsed = time.Now().Add(-2 * idleProbeAfter)
+
+	if _, err := c.Insert("x", map[string]any{"a": 1}); err != nil {
+		t.Fatalf("insert after idle: %v", err)
+	}
+}
+
+func TestPoolRunsCallsConcurrently(t *testing.T) {
+	f := newFakeOxidb(t)
+	c, err := dialPool("127.0.0.1", f.port, time.Second, 3)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	f.waitForAccepts(t, 3)
+
+	var wg sync.WaitGroup
+	release := make(chan struct{})
+	var entered atomic.Int32
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = callDB(c, func(*oxidb.Client) (struct{}, error) {
+				entered.Add(1)
+				<-release
+				return struct{}{}, nil
+			})
+		}()
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for entered.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	n := entered.Load()
+	close(release)
+	wg.Wait()
+	if n != 3 {
+		t.Fatalf("%d calls in flight at once, want 3", n)
 	}
 }

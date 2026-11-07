@@ -38,7 +38,13 @@ export interface MessageDetail extends MessageSummary {
   cc: string[];
   message_id: string;
   text: string;
+  // Sanitised by the server. Render it only through MailFrameComponent.
   html: string;
+  // True when the HTML references remote images, which the server leaves
+  // out unless asked (ApiService.message with images set).
+  remote_images: boolean;
+  // Client-side only: the reader asked to see this message's images.
+  images_shown?: boolean;
   attachments: Attachment[];
 }
 

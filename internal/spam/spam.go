@@ -5,12 +5,17 @@
 //  1. connection-time — rate limiting, DNS blocklists, greylisting
 //  2. envelope        — SPF, DKIM, DMARC (native Go, no Rspamd)
 //
+// Rate limiting and blocklists depend only on the client IP, so the
+// SMTP server runs them through CheckIP at MAIL FROM, before it has
+// read a body; greylisting and the envelope stage run through
+// CheckMessage after DATA.
+//
 // Both stages are implemented. Stage 1 (ratelimit.go, dnsbl.go,
 // greylist.go) keeps its state in memory, which is fine because it is
 // disposable — losing it on a restart just re-greylists and resets
 // counters. Stage 2 (envelope.go) runs SPF / DKIM / DMARC via
-// blitiri.com.ar/go/spf + emersion/go-msgauth and rejects only on a
-// DMARC p=reject failure.
+// blitiri.com.ar/go/spf + emersion/go-msgauth, rejects only on a DMARC
+// p=reject failure, and reports its results as an AuthResult.
 //
 // Earlier revisions of this package also called Rspamd as a stage-3
 // content scanner. That gave us URL/MIME heuristics and a phishing
@@ -42,8 +47,11 @@ const (
 	Reject
 	// Quarantine — accept the message, but file it into the Junk
 	// folder rather than INBOX. Used by the envelope stage on a DMARC
-	// p=quarantine failure.
+	// p=quarantine failure, and when the From header cannot be parsed.
 	Quarantine
+	// RateLimited — temporarily reject (4xx): the client is over the
+	// per-IP rate limit and may come back once its window has passed.
+	RateLimited
 )
 
 // Connection-time defaults. They are reasonable starting points; TODO:
@@ -126,39 +134,52 @@ func (p *Pipeline) Stop() error {
 	return nil
 }
 
-// Check runs the pipeline against one inbound message. `remoteIP` is the
-// connecting client, `mailFrom`/`rcptTo` are the SMTP envelope, and `raw`
-// is the complete RFC 5322 message. rcptTo and raw are unused until the
-// envelope and content stages land.
+// Check runs the whole pipeline against one inbound message. `remoteIP`
+// is the connecting client, `mailFrom`/`rcptTo` are the SMTP envelope,
+// and `raw` is the complete RFC 5322 message. The SMTP server runs the
+// same stages in two steps, CheckIP and CheckMessage, so that it can
+// turn a client away before reading the body.
 func (p *Pipeline) Check(remoteIP, mailFrom string, rcptTo []string, raw []byte) (Verdict, error) {
-	if p.disabled {
-		return Accept, nil
-	}
-	// Stage 1 — connection-time.
-	if v := p.checkConnection(remoteIP, mailFrom); v != Accept {
+	if v := p.CheckIP(remoteIP); v != Accept {
 		return v, nil
 	}
-	// Stage 2 — envelope (SPF / DKIM / DMARC).
-	if v := p.envelope.check(remoteIP, mailFrom, raw); v != Accept {
-		return v, nil
-	}
-	return Accept, nil
+	v, _, err := p.CheckMessage(remoteIP, mailFrom, rcptTo, raw)
+	return v, err
 }
 
-// checkConnection runs the connection-time stage: rate limiting, DNS
-// blocklists, then greylisting — cheapest first. A message with no
-// connection information (e.g. a local injection) skips the stage.
-func (p *Pipeline) checkConnection(remoteIP, mailFrom string) Verdict {
-	if remoteIP == "" {
+// CheckIP runs the checks that need only the client IP: rate limiting,
+// then DNS blocklists — cheapest first. Each call counts as one message
+// against the rate limit, so call it once per mail transaction. A
+// message with no connection information (e.g. a local injection)
+// skips them.
+func (p *Pipeline) CheckIP(remoteIP string) Verdict {
+	if p.disabled || remoteIP == "" {
 		return Accept
 	}
 	if !p.rateLimit.allow(remoteIP) {
-		log.Printf("spam: %s is over the rate limit — rejecting", remoteIP)
-		return Reject
+		log.Printf("spam: %s is over the rate limit — deferring", remoteIP)
+		return RateLimited
 	}
 	if p.dnsbl.listed(remoteIP) {
 		log.Printf("spam: %s is on a DNS blocklist — rejecting", remoteIP)
 		return Reject
 	}
-	return p.greylist.check(remoteIP, mailFrom)
+	return Accept
+}
+
+// CheckMessage runs the stages that follow CheckIP: greylisting, then
+// the envelope stage. A greylisted message returns a zero AuthResult,
+// which does not matter because it is not delivered.
+func (p *Pipeline) CheckMessage(remoteIP, mailFrom string, _ []string, raw []byte) (Verdict, AuthResult, error) {
+	if p.disabled {
+		return Accept, AuthResult{}, nil
+	}
+	if remoteIP != "" {
+		if v := p.greylist.check(remoteIP, mailFrom); v != Accept {
+			return v, AuthResult{}, nil
+		}
+	}
+	// Stage 2 — envelope (SPF / DKIM / DMARC).
+	v, res := p.envelope.check(remoteIP, mailFrom, raw)
+	return v, res, nil
 }

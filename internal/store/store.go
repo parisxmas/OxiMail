@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -60,6 +61,15 @@ const BlobBucket = "message-bodies"
 // matches. Callers should test it with errors.Is.
 var ErrNotFound = errors.New("store: not found")
 
+// ErrQuotaExceeded is returned by the append, delivery, and copy paths
+// when storing a message would take the account past its quota. Callers
+// should test it with errors.Is.
+var ErrQuotaExceeded = errors.New("store: quota exceeded")
+
+// ErrModified is returned by UpdateFlags when the message's mod-sequence
+// is past the caller's unchangedSince floor (RFC 7162 UNCHANGEDSINCE).
+var ErrModified = errors.New("store: message modified")
+
 // ErrAuthFailed is returned by Authenticate when an address is unknown,
 // inactive, or the password does not match. The cause is deliberately
 // not distinguished, so a caller cannot use it to probe which addresses
@@ -69,16 +79,29 @@ var ErrAuthFailed = errors.New("store: authentication failed")
 // Store is the handle every component uses to reach OxiDB.
 type Store struct {
 	db *dbClient
+
+	// uidLocks order UID allocation against document visibility; see
+	// assignUID. Striped so the table never grows with mailbox count.
+	uidLocks [uidLockStripes]sync.Mutex
 }
 
-// Open connects to OxiDB. The returned Store's underlying connection
-// is reconnect-on-broken-pipe (see dbClient); a one-off network blip
+// uidLockStripes is the number of per-mailbox UID locks.
+const uidLockStripes = 64
+
+// dbPoolSize is the number of OxiDB connections a Store holds. With
+// per-commit fsync the server, not this pool, caps write throughput; what
+// the pool buys there is that reads stop queueing behind those writes.
+const dbPoolSize = 8
+
+// Open connects to OxiDB. The returned Store's underlying connections
+// are reconnect-on-broken-pipe (see dbConn); a one-off network blip
 // or oxidb-server restart will redial transparently on the next call.
-//
-// TODO: swap the single connection for the oxidb connection pool once
-// the concurrent hot paths (delivery, IMAP fetch) exist.
 func Open(host string, port int) (*Store, error) {
-	db, err := dial(host, port, 10*time.Second)
+	return openPool(host, port, dbPoolSize)
+}
+
+func openPool(host string, port, size int) (*Store, error) {
+	db, err := dialPool(host, port, 10*time.Second, size)
 	if err != nil {
 		return nil, fmt.Errorf("store: connect to OxiDB %s:%d: %w", host, port, err)
 	}

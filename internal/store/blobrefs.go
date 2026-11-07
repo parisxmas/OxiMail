@@ -9,8 +9,10 @@ import (
 // Every body blob in CollBlobRefs carries a count of the message
 // documents pointing at it. AppendMessage inserts the row with
 // count=1 alongside the PutObject; CopyMessage atomically $inc's it
-// instead of duplicating the body; DeleteMessage atomically
-// decrements and deletes the blob only when the count hits zero.
+// instead of duplicating the body; removeMessage (DeleteMessage,
+// DeleteMailbox) and DeleteAccount atomically decrement and delete the
+// blob only when the count hits zero. Nothing else may call DeleteObject
+// on a body that a message document has referenced.
 //
 // The decrement-then-delete pattern has a small TOCTOU window — a
 // concurrent CopyMessage of a message about to be expunged might
@@ -21,9 +23,9 @@ import (
 // the client, recoverable by re-fetching.
 
 // blobAddRef inserts the initial refcount row (count=1) for a freshly
-// stored body. Idempotency: if the row already exists this is a
-// no-op rather than a duplicate-key error, since AppendMessage runs
-// once per blob.
+// stored body. blob_key is unique, so a row that already exists is an
+// error; that does not arise, since blob keys are random and
+// AppendMessage runs once per blob.
 func (s *Store) blobAddRef(key string) error {
 	doc, err := encodeDoc(struct {
 		BlobKey string `json:"blob_key"`
@@ -51,7 +53,7 @@ func (s *Store) blobBumpRef(key string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("store: bump blob ref %q: %w", key, err)
 	}
-	if doc == nil {
+	if len(doc) == 0 {
 		return 0, fmt.Errorf("store: blob ref %q not found (already collected?)", key)
 	}
 	count, _ := doc["count"].(float64)
@@ -63,7 +65,8 @@ func (s *Store) blobBumpRef(key string) (int, error) {
 // blob bytes. The bool return reports whether the blob itself was
 // removed (true) or just decremented (false). A missing refcount
 // row is treated as "remove the blob anyway" so legacy data that
-// pre-dates refcounting still cleans up.
+// pre-dates refcounting still cleans up. A blob that is already gone
+// counts as removed, so a message with a lost body can still be deleted.
 func (s *Store) blobDropRef(key string) (removed bool, err error) {
 	doc, err := s.db.FindAndModify(
 		CollBlobRefs,
@@ -73,9 +76,9 @@ func (s *Store) blobDropRef(key string) (removed bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("store: drop blob ref %q: %w", key, err)
 	}
-	if doc == nil {
+	if len(doc) == 0 {
 		// Legacy blob with no refcount row: just delete it.
-		if err := s.db.DeleteObject(BlobBucket, key); err != nil {
+		if err := s.db.DeleteObject(BlobBucket, key); err != nil && !isMissingBlob(err) {
 			return false, fmt.Errorf("store: drop legacy blob %q: %w", key, err)
 		}
 		return true, nil
@@ -85,10 +88,24 @@ func (s *Store) blobDropRef(key string) (removed bool, err error) {
 		if _, err := s.db.Delete(CollBlobRefs, map[string]any{"blob_key": key}); err != nil {
 			return false, fmt.Errorf("store: delete blob ref row %q: %w", key, err)
 		}
-		if err := s.db.DeleteObject(BlobBucket, key); err != nil {
+		if err := s.db.DeleteObject(BlobBucket, key); err != nil && !isMissingBlob(err) {
 			return false, fmt.Errorf("store: delete blob %q: %w", key, err)
 		}
 		return true, nil
 	}
 	return false, nil
+}
+
+// discardBlob undoes a body write whose message document never landed.
+// It goes through blobDropRef so the refcount row goes with the bytes;
+// with no row (the row insert itself failed) that takes the legacy path
+// and still removes the blob. Best-effort: the caller is already
+// returning the error that brought it here.
+func (s *Store) discardBlob(key string) {
+	_, _ = s.blobDropRef(key)
+}
+
+// isMissingBlob identifies OxiDB's "blob not found" response.
+func isMissingBlob(err error) bool {
+	return err != nil && contains(err.Error(), "blob not found")
 }

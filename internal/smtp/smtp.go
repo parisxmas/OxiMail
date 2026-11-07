@@ -5,8 +5,10 @@
 // The inbound MX accepts mail on port 25, runs the spam pipeline on each
 // message, resolves recipients against the store, and files accepted
 // messages into the right mailboxes. It does not relay — a recipient
-// that is not a local mailbox (or an alias to one) is rejected. The
-// submission server (submission.go) requires SMTP AUTH and relays.
+// that is not a local mailbox (or an alias to one) is rejected, the one
+// exception being a bounce to a valid SRS address, which goes back to
+// the remote sender it was rewritten from. The submission server
+// (submission.go) requires SMTP AUTH and relays.
 //
 // When a TLS configuration is supplied, STARTTLS is advertised on the
 // plaintext listeners; NewSubmissionTLS additionally serves implicit
@@ -53,6 +55,13 @@ const (
 	// through OxiDB's native PutObject; raising it well past the OxiDB
 	// wire-frame limit will require routing bodies via the S3 blob path.
 	maxMessageBytes = 25 << 20 // 25 MiB
+	// sweepInterval is how often in-memory per-sender state is expired.
+	sweepInterval = time.Hour
+	// defaultSuppressWindow applies to a vacation rule that does not
+	// set its own SuppressDays.
+	defaultSuppressWindow = 7 * 24 * time.Hour
+	// junkFolder receives quarantined mail.
+	junkFolder = "Junk"
 )
 
 // Server is an SMTP listener — either the inbound MX (New) or the
@@ -64,6 +73,11 @@ type Server struct {
 	addr        string
 	srv         *gosmtp.Server
 	implicitTLS bool // serve TLS from the first byte, rather than STARTTLS-on-plaintext
+
+	// sweep expires in-memory state every sweepEvery while the server
+	// runs. It is nil for a server that keeps none.
+	sweep      func(now time.Time)
+	sweepEvery time.Duration
 }
 
 // newServer builds a go-smtp server with OxiMail's shared tuning, for
@@ -107,23 +121,25 @@ func New(addr, hostname string, st *store.Store, sp *spam.Pipeline, avClient *av
 	if fwd.ForwarderDomain == "" {
 		fwd.ForwarderDomain = hostname
 	}
-	be := &backend{
-		store:      st,
-		spam:       sp,
-		av:         avClient,
-		fwd:        fwd,
-		suppressor: vacation.NewSuppressor(7 * 24 * time.Hour),
-	}
+	be := newBackend(hostname, st, sp, avClient, fwd)
 	return &Server{
-		name: "smtp",
-		addr: addr,
-		srv:  newServer(addr, hostname, be, tlsConfig),
+		name:       "smtp",
+		addr:       addr,
+		srv:        newServer(addr, hostname, be, tlsConfig),
+		sweep:      be.sweep,
+		sweepEvery: sweepInterval,
 	}
 }
 
 // Start listens and serves until `ctx` is cancelled, then shuts the
 // server down gracefully.
 func (s *Server) Start(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if s.sweep != nil {
+		go runSweeper(ctx, s.sweepEvery, s.sweep)
+	}
+
 	errc := make(chan error, 1)
 	go func() {
 		var err error
@@ -147,6 +163,20 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
+// runSweeper calls sweep every interval until ctx is cancelled.
+func runSweeper(ctx context.Context, every time.Duration, sweep func(time.Time)) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			sweep(now)
+		}
+	}
+}
+
 // Stop shuts the listener down gracefully. Safe to call more than once
 // and after Start has returned.
 func (s *Server) Stop() error {
@@ -165,15 +195,58 @@ func (s *Server) Stop() error {
 
 // backend builds one session per incoming connection.
 type backend struct {
+	hostname   string
 	store      *store.Store
 	spam       *spam.Pipeline
 	av         *av.Client
 	fwd        ForwarderConfig
 	suppressor *vacation.Suppressor
+	ledger     *deliveryLedger
+
+	// deliver and enqueue are the store calls that can leave a message
+	// half delivered. They are fields so tests can make them fail.
+	deliver func(accountID uint64, folder string, in store.IncomingMessage) error
+	enqueue func(from string, recipients []string, raw []byte) error
+}
+
+func newBackend(hostname string, st *store.Store, sp *spam.Pipeline, avClient *av.Client, fwd ForwarderConfig) *backend {
+	return &backend{
+		hostname:   hostname,
+		store:      st,
+		spam:       sp,
+		av:         avClient,
+		fwd:        fwd,
+		suppressor: vacation.NewSuppressor(defaultSuppressWindow),
+		ledger:     newDeliveryLedger(),
+		deliver: func(accountID uint64, folder string, in store.IncomingMessage) error {
+			_, err := st.DeliverTo(accountID, folder, in)
+			return err
+		},
+		enqueue: func(from string, recipients []string, raw []byte) error {
+			_, err := st.Enqueue(from, recipients, raw)
+			return err
+		},
+	}
+}
+
+// mailboxFull is the temporary refusal for a recipient over quota: the
+// sender keeps trying, and the owner may make room in the meantime.
+func mailboxFull() *gosmtp.SMTPError {
+	return &gosmtp.SMTPError{
+		Code:         452,
+		EnhancedCode: gosmtp.EnhancedCode{4, 2, 2},
+		Message:      "Mailbox full",
+	}
+}
+
+// sweep expires the backend's in-memory per-sender state.
+func (b *backend) sweep(now time.Time) {
+	b.suppressor.Sweep(now)
+	b.ledger.sweep(now)
 }
 
 func (b *backend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
-	return &session{backend: b, remoteIP: remoteIPOf(c.Conn())}, nil
+	return &session{backend: b, conn: c, remoteIP: remoteIPOf(c.Conn())}, nil
 }
 
 // remoteIPOf returns the IP part of a connection's remote address, or
@@ -198,6 +271,7 @@ func remoteIPOf(c net.Conn) string {
 // calls for one connection, so the envelope fields need no locking.
 type session struct {
 	backend  *backend
+	conn     *gosmtp.Conn
 	remoteIP string
 
 	// Envelope state for the message currently being received; cleared
@@ -206,11 +280,18 @@ type session struct {
 	rcptAddrs  []string        // envelope recipients, as given, for the spam pipeline
 	rcptAccts  map[uint64]bool // resolved local account IDs, deduplicated across recipients
 	rcptRemote []string        // alias forwarding: remote addresses to relay to
+	auth       spam.AuthResult // what the spam pipeline learned; set by Data
 }
 
 // Mail records the envelope sender (MAIL FROM). An empty sender is the
-// null reverse-path used by bounces and is accepted as such.
+// null reverse-path used by bounces and is accepted as such. The checks
+// that need only the client's IP run here, so a client that is going to
+// be turned away is not first allowed to send a 25 MiB body.
 func (s *session) Mail(from string, _ *gosmtp.MailOptions) error {
+	if v := s.backend.spam.CheckIP(s.remoteIP); v != spam.Accept {
+		observability.SMTPMessages.WithLabelValues(verdictLabel(v)).Inc()
+		return verdictError(v)
+	}
 	s.from = from
 	return nil
 }
@@ -218,18 +299,27 @@ func (s *session) Mail(from string, _ *gosmtp.MailOptions) error {
 // Rcpt resolves an envelope recipient (RCPT TO). Three paths:
 //
 //  1. The address is an SRS-rewritten bounce target: decode it,
-//     dispatch as if the original sender had been written into RCPT.
-//     This is how alias-forwarding bounces find their way home.
+//     dispatch as if the original sender had been written into RCPT,
+//     relaying if that sender is remote. This is how alias-forwarding
+//     bounces find their way home. Only an address we signed gets
+//     here, so this is not an open relay.
 //  2. The address is a local mailbox or alias: file copies for the
 //     local accounts at DATA, and (for aliases with remote
 //     destinations) queue forwards with an SRS-rewritten sender.
 //  3. Neither: reject with 550. The inbound MX does not relay open
 //     mail.
 func (s *session) Rcpt(to string, _ *gosmtp.RcptOptions) error {
-	if decoded, ok := s.decodeIfSRS(to); ok {
+	decoded, isSRS := s.decodeIfSRS(to)
+	if isSRS {
 		to = decoded
 	}
 	dests, err := s.backend.store.ResolveDestinations(to)
+	if err == nil && isSRS && dests.Empty() {
+		var hosted bool
+		if hosted, err = s.isHostedAddress(to); err == nil && !hosted {
+			dests.RemoteAddrs = []string{to}
+		}
+	}
 	if err != nil {
 		log.Printf("smtp: resolve recipient %q: %v", to, err)
 		return &gosmtp.SMTPError{
@@ -293,6 +383,21 @@ func (s *session) decodeIfSRS(to string) (string, bool) {
 	return orig, true
 }
 
+// isHostedAddress reports whether an address that resolved to nothing
+// belongs to a domain served here, which makes it a user who does not
+// exist rather than a remote address.
+func (s *session) isHostedAddress(address string) (bool, error) {
+	domain := address[strings.LastIndexByte(address, '@')+1:]
+	if strings.EqualFold(domain, s.backend.fwd.ForwarderDomain) {
+		return true, nil
+	}
+	_, err := s.backend.store.GetDomain(domain)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // forwardingEnabled reports whether SRS-based alias forwarding is
 // configured on this server.
 func (s *session) forwardingEnabled() bool {
@@ -307,6 +412,32 @@ func containsString(s []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// verdictError maps a spam verdict to its SMTP rejection, or nil if the
+// message may proceed.
+func verdictError(v spam.Verdict) error {
+	switch v {
+	case spam.Greylist:
+		return &gosmtp.SMTPError{
+			Code:         451,
+			EnhancedCode: gosmtp.EnhancedCode{4, 7, 1},
+			Message:      "Greylisted, please try again later",
+		}
+	case spam.RateLimited:
+		return &gosmtp.SMTPError{
+			Code:         451,
+			EnhancedCode: gosmtp.EnhancedCode{4, 7, 1},
+			Message:      "Too many messages, please try again later",
+		}
+	case spam.Reject:
+		return &gosmtp.SMTPError{
+			Code:         550,
+			EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
+			Message:      "Message rejected by local policy",
+		}
+	}
+	return nil
 }
 
 // Data receives the message body, runs the spam pipeline, and on an
@@ -324,7 +455,7 @@ func (s *session) Data(r io.Reader) error {
 
 	subject, messageID, fromAddr := parseHeaders(raw)
 
-	verdict, err := s.backend.spam.Check(s.remoteIP, s.from, s.rcptAddrs, raw)
+	verdict, auth, err := s.backend.spam.CheckMessage(s.remoteIP, s.from, s.rcptAddrs, raw)
 	if err != nil {
 		log.Printf("smtp: spam pipeline error: %v", err)
 		return &gosmtp.SMTPError{
@@ -333,20 +464,10 @@ func (s *session) Data(r io.Reader) error {
 			Message:      "Temporary local problem, please try again later",
 		}
 	}
+	s.auth = auth
 	observability.SMTPMessages.WithLabelValues(verdictLabel(verdict)).Inc()
-	switch verdict {
-	case spam.Greylist:
-		return &gosmtp.SMTPError{
-			Code:         451,
-			EnhancedCode: gosmtp.EnhancedCode{4, 7, 1},
-			Message:      "Greylisted, please try again later",
-		}
-	case spam.Reject:
-		return &gosmtp.SMTPError{
-			Code:         550,
-			EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
-			Message:      "Message rejected by local policy",
-		}
+	if err := verdictError(verdict); err != nil {
+		return err
 	}
 
 	// AV scan — sits after the spam pipeline so policy-rejected
@@ -380,16 +501,26 @@ func (s *session) Data(r io.Reader) error {
 	// bounced), the recipient finds it on the spam shelf.
 	folder := "INBOX"
 	if verdict == spam.Quarantine {
-		folder = "Junk"
+		folder = junkFolder
 	}
 
+	// Every copy that leaves this function carries the trace and
+	// authentication headers; the checks above saw the message as sent.
+	stamped := s.stamp(raw)
 	in := store.IncomingMessage{
-		Raw:       raw,
+		Raw:       stamped,
 		MessageID: messageID,
 		Subject:   subject,
 		FromAddr:  fromAddr,
 	}
+
+	// A sender retrying after a 4xx from here resends to everyone; the
+	// ledger skips the accounts that already have this message.
+	key := keyOf(s.from, messageID, raw)
+	done := s.backend.ledger.delivered(key)
+	var kept, filed []uint64 // accounts that keep the message; those filed just now
 	var failed int
+	var full bool
 	for acctID := range s.rcptAccts {
 		// Per-account Sieve filter: it can override the chosen folder
 		// (fileinto), drop the message (discard), or fall through to
@@ -400,16 +531,25 @@ func (s *session) Data(r io.Reader) error {
 		if drop {
 			continue
 		}
-		if _, err := s.backend.store.DeliverTo(acctID, acctFolder, in); err != nil {
+		kept = append(kept, acctID)
+		if done[acctID] {
+			continue
+		}
+		if err := s.backend.deliver(acctID, acctFolder, in); err != nil {
 			log.Printf("smtp: deliver to account %d (%s) failed: %v", acctID, acctFolder, err)
 			failed++
+			full = full || errors.Is(err, store.ErrQuotaExceeded)
+			continue
 		}
+		filed = append(filed, acctID)
 	}
 	if failed > 0 {
 		// One DATA command covers every recipient, so we can only return
-		// a single status. Asking the sender to retry re-delivers to the
-		// recipients that already succeeded.
-		// TODO: switch local delivery to LMTP for per-recipient status.
+		// a single status: see deliveryLedger.
+		s.backend.ledger.record(key, filed, time.Now())
+		if full {
+			return mailboxFull()
+		}
 		return &gosmtp.SMTPError{
 			Code:         451,
 			EnhancedCode: gosmtp.EnhancedCode{4, 3, 0},
@@ -420,9 +560,11 @@ func (s *session) Data(r io.Reader) error {
 	// Vacation auto-responder: per local recipient with a configured
 	// rule, see whether RFC 3834 permits a reply, then build one and
 	// drop it on the outbound queue. Errors are best-effort logged —
-	// a vacation failure must not bounce the original delivery.
-	if folder == "INBOX" {
-		s.fireVacationReplies(raw)
+	// a vacation failure must not bounce the original delivery. An
+	// account whose Sieve script discarded the message is not in
+	// `kept`: it never saw the mail, so it does not answer it.
+	if verdict != spam.Quarantine {
+		s.fireVacationReplies(raw, kept)
 	}
 
 	// Alias forwarding: relay to the remote alias destinations with an
@@ -438,6 +580,7 @@ func (s *session) Data(r io.Reader) error {
 			rewritten, err := srs.Encode(s.backend.fwd.SRSSecret, sender, s.backend.fwd.ForwarderDomain)
 			if err != nil {
 				log.Printf("smtp: SRS rewrite of %q: %v", sender, err)
+				s.backend.ledger.record(key, filed, time.Now())
 				return &gosmtp.SMTPError{
 					Code:         451,
 					EnhancedCode: gosmtp.EnhancedCode{4, 3, 0},
@@ -446,9 +589,10 @@ func (s *session) Data(r io.Reader) error {
 			}
 			sender = rewritten
 		}
-		forwardRaw := s.sealARC(raw)
-		if _, err := s.backend.store.Enqueue(sender, s.rcptRemote, forwardRaw); err != nil {
+		forwardRaw := s.sealARC(stamped)
+		if err := s.backend.enqueue(sender, s.rcptRemote, forwardRaw); err != nil {
 			log.Printf("smtp: enqueue forward to %v: %v", s.rcptRemote, err)
+			s.backend.ledger.record(key, filed, time.Now())
 			return &gosmtp.SMTPError{
 				Code:         451,
 				EnhancedCode: gosmtp.EnhancedCode{4, 3, 0},
@@ -457,9 +601,24 @@ func (s *session) Data(r io.Reader) error {
 		}
 	}
 
+	s.backend.ledger.forget(key)
 	log.Printf("smtp: accepted message from <%s> (%d bytes) — %d local, %d forwarded",
 		s.from, len(raw), len(s.rcptAccts), len(s.rcptRemote))
 	return nil
+}
+
+// stamp returns the message as it goes into mailboxes and the queue,
+// with this hop's Received and Authentication-Results fields on top and
+// any Authentication-Results forged in our name removed.
+func (s *session) stamp(raw []byte) []byte {
+	hostname := s.backend.hostname
+	var b bytes.Buffer
+	b.WriteString(receivedHeader(hostname, s.conn, s.remoteIP, false, time.Now()))
+	b.WriteString("Authentication-Results: ")
+	b.WriteString(strings.ReplaceAll(s.auth.Value(hostname), "; ", ";\r\n\t"))
+	b.WriteString("\r\n")
+	b.Write(stripAuthResults(raw, hostname))
+	return b.Bytes()
 }
 
 // sealARC tries to prepend an ARC instance to the raw message before
@@ -484,34 +643,17 @@ func (s *session) sealARC(raw []byte) []byte {
 		log.Printf("smtp: ARC: unparseable DKIM key for %s: %v", s.backend.fwd.ForwarderDomain, err)
 		return raw
 	}
-	authResults := fmt.Sprintf("%s; spf=%s smtp.mailfrom=%s",
-		s.backend.fwd.ForwarderDomain,
-		spfStatusOf(s.remoteIP, s.from),
-		s.from,
-	)
 	sealed, err := arc.Seal(raw, arc.SealOptions{
 		Domain:      s.backend.fwd.ForwarderDomain,
 		Selector:    d.DKIMSelector,
 		Key:         key,
-		AuthResults: authResults,
+		AuthResults: s.auth.Value(s.backend.fwd.ForwarderDomain),
 	})
 	if err != nil {
 		log.Printf("smtp: ARC seal: %v", err)
 		return raw
 	}
 	return sealed
-}
-
-// spfStatusOf is a very small SPF-result shim: we have not run a
-// fresh SPF check at this point in the pipeline (the spam.Pipeline
-// already ran one but does not return the result to us). For now we
-// emit "none" — receivers learn the SPF status from the envelope on
-// their side. A future change should plumb spam.Pipeline's per-
-// envelope verdict into AAR.
-func spfStatusOf(remoteIP, mailFrom string) string {
-	_ = remoteIP
-	_ = mailFrom
-	return "none"
 }
 
 // parseRSAKeyPEM decodes a PEM-encoded PKCS#1 RSA private key — the
@@ -528,7 +670,9 @@ func parseRSAKeyPEM(pemKey string) (*rsa.PrivateKey, error) {
 // the incoming message. The returned folder replaces the spam-
 // pipeline default; if drop is true the message is dropped entirely.
 // If the account has no script or the script fails to parse, the
-// default folder is used and the message is delivered.
+// default folder is used and the message is delivered. Quarantine is
+// the server's verdict, not a filing preference: a fileinto does not
+// move a message out of Junk, though the user may still discard it.
 func (s *session) sieveDecide(acctID uint64, in store.IncomingMessage, defaultFolder string) (folder string, drop bool) {
 	script, err := s.backend.store.GetSieveScript(acctID)
 	if err != nil || script == nil || script.Source == "" {
@@ -551,25 +695,24 @@ func (s *session) sieveDecide(acctID uint64, in store.IncomingMessage, defaultFo
 	// Action precedence: an explicit Discard wins; otherwise the
 	// last FileInto wins; otherwise the default folder.
 	folder = defaultFolder
-	chose := false
 	for _, a := range actions {
 		switch v := a.(type) {
 		case sieve.Discard:
 			return "", true
 		case sieve.FileInto:
-			folder = v.Mailbox
-			chose = true
+			if defaultFolder != junkFolder {
+				folder = v.Mailbox
+			}
 		}
 	}
-	_ = chose
 	return folder, false
 }
 
-// fireVacationReplies asks every local recipient's configured
-// vacation rule whether it wants to reply, and queues the replies.
-// Suppressor stops re-replying to the same sender within the window.
-func (s *session) fireVacationReplies(raw []byte) {
-	for acctID := range s.rcptAccts {
+// fireVacationReplies asks the configured vacation rule of each given
+// account whether it wants to reply, and queues the replies. Suppressor
+// stops re-replying to the same sender within the rule's window.
+func (s *session) fireVacationReplies(raw []byte, accounts []uint64) {
+	for _, acctID := range accounts {
 		v, err := s.backend.store.GetVacation(acctID)
 		if err != nil || v == nil || !v.Enabled {
 			continue
@@ -581,7 +724,8 @@ func (s *session) fireVacationReplies(raw []byte) {
 		if !vacation.ShouldReply(raw, s.from, []string{acc.Address}) {
 			continue
 		}
-		if !s.backend.suppressor.Allow(acctID, s.from, time.Now()) {
+		suppressor := s.backend.suppressor
+		if !suppressor.AllowWithin(acctID, s.from, time.Now(), suppressor.WindowOf(v.SuppressDays)) {
 			continue
 		}
 		messageID := randomMessageID(acc.Address)
@@ -622,6 +766,7 @@ func (s *session) Reset() {
 	s.rcptAddrs = nil
 	s.rcptAccts = nil
 	s.rcptRemote = nil
+	s.auth = spam.AuthResult{}
 }
 
 // Logout releases the session. There is nothing connection-scoped to
@@ -633,6 +778,8 @@ func verdictLabel(v spam.Verdict) string {
 	switch v {
 	case spam.Greylist:
 		return "greylist"
+	case spam.RateLimited:
+		return "ratelimit"
 	case spam.Reject:
 		return "reject"
 	case spam.Quarantine:

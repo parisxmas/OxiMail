@@ -79,7 +79,7 @@ func normaliseFolderName(s string) (string, error) {
 func (s *Server) handleCreateMailbox(w http.ResponseWriter, r *http.Request, acc *store.Account) {
 	var req folderRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err)
 		return
 	}
 	name, err := normaliseFolderName(req.Name)
@@ -140,7 +140,7 @@ func (s *Server) handleRenameMailbox(w http.ResponseWriter, r *http.Request, acc
 	}
 	var req folderRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err)
 		return
 	}
 	newName, err := normaliseFolderName(req.Name)
@@ -374,16 +374,20 @@ func messageHasAttachment(raw []byte) bool {
 // the parsed body.
 type messageDetail struct {
 	messageSummary
-	To          []string         `json:"to"`
-	Cc          []string         `json:"cc"`
-	MessageID   string           `json:"message_id"`
-	Text        string           `json:"text"`
-	HTML        string           `json:"html"`
-	Attachments []attachmentInfo `json:"attachments"`
+	To        []string `json:"to"`
+	Cc        []string `json:"cc"`
+	MessageID string   `json:"message_id"`
+	Text      string   `json:"text"`
+	HTML      string   `json:"html"` // sanitised, see sanitizeHTML
+	// RemoteImages is true when the HTML references remote images,
+	// whether or not this response includes them.
+	RemoteImages bool             `json:"remote_images"`
+	Attachments  []attachmentInfo `json:"attachments"`
 }
 
 // handleGetMessage returns one message with its body parsed into text,
-// HTML, and an attachment listing.
+// sanitised HTML, and an attachment listing. Remote images are left out
+// of the HTML unless the request says ?images=1.
 func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request, acc *store.Account) {
 	m, ok := s.loadOwnedMessage(w, r, acc)
 	if !ok {
@@ -395,6 +399,7 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request, acc *s
 		return
 	}
 	body := renderBody(raw)
+	cleanHTML, remoteImages := sanitizeHTML(body.HTML, r.URL.Query().Get("images") == "1")
 
 	writeJSON(w, http.StatusOK, messageDetail{
 		messageSummary: summarize(m),
@@ -402,7 +407,8 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request, acc *s
 		Cc:             body.Cc,
 		MessageID:      m.MessageID,
 		Text:           body.Text,
-		HTML:           body.HTML,
+		HTML:           cleanHTML,
+		RemoteImages:   remoteImages,
 		Attachments:    body.Attachments,
 	})
 }
@@ -422,7 +428,7 @@ func (s *Server) handleFlags(w http.ResponseWriter, r *http.Request, acc *store.
 	}
 	var req flagsRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err)
 		return
 	}
 	var err error
@@ -462,7 +468,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, acc *store.A
 	}
 	var req moveRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err)
 		return
 	}
 	dest, err := s.store.GetMailboxByName(acc.ID, req.Mailbox)
@@ -518,13 +524,10 @@ func (s *Server) handleAttachment(w http.ResponseWriter, r *http.Request, acc *s
 		writeError(w, http.StatusNotFound, "no such attachment")
 		return
 	}
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
 	if filename == "" {
 		filename = "attachment"
 	}
-	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Type", attachmentContentType(contentType))
 	w.Header().Set("Content-Length", strconv.Itoa(len(content)))
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, filename))
 	_, _ = w.Write(content)
@@ -585,7 +588,7 @@ type sendResponse struct {
 func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, acc *store.Account) {
 	var req sendRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err)
 		return
 	}
 	recipients, err := collectRecipients(req.To, req.Cc)
@@ -626,6 +629,10 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request, acc *store.A
 	routed, err := s.store.Route(acc.Address, recipients, in)
 	if err != nil {
 		log.Printf("webmail: send from %s: %v", acc.Address, err)
+		if errors.Is(err, store.ErrQuotaExceeded) {
+			writeError(w, http.StatusInsufficientStorage, "a recipient's mailbox is full")
+			return
+		}
 		writeError(w, http.StatusBadGateway, "could not send message")
 		return
 	}
@@ -657,7 +664,7 @@ type draftRequest struct {
 func (s *Server) handleSaveDraft(w http.ResponseWriter, r *http.Request, acc *store.Account) {
 	var req draftRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err)
 		return
 	}
 	drafts, err := s.store.GetMailboxByName(acc.ID, "Drafts")
@@ -692,15 +699,20 @@ func (s *Server) handleSaveDraft(w http.ResponseWriter, r *http.Request, acc *st
 	}
 	// Overwriting an existing draft: delete the old document first so
 	// the user sees one (newer) entry in Drafts rather than many.
+	saved, err := s.store.AppendMessage(acc.ID, drafts.ID, in)
+	if err != nil {
+		if errors.Is(err, store.ErrQuotaExceeded) {
+			writeError(w, http.StatusInsufficientStorage, "your mailbox is full")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not save draft")
+		return
+	}
+	// The old draft goes only once the new one is safe.
 	if req.ID != 0 {
 		if prev, err := s.store.GetMessage(acc.ID, req.ID); err == nil && prev.AccountID == acc.ID && prev.MailboxID == drafts.ID {
 			_ = s.store.DeleteMessage(acc.ID, prev.ID)
 		}
-	}
-	saved, err := s.store.AppendMessage(acc.ID, drafts.ID, in)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not save draft")
-		return
 	}
 	writeJSON(w, http.StatusOK, summarize(saved))
 }

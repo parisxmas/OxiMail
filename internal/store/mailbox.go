@@ -3,6 +3,8 @@ package store
 import (
 	"fmt"
 	"time"
+
+	"github.com/parisxmas/OxiMail/internal/notifier"
 )
 
 // Mailbox is an IMAP folder belonging to an account. It carries the
@@ -142,27 +144,40 @@ func (s *Store) EnsureDefaultMailboxes(accountID uint64) error {
 	return nil
 }
 
-// DeleteMailbox removes a mailbox and every message in it. The body
-// blobs go first — orphaned blobs are wasted disk, but a message
-// document pointing at a missing blob is a broken read.
+// DeleteMailbox removes a mailbox and every message in it. Each message
+// goes through removeMessage, so a body shared with a copy in another
+// folder survives and the expunge log covers whatever this call managed
+// to remove if it stops part-way. All the removals share one bumped
+// mod-sequence: to a QRESYNC client they are a single change.
 func (s *Store) DeleteMailbox(accountID, mailboxID uint64) error {
-	msgs, err := s.db.Find(MessagesColl(accountID), map[string]any{"mailbox_id": mailboxID}, nil)
-	if err != nil && !isMissingCollection(err) {
-		return fmt.Errorf("store: delete mailbox %d: list messages: %w", mailboxID, err)
+	msgs, err := s.ListMessages(accountID, mailboxID)
+	if err != nil {
+		return fmt.Errorf("store: delete mailbox %d: %w", mailboxID, err)
 	}
-	for _, m := range msgs {
-		if key, ok := m["body_blob"].(string); ok && key != "" {
-			if err := s.db.DeleteObject(BlobBucket, key); err != nil {
-				return fmt.Errorf("store: delete mailbox %d: remove body %q: %w", mailboxID, key, err)
-			}
+	var modSeq uint64
+	if len(msgs) > 0 {
+		if modSeq, err = s.NextModSeq(accountID, mailboxID); err != nil {
+			return fmt.Errorf("store: delete mailbox %d: %w", mailboxID, err)
 		}
 	}
-	if _, err := s.db.Delete(MessagesColl(accountID), map[string]any{"mailbox_id": mailboxID}); err != nil {
-		return fmt.Errorf("store: delete mailbox %d: remove messages: %w", mailboxID, err)
+	var freed int64
+	for i := range msgs {
+		removed, err := s.removeMessage(accountID, &msgs[i], modSeq)
+		if err != nil {
+			s.addUsedBytes(accountID, -freed)
+			return fmt.Errorf("store: delete mailbox %d: %w", mailboxID, err)
+		}
+		if removed {
+			freed += msgs[i].SizeBytes
+		}
 	}
+	s.addUsedBytes(accountID, -freed)
 	if _, err := s.db.Delete(MailboxesColl(accountID), map[string]any{"_id": mailboxID}); err != nil {
 		return fmt.Errorf("store: delete mailbox %d: remove mailbox: %w", mailboxID, err)
 	}
+	// Sessions in other connections that have this mailbox selected
+	// reconcile to empty.
+	notifier.Default.Notify(mailboxID)
 	return nil
 }
 
@@ -214,7 +229,7 @@ func (s *Store) SetMailboxSubscribed(accountID, mailboxID uint64, subscribed boo
 // burns that UID; IMAP explicitly tolerates gaps in the UID sequence, so
 // that is harmless.
 func (s *Store) NextUID(accountID, mailboxID uint64) (uint32, error) {
-	doc, err := s.db.FindAndModify(
+	doc, err := s.db.AllocCounter(
 		MailboxesColl(accountID),
 		map[string]any{"_id": mailboxID},
 		map[string]any{"$inc": map[string]any{"uidnext": 1}},
@@ -320,7 +335,7 @@ func (s *Store) Stats(accountID, mailboxID uint64) (MailboxStats, error) {
 // integer that never decreases. Burning one on a crash is harmless,
 // same as for UID.
 func (s *Store) NextModSeq(accountID, mailboxID uint64) (uint64, error) {
-	doc, err := s.db.FindAndModify(
+	doc, err := s.db.AllocCounter(
 		MailboxesColl(accountID),
 		map[string]any{"_id": mailboxID},
 		map[string]any{"$inc": map[string]any{"highest_modseq": 1}},

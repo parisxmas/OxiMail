@@ -1,15 +1,20 @@
 package smtp
 
 import (
+	"bytes"
 	"crypto/tls"
+	"errors"
 	"io"
 	"log"
+	"strings"
+	"time"
 
 	"github.com/emersion/go-sasl"
 	gosmtp "github.com/emersion/go-smtp"
 
 	"github.com/parisxmas/OxiMail/internal/observability"
 	"github.com/parisxmas/OxiMail/internal/ratelimit"
+	"github.com/parisxmas/OxiMail/internal/spam"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
@@ -21,6 +26,16 @@ var errAuthRequired = &gosmtp.SMTPError{
 	Message:      "Authentication required",
 }
 
+// errSenderRefused is returned when a client tries to send as an
+// address that is not its own. The outbound queue DKIM-signs by the
+// From domain, so this check is what stops one account from signing
+// mail as any other user of any hosted domain.
+var errSenderRefused = &gosmtp.SMTPError{
+	Code:         550,
+	EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
+	Message:      "Sender address does not belong to the authenticated account",
+}
+
 // NewSubmission builds the mail submission server (RFC 6409) bound to
 // `addr` — conventionally port 587. Unlike the inbound MX, every client
 // must authenticate; and it relays — recipients that are local mailboxes
@@ -30,7 +45,7 @@ var errAuthRequired = &gosmtp.SMTPError{
 // an encrypted connection. With no TLS configured at all, cleartext
 // AUTH is permitted so the server still works for local development.
 func NewSubmission(addr, hostname string, st *store.Store, tlsConfig *tls.Config) *Server {
-	be := &submissionBackend{store: st, limiter: ratelimit.NewDefault()}
+	be := &submissionBackend{hostname: hostname, store: st, limiter: ratelimit.NewDefault()}
 	srv := newServer(addr, hostname, be, tlsConfig)
 	srv.AllowInsecureAuth = tlsConfig == nil
 	return &Server{name: "submission", addr: addr, srv: srv}
@@ -47,14 +62,17 @@ func NewSubmissionTLS(addr, hostname string, st *store.Store, tlsConfig *tls.Con
 }
 
 type submissionBackend struct {
-	store   *store.Store
-	limiter *ratelimit.Limiter
+	hostname string
+	store    *store.Store
+	limiter  *ratelimit.Limiter
 }
 
 func (b *submissionBackend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
 	return &submissionSession{
+		hostname: b.hostname,
 		store:    b.store,
 		limiter:  b.limiter,
+		conn:     c,
 		remoteIP: remoteIPOf(c.Conn()),
 	}, nil
 }
@@ -63,8 +81,10 @@ func (b *submissionBackend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
 // server. go-smtp serializes the calls for one connection, so the
 // fields need no locking.
 type submissionSession struct {
+	hostname string
 	store    *store.Store
 	limiter  *ratelimit.Limiter
+	conn     *gosmtp.Conn
 	remoteIP string
 
 	account *store.Account // set by Auth; nil until the client authenticates
@@ -109,15 +129,42 @@ func (s *submissionSession) Auth(string) (sasl.Server, error) {
 	}), nil
 }
 
-// Mail records the envelope sender. The client must have authenticated.
+// Mail records the envelope sender. The client must have authenticated,
+// and the sender must be its own. A null sender is refused: it means a
+// bounce, which a mail client has no business submitting, and nothing
+// could ever bounce back from it.
 func (s *submissionSession) Mail(from string, _ *gosmtp.MailOptions) error {
 	if s.account == nil {
 		return errAuthRequired
 	}
-	// TODO: enforce that `from` is the account's own address or an alias
-	// it owns; for now an authenticated user may set any envelope sender.
+	if from == "" {
+		return errSenderRefused
+	}
+	if err := s.checkSender(from); err != nil {
+		return err
+	}
 	s.from = from
 	return nil
+}
+
+// checkSender returns nil if address is the authenticated account's own
+// or an alias that resolves to it.
+func (s *submissionSession) checkSender(address string) error {
+	if strings.EqualFold(address, s.account.Address) {
+		return nil
+	}
+	dests, err := s.store.ResolveDestinations(address)
+	if err != nil {
+		log.Printf("submission: resolve sender %q: %v", address, err)
+		return tempError("Temporary local problem, please try again later")
+	}
+	for _, id := range dests.LocalAccounts {
+		if id == s.account.ID {
+			return nil
+		}
+	}
+	log.Printf("submission: %s refused as sender for account %s", address, s.account.Address)
+	return errSenderRefused
 }
 
 // Rcpt records an envelope recipient. The submission server relays, so
@@ -141,15 +188,36 @@ func (s *submissionSession) Data(r io.Reader) error {
 		return tempError("Error reading message data")
 	}
 
+	// MAIL FROM was checked at Mail; what recipients see, and what DKIM
+	// signs for, is the From header. Every address in it must pass, and
+	// a message without a readable one cannot be vouched for at all.
+	addrs, err := spam.FromAddresses(raw)
+	if err != nil {
+		log.Printf("submission: unusable From header from %s: %v", s.account.Address, err)
+		return errSenderRefused
+	}
+	for _, addr := range addrs {
+		if err := s.checkSender(addr); err != nil {
+			return err
+		}
+	}
+
+	var stamped bytes.Buffer
+	stamped.WriteString(receivedHeader(s.hostname, s.conn, s.remoteIP, true, time.Now()))
+	stamped.Write(raw)
+
 	subject, messageID, fromAddr := parseHeaders(raw)
 	routed, err := s.store.Route(s.from, s.rcpts, store.IncomingMessage{
-		Raw:       raw,
+		Raw:       stamped.Bytes(),
 		MessageID: messageID,
 		Subject:   subject,
 		FromAddr:  fromAddr,
 	})
 	if err != nil {
 		log.Printf("submission: routing message from %s: %v", s.account.Address, err)
+		if errors.Is(err, store.ErrQuotaExceeded) {
+			return mailboxFull()
+		}
 		return tempError("Temporary delivery failure, please try again later")
 	}
 

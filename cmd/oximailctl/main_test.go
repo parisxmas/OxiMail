@@ -12,6 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/parisxmas/OxiDB/go/oxidb"
 
 	"github.com/parisxmas/OxiMail/internal/itest"
 	"github.com/parisxmas/OxiMail/internal/store"
@@ -408,6 +411,150 @@ func TestCLI(t *testing.T) {
 		}
 		if _, err := st.GetDomain("ephemeral.test"); !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("domain still present after delete: err = %v", err)
+		}
+	})
+}
+
+// TestBackupRestoreFidelity covers what the plain round-trip above does
+// not: account state, aliases, and a backup with a message body missing.
+func TestBackupRestoreFidelity(t *testing.T) {
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+	t.Setenv("OXIMAIL_OXIDB_HOST", host)
+	t.Setenv("OXIMAIL_OXIDB_PORT", strconv.Itoa(port))
+	cli := func(args ...string) (string, int) {
+		var out bytes.Buffer
+		code := run(args, strings.NewReader("pw\n"), &out, &out)
+		return out.String(), code
+	}
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	raw, err := oxidb.Connect(host, port, 5*time.Second)
+	if err != nil {
+		t.Fatalf("raw connect: %v", err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+
+	provision := func(t *testing.T, address string) (*store.Account, *store.Mailbox) {
+		t.Helper()
+		if out, code := cli("account", "add", address); code != 0 {
+			t.Fatalf("account add: code=%d out=%q", code, out)
+		}
+		acc, err := st.GetAccount(address)
+		if err != nil {
+			t.Fatalf("get account: %v", err)
+		}
+		inbox, err := st.GetMailboxByName(acc.ID, "INBOX")
+		if err != nil {
+			t.Fatalf("get INBOX: %v", err)
+		}
+		return acc, inbox
+	}
+	seed := func(t *testing.T, acc *store.Account, mb *store.Mailbox, subject string) *store.Message {
+		t.Helper()
+		msg, err := st.AppendMessage(acc.ID, mb.ID, store.IncomingMessage{
+			Raw: []byte("Subject: " + subject + "\r\n\r\nbody\r\n"), Subject: subject,
+		})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		return msg
+	}
+
+	t.Run("account state and aliases come back", func(t *testing.T) {
+		acc, inbox := provision(t, "state@example.test")
+		msg := seed(t, acc, inbox, "counted")
+		if err := st.RestoreAccountState(acc.ID, "Ada Lovelace", false); err != nil {
+			t.Fatalf("set state: %v", err)
+		}
+		if _, err := st.CreateAlias("ada@example.test", []string{acc.Address}); err != nil {
+			t.Fatalf("create alias: %v", err)
+		}
+		if _, err := st.CreateAlias("other@example.test", []string{"someone@elsewhere.test"}); err != nil {
+			t.Fatalf("create alias: %v", err)
+		}
+
+		tarPath := t.TempDir() + "/state.tar"
+		if out, code := cli("backup", acc.Address, tarPath); code != 0 {
+			t.Fatalf("backup: code=%d out=%q", code, out)
+		}
+		if out, code := cli("account", "delete", acc.Address); code != 0 {
+			t.Fatalf("account delete: code=%d out=%q", code, out)
+		}
+		for _, alias := range []string{"ada@example.test", "other@example.test"} {
+			if err := st.DeleteAlias(alias); err != nil {
+				t.Fatalf("delete alias: %v", err)
+			}
+		}
+		if out, code := cli("restore", tarPath); code != 0 {
+			t.Fatalf("restore: code=%d out=%q", code, out)
+		}
+
+		got, err := st.GetAccount(acc.Address)
+		if err != nil {
+			t.Fatalf("get restored account: %v", err)
+		}
+		if got.DisplayName != "Ada Lovelace" {
+			t.Errorf("DisplayName = %q", got.DisplayName)
+		}
+		if got.Active {
+			t.Error("inactive account came back active")
+		}
+		if got.UsedBytes != msg.SizeBytes {
+			t.Errorf("UsedBytes = %d, want %d", got.UsedBytes, msg.SizeBytes)
+		}
+		al, err := st.GetAlias("ada@example.test")
+		if err != nil {
+			t.Fatalf("alias not restored: %v", err)
+		}
+		if len(al.Destinations) != 1 || al.Destinations[0] != acc.Address {
+			t.Errorf("alias destinations = %v", al.Destinations)
+		}
+		if _, err := st.GetAlias("other@example.test"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("unrelated alias came back: err = %v", err)
+		}
+	})
+
+	t.Run("missing body fails loudly but restores the rest", func(t *testing.T) {
+		acc, inbox := provision(t, "gap@example.test")
+		kept := seed(t, acc, inbox, "kept")
+		lost := seed(t, acc, inbox, "lost")
+		if err := raw.DeleteObject(store.BlobBucket, lost.BodyBlob); err != nil {
+			t.Fatalf("damage blob: %v", err)
+		}
+
+		tarPath := t.TempDir() + "/gap.tar"
+		out, code := cli("backup", acc.Address, tarPath)
+		if code == 0 || !strings.Contains(out, "backup incomplete") {
+			t.Fatalf("backup with a lost body: code=%d out=%q", code, out)
+		}
+		if out, code := cli("account", "delete", acc.Address); code != 0 {
+			t.Fatalf("account delete: code=%d out=%q", code, out)
+		}
+
+		out, code = cli("restore", tarPath)
+		if code == 0 || !strings.Contains(out, "restore incomplete: 1 messages skipped") {
+			t.Fatalf("restore with a lost body: code=%d out=%q", code, out)
+		}
+		got, err := st.GetAccount(acc.Address)
+		if err != nil {
+			t.Fatalf("get restored account: %v", err)
+		}
+		mb, err := st.GetMailboxByName(got.ID, "INBOX")
+		if err != nil {
+			t.Fatalf("get INBOX: %v", err)
+		}
+		msgs, err := st.ListMessages(got.ID, mb.ID)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(msgs) != 1 || msgs[0].Subject != "kept" {
+			t.Fatalf("restored INBOX = %+v, want just the readable message", msgs)
+		}
+		if got.UsedBytes != kept.SizeBytes {
+			t.Errorf("UsedBytes = %d, want %d (the skipped message must not count)", got.UsedBytes, kept.SizeBytes)
 		}
 	})
 }

@@ -21,6 +21,8 @@ import (
 //   account.json     — the full account document, including the
 //                      bcrypt password hash so a restored account
 //                      logs in with the original credentials.
+//   aliases.json     — optional, the aliases that forward to this
+//                      account.
 //   vacation.json    — optional, the rule.
 //   sieve.txt        — optional, the script source.
 //   mailboxes/<name>.json
@@ -66,7 +68,6 @@ func (c *cmdContext) backup(args []string) int {
 	}
 	defer f.Close()
 	tw := tar.NewWriter(f)
-	defer tw.Close()
 
 	mailboxes, err := c.store.ListMailboxes(acc.ID)
 	if err != nil {
@@ -84,6 +85,17 @@ func (c *cmdContext) backup(args []string) int {
 	// account.json
 	if err := tarJSON(tw, "account.json", acc); err != nil {
 		return c.fail("%v", err)
+	}
+
+	// aliases.json (optional)
+	aliases, err := aliasesOf(c.store, acc.Address)
+	if err != nil {
+		return c.fail("%v", err)
+	}
+	if len(aliases) > 0 {
+		if err := tarJSON(tw, "aliases.json", aliases); err != nil {
+			return c.fail("%v", err)
+		}
 	}
 
 	// vacation.json (optional)
@@ -131,10 +143,12 @@ func (c *cmdContext) backup(args []string) int {
 	}
 
 	// blobs/<key>
+	missing := 0
 	for key := range seenBlobs {
 		body, err := c.store.FetchBody(&store.Message{BodyBlob: key})
 		if err != nil {
 			fmt.Fprintf(c.stderr, "oximailctl: skip missing blob %q: %v\n", key, err)
+			missing++
 			continue
 		}
 		if err := tarFile(tw, "blobs/"+key, body); err != nil {
@@ -146,9 +160,33 @@ func (c *cmdContext) backup(args []string) int {
 	if err := tarJSON(tw, "manifest.json", manifest); err != nil {
 		return c.fail("%v", err)
 	}
+	if err := tw.Close(); err != nil {
+		return c.fail("finish %q: %v", dest, err)
+	}
 	fmt.Fprintf(c.stdout, "backed up %s → %s (%d mailboxes, %d messages, %d blobs)\n",
 		acc.Address, dest, manifest.Mailboxes, manifest.Messages, manifest.Blobs)
+	if missing > 0 {
+		return c.fail("backup incomplete: %d message bodies could not be read", missing)
+	}
 	return 0
+}
+
+// aliasesOf returns the aliases with address among their destinations.
+func aliasesOf(st *store.Store, address string) ([]store.Alias, error) {
+	all, err := st.ListAliases()
+	if err != nil {
+		return nil, err
+	}
+	var out []store.Alias
+	for _, al := range all {
+		for _, dest := range al.Destinations {
+			if strings.EqualFold(dest, address) {
+				out = append(out, al)
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 func (c *cmdContext) restore(args []string) int {
@@ -166,6 +204,7 @@ func (c *cmdContext) restore(args []string) int {
 	// per-account; even a fat mailbox is small enough to buffer.
 	var (
 		account      *store.Account
+		aliases      []store.Alias
 		vacation     *store.Vacation
 		sieveSource  string
 		mailboxFiles []backupMailboxFile
@@ -197,6 +236,10 @@ func (c *cmdContext) restore(args []string) int {
 				return c.fail("parse account.json: %v", err)
 			}
 			account = &acc
+		case hdr.Name == "aliases.json":
+			if err := json.Unmarshal(body, &aliases); err != nil {
+				return c.fail("parse aliases.json: %v", err)
+			}
 		case hdr.Name == "vacation.json":
 			var v store.Vacation
 			if err := json.Unmarshal(body, &v); err != nil {
@@ -234,6 +277,9 @@ func (c *cmdContext) restore(args []string) int {
 	if err != nil {
 		return c.fail("create account: %v", err)
 	}
+	if err := c.store.RestoreAccountState(newAcc.ID, account.DisplayName, account.Active); err != nil {
+		return c.fail("%v", err)
+	}
 
 	// Mailboxes — preserve UIDValidity / UIDNext / HighestModSeq.
 	mbIDByName := map[string]uint64{}
@@ -249,8 +295,11 @@ func (c *cmdContext) restore(args []string) int {
 
 	// Messages — for each unique blob_key, the first occurrence
 	// writes the bytes; subsequent occurrences just bump the
-	// refcount. Track seenKeys across the whole restore.
+	// refcount. Track seenKeys across the whole restore. A message
+	// whose blob is not in the backup is skipped so the rest still
+	// comes back; the run then ends with a failure summary.
 	seenKeys := map[string]bool{}
+	skipped := 0
 	for i := range mailboxFiles {
 		mf := mailboxFiles[i]
 		newMboxID, ok := mbIDByName[mf.Mailbox.Name]
@@ -263,6 +312,7 @@ func (c *cmdContext) restore(args []string) int {
 			body, ok := blobs[msg.BodyBlob]
 			if !ok {
 				fmt.Fprintf(c.stderr, "oximailctl: blob %q for message UID=%d missing from backup; skipping\n", msg.BodyBlob, msg.UID)
+				skipped++
 				continue
 			}
 			newBlob := !seenKeys[msg.BodyBlob]
@@ -270,6 +320,25 @@ func (c *cmdContext) restore(args []string) int {
 				return c.fail("restore message UID=%d in %q: %v", msg.UID, mf.Mailbox.Name, err)
 			}
 			seenKeys[msg.BodyBlob] = true
+		}
+	}
+
+	// used_bytes comes from what was actually restored, not the backed
+	// up figure, which would count any skipped message.
+	if _, err := c.store.RecountUsedBytes(newAcc.ID); err != nil {
+		return c.fail("%v", err)
+	}
+
+	// Aliases. An alias that exists by now wins over the backup's copy:
+	// deleting an account leaves its aliases in place.
+	for _, al := range aliases {
+		if _, err := c.store.GetAlias(al.Address); err == nil {
+			continue
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return c.fail("%v", err)
+		}
+		if _, err := c.store.CreateAlias(al.Address, al.Destinations); err != nil {
+			return c.fail("restore alias %q: %v", al.Address, err)
 		}
 	}
 
@@ -287,6 +356,9 @@ func (c *cmdContext) restore(args []string) int {
 
 	fmt.Fprintf(c.stdout, "restored %s from %s (%d mailboxes, %d blobs)\n",
 		newAcc.Address, src, len(mailboxFiles), len(seenKeys))
+	if skipped > 0 {
+		return c.fail("restore incomplete: %d messages skipped, their bodies are not in the backup", skipped)
+	}
 	return 0
 }
 

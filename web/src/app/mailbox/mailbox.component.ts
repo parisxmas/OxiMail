@@ -25,6 +25,7 @@ import {
 
 import { ApiService } from '../api.service';
 import { ComposeComponent, ComposeSeed } from '../compose/compose.component';
+import { MailFrameComponent } from './mail-frame.component';
 import {
   FLAG_FLAGGED,
   FLAG_SEEN,
@@ -76,7 +77,7 @@ interface UndoState {
 
 @Component({
   selector: 'oximail-mailbox',
-  imports: [DatePipe, ComposeComponent, RouterLink, LucideAngularModule],
+  imports: [DatePipe, ComposeComponent, MailFrameComponent, RouterLink, LucideAngularModule],
   template: `
     <div
       class="app"
@@ -398,10 +399,13 @@ interface UndoState {
                 @if (isExpanded(cm.id)) {
                   <div class="conv-card-body">
                     @if (cm.html) {
-                      <!-- Angular sanitizes [innerHTML]; a production
-                           client should render email HTML in a sandboxed
-                           iframe with a strict CSP. -->
-                      <div class="html-body" [innerHTML]="cm.html"></div>
+                      @if (cm.remote_images && !cm.images_shown) {
+                        <div class="images-blocked">
+                          <span>Remote images are hidden so the sender cannot tell you opened this.</span>
+                          <button type="button" (click)="showImages(cm)">Show images</button>
+                        </div>
+                      }
+                      <oximail-mail-frame [html]="cm.html" [showImages]="!!cm.images_shown" />
                     } @else if (cm.text) {
                       <pre class="text-body">{{ cm.text }}</pre>
                     } @else {
@@ -1157,31 +1161,35 @@ interface UndoState {
     /* Body — readable. We deliberately keep the column width
        generous (max-width on the body element) so prose doesn't
        run edge to edge. */
-    .html-body, .text-body {
+    .text-body {
       max-width: 72ch;
       color: var(--text);
       font-size: var(--text-md);
       line-height: 1.6;
-    }
-    .text-body {
       font-family: var(--font-ui);
       white-space: pre-wrap;
       margin: 0;
     }
-    .html-body :where(p) { margin: 0 0 12px; }
-    .html-body :where(blockquote) {
-      border-left: 2px solid var(--border);
-      padding-left: 12px;
-      margin: 12px 0;
+
+    /* Shown above an HTML body whose remote images are held back. */
+    .images-blocked {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
       color: var(--text-muted);
-    }
-    .html-body :where(a) { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
-    .html-body :where(pre, code) {
-      font-family: var(--font-mono);
       font-size: 12.5px;
-      background: var(--bg-muted);
-      padding: 0 4px;
-      border-radius: 3px;
+    }
+    .images-blocked button {
+      flex: none;
+      padding: 4px 12px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: transparent;
+      color: var(--accent);
+      font: inherit;
+      cursor: pointer;
     }
 
     /* Attachments block — lives outside conv-card-body so it can
@@ -1532,6 +1540,17 @@ export class MailboxComponent implements OnInit, OnDestroy {
         this.downloading.set(-1);
       },
       error: () => this.downloading.set(-1),
+    });
+  }
+
+  // showImages refetches one message with its remote images included.
+  // It applies to that message only, and lasts until it is reopened.
+  showImages(msg: MessageDetail): void {
+    this.api.message(msg.id, true).subscribe({
+      next: (full) =>
+        this.openThreadDetails.update((list) =>
+          list.map((m) => (m.id === msg.id ? { ...m, html: full.html, images_shown: true } : m)),
+        ),
     });
   }
 

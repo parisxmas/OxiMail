@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"time"
 
@@ -45,8 +46,9 @@ type IncomingMessage struct {
 }
 
 // newBlobKey returns a fresh, unique key for a body blob. Bodies are not
-// content-addressed: two identical messages get two blobs, so deleting
-// one never affects the other (no reference counting needed).
+// content-addressed: two identical deliveries get two blobs. A blob is
+// only shared through CopyMessage, which is what the refcounts in
+// blobrefs.go track.
 func newBlobKey() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -55,27 +57,81 @@ func newBlobKey() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// AppendMessage stores a message into a mailbox: it writes the body to
-// the blob store, allocates an IMAP UID, inserts the metadata document,
-// and updates the account's used-bytes counter.
+// CheckQuota returns ErrQuotaExceeded if adding size bytes would take
+// the account past its quota (0 means unlimited).
 //
-// Ordering is chosen to minimize residue on a partial failure: a UID is
-// allocated first (a burned UID is harmless — IMAP tolerates gaps), then
-// the body blob, then the document; if the document insert fails the
-// blob is removed, so no orphan is left.
+// This is a read followed later by the caller's write, not a
+// reservation, so concurrent deliveries can each pass the check and
+// overshoot the quota by up to their combined size. That is accepted:
+// the next delivery is refused, and a precise check would put a
+// cross-account write on the path of every message.
+func (s *Store) CheckQuota(accountID uint64, size int64) error {
+	acc, err := s.GetAccountByID(accountID)
+	if err != nil {
+		return err
+	}
+	if acc.QuotaBytes > 0 && acc.UsedBytes+size > acc.QuotaBytes {
+		return ErrQuotaExceeded
+	}
+	return nil
+}
+
+// addUsedBytes adjusts the account's used-bytes counter. Best-effort:
+// the message change has already happened, so a counter that drifts is
+// not worth failing it over. find_and_modify keeps the increment atomic.
+func (s *Store) addUsedBytes(accountID uint64, delta int64) {
+	if delta == 0 {
+		return
+	}
+	_, _ = s.db.FindAndModify(
+		CollAccounts,
+		map[string]any{"_id": accountID},
+		map[string]any{"$inc": map[string]any{"used_bytes": delta}},
+	)
+}
+
+// assignUID allocates a UID and mod-sequence in a mailbox and runs write,
+// which must make the message visible under them, all while holding the
+// mailbox's UID lock.
+//
+// IMAP clients track "everything below UIDNEXT has been seen", so a UID
+// must not become visible before a lower one. Holding the lock across
+// allocation and write gives that order for everything in this process;
+// the slow body upload stays outside it. Writers in another process
+// (oximailctl) are not covered, which is why the IMAP refresh still
+// accepts a late lower UID.
+func (s *Store) assignUID(accountID, mailboxID uint64, write func(uid uint32, modSeq uint64) error) error {
+	mu := &s.uidLocks[(accountID*31+mailboxID)%uidLockStripes]
+	mu.Lock()
+	defer mu.Unlock()
+	uid, err := s.NextUID(accountID, mailboxID)
+	if err != nil {
+		return err
+	}
+	modSeq, err := s.NextModSeq(accountID, mailboxID)
+	if err != nil {
+		return err
+	}
+	return write(uid, modSeq)
+}
+
+// AppendMessage stores a message into a mailbox: it checks the quota,
+// writes the body to the blob store, allocates an IMAP UID, inserts the
+// metadata document, and updates the account's used-bytes counter. It
+// returns ErrQuotaExceeded (test with errors.Is) if the message does
+// not fit.
+//
+// The body goes first so that the UID is allocated as late as possible
+// (see assignUID). A failure after that point discards the blob and its
+// refcount row, so no orphan is left; at worst a UID is burned, and IMAP
+// tolerates gaps.
 func (s *Store) AppendMessage(accountID, mailboxID uint64, in IncomingMessage) (*Message, error) {
 	mb, err := s.GetMailbox(accountID, mailboxID)
 	if err != nil {
 		return nil, fmt.Errorf("store: append to mailbox %d: %w", mailboxID, err)
 	}
-
-	uid, err := s.NextUID(accountID, mailboxID)
-	if err != nil {
-		return nil, err
-	}
-	modSeq, err := s.NextModSeq(accountID, mailboxID)
-	if err != nil {
-		return nil, err
+	if err := s.CheckQuota(mb.AccountID, int64(len(in.Raw))); err != nil {
+		return nil, fmt.Errorf("store: append to mailbox %d: %w", mailboxID, err)
 	}
 
 	key, err := newBlobKey()
@@ -86,7 +142,7 @@ func (s *Store) AppendMessage(accountID, mailboxID uint64, in IncomingMessage) (
 		return nil, fmt.Errorf("store: append to mailbox %d: store body: %w", mailboxID, err)
 	}
 	if err := s.blobAddRef(key); err != nil {
-		_ = s.db.DeleteObject(BlobBucket, key)
+		s.discardBlob(key)
 		return nil, err
 	}
 
@@ -97,7 +153,6 @@ func (s *Store) AppendMessage(accountID, mailboxID uint64, in IncomingMessage) (
 	msg := &Message{
 		MailboxID:    mailboxID,
 		AccountID:    mb.AccountID,
-		UID:          uid,
 		BodyBlob:     key,
 		SizeBytes:    int64(len(in.Raw)),
 		Flags:        in.Flags,
@@ -106,38 +161,38 @@ func (s *Store) AppendMessage(accountID, mailboxID uint64, in IncomingMessage) (
 		Subject:      in.Subject,
 		FromAddr:     in.FromAddr,
 		ReceivedAt:   nowRFC3339(),
-		ModSeq:       modSeq,
 	}
 	if msg.Flags == nil {
 		msg.Flags = []string{}
 	}
-	doc, err := encodeDoc(msg)
+	err = s.assignUID(accountID, mailboxID, func(uid uint32, modSeq uint64) error {
+		msg.UID, msg.ModSeq = uid, modSeq
+		return s.insertMessage(msg)
+	})
 	if err != nil {
-		_ = s.db.DeleteObject(BlobBucket, key)
-		return nil, err
-	}
-	resp, err := s.db.Insert(MessagesColl(mb.AccountID), doc)
-	if err != nil {
-		_ = s.db.DeleteObject(BlobBucket, key) // no orphan blob
-		return nil, fmt.Errorf("store: append to mailbox %d: insert message: %w", mailboxID, err)
-	}
-	if msg.ID, err = insertedID(resp); err != nil {
-		_ = s.db.DeleteObject(BlobBucket, key)
-		return nil, err
+		s.discardBlob(key) // no orphan blob or ref row
+		return nil, fmt.Errorf("store: append to mailbox %d: %w", mailboxID, err)
 	}
 
-	// Account usage accounting — best-effort: the message is already
-	// delivered, so a counter that drifts is not worth failing the
-	// append over. find_and_modify keeps the increment atomic.
-	_, _ = s.db.FindAndModify(
-		CollAccounts,
-		map[string]any{"_id": mb.AccountID},
-		map[string]any{"$inc": map[string]any{"used_bytes": msg.SizeBytes}},
-	)
+	s.addUsedBytes(mb.AccountID, msg.SizeBytes)
 	// Wake any IMAP sessions IDLE'ing on this mailbox so they emit an
 	// unsolicited EXISTS for the new arrival.
 	notifier.Default.Notify(mailboxID)
 	return msg, nil
+}
+
+// insertMessage inserts msg's document and records the id OxiDB gave it.
+func (s *Store) insertMessage(msg *Message) error {
+	doc, err := encodeDoc(msg)
+	if err != nil {
+		return err
+	}
+	resp, err := s.db.Insert(MessagesColl(msg.AccountID), doc)
+	if err != nil {
+		return fmt.Errorf("insert message: %w", err)
+	}
+	msg.ID, err = insertedID(resp)
+	return err
 }
 
 // Deliver is the common "deliver to INBOX" path.
@@ -181,21 +236,28 @@ func (s *Store) DeliverTo(accountID uint64, folder string, in IncomingMessage) (
 // each have their own _id sequence, so the same numeric id can exist
 // in two different accounts' messages collections.
 func (s *Store) GetMessage(accountID, id uint64) (*Message, error) {
+	msg, _, err := s.getMessageVersioned(accountID, id)
+	return msg, err
+}
+
+// getMessageVersioned is GetMessage plus the document's `_version`, for
+// a compare-and-swap update. The version is nil if the document has none.
+func (s *Store) getMessageVersioned(accountID, id uint64) (*Message, any, error) {
 	m, err := s.db.FindOne(MessagesColl(accountID), map[string]any{"_id": id})
 	if err != nil {
 		if isMissingCollection(err) {
-			return nil, ErrNotFound
+			return nil, nil, ErrNotFound
 		}
-		return nil, fmt.Errorf("store: get message %d (account %d): %w", id, accountID, err)
+		return nil, nil, fmt.Errorf("store: get message %d (account %d): %w", id, accountID, err)
 	}
 	if m == nil {
-		return nil, ErrNotFound
+		return nil, nil, ErrNotFound
 	}
 	var msg Message
 	if err := decodeDoc(m, &msg); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return &msg, nil
+	return &msg, m["_version"], nil
 }
 
 // ListMessages returns a mailbox's messages, ordered by ascending UID.
@@ -230,75 +292,88 @@ func (s *Store) FetchBody(m *Message) ([]byte, error) {
 
 // SetFlags replaces a message's IMAP flags wholesale (IMAP STORE FLAGS).
 func (s *Store) SetFlags(accountID, messageID uint64, flags []string) error {
-	if flags == nil {
-		flags = []string{}
-	}
-	return s.modifyFlags(accountID, messageID, func(set map[string]any) {
-		set["flags"] = flags
-	})
+	_, err := s.UpdateFlags(accountID, messageID, 0, func([]string) []string { return flags })
+	return err
 }
 
 // AddFlags adds flags to a message (IMAP STORE +FLAGS).
 func (s *Store) AddFlags(accountID, messageID uint64, flags ...string) error {
-	msg, err := s.GetMessage(accountID, messageID)
-	if err != nil {
-		return err
-	}
-	merged := unionStrings(msg.Flags, flags)
-	return s.modifyFlags(accountID, messageID, func(set map[string]any) {
-		set["flags"] = merged
+	_, err := s.UpdateFlags(accountID, messageID, 0, func(cur []string) []string {
+		return unionStrings(cur, flags)
 	})
+	return err
 }
 
 // RemoveFlags removes flags from a message (IMAP STORE -FLAGS).
 func (s *Store) RemoveFlags(accountID, messageID uint64, flags ...string) error {
-	msg, err := s.GetMessage(accountID, messageID)
-	if err != nil {
-		return err
-	}
-	pruned := minusStrings(msg.Flags, flags)
-	return s.modifyFlags(accountID, messageID, func(set map[string]any) {
-		set["flags"] = pruned
+	_, err := s.UpdateFlags(accountID, messageID, 0, func(cur []string) []string {
+		return minusStrings(cur, flags)
 	})
+	return err
 }
 
-// modifyFlags applies a flag update atomically via find_and_modify
-// AND stamps a fresh mod-sequence (RFC 7162) so concurrent STORE
-// commands on the same message cannot lose a change and CONDSTORE
-// clients see every transition reflected in MODSEQ.
+// maxFlagAttempts bounds UpdateFlags' retry loop. Each lost round means
+// some other writer's update landed, so this only runs out when that
+// many writers hit one message at once.
+const maxFlagAttempts = 64
+
+// UpdateFlags applies mutate to a message's stored flags and stamps a
+// fresh mod-sequence (RFC 7162), returning the message as stored.
 //
-// We use $set with the post-mutation flag list (computed by the
-// caller) rather than $addToSet / $pull so that the new modseq and
-// the new flag value land in one find_and_modify call. OxiDB does
-// not promise atomicity across multiple operators in a single
-// document update.
-func (s *Store) modifyFlags(accountID, messageID uint64, build func(set map[string]any)) error {
-	msg, err := s.GetMessage(accountID, messageID)
-	if err != nil {
-		return err
+// The read and the write are tied together by a compare-and-swap on the
+// document's `_version`: find_and_modify only matches if nobody wrote
+// the document since the read, otherwise the whole step is redone on
+// the newer flags. So concurrent STORE commands on one message cannot
+// lose a change, and a message's mod-sequence never moves backwards.
+// mutate may run more than once. A lost round burns a mod-sequence,
+// which is harmless.
+//
+// A non-zero unchangedSince makes the update conditional (UNCHANGEDSINCE):
+// if the stored mod-sequence is past it, ErrModified is returned and
+// nothing changes.
+func (s *Store) UpdateFlags(accountID, messageID, unchangedSince uint64, mutate func(flags []string) []string) (*Message, error) {
+	for attempt := 0; attempt < maxFlagAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(min(attempt, 10)) * time.Millisecond)
+		}
+		msg, version, err := s.getMessageVersioned(accountID, messageID)
+		if err != nil {
+			return nil, err
+		}
+		if unchangedSince != 0 && msg.ModSeq > unchangedSince {
+			return nil, ErrModified
+		}
+		flags := mutate(msg.Flags)
+		if flags == nil {
+			flags = []string{}
+		}
+		modSeq, err := s.NextModSeq(accountID, msg.MailboxID)
+		if err != nil {
+			return nil, err
+		}
+		query := map[string]any{"_id": messageID}
+		if version != nil {
+			query["_version"] = version
+		}
+		doc, err := s.db.FindAndModify(
+			MessagesColl(accountID),
+			query,
+			map[string]any{"$set": map[string]any{"flags": flags, "modseq": modSeq}},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("store: modify flags of message %d: %w", messageID, err)
+		}
+		if len(doc) == 0 {
+			continue // lost the race, or deleted: the next read tells which
+		}
+		msg.Flags, msg.ModSeq = flags, modSeq
+		// Wake IMAP sessions IDLE'ing on this mailbox so they can
+		// surface the flag change (cross-connection STORE → FETCH
+		// FLAGS unilateral update).
+		notifier.Default.Notify(msg.MailboxID)
+		return msg, nil
 	}
-	modSeq, err := s.NextModSeq(accountID, msg.MailboxID)
-	if err != nil {
-		return err
-	}
-	set := map[string]any{"modseq": modSeq}
-	build(set)
-	doc, err := s.db.FindAndModify(
-		MessagesColl(accountID),
-		map[string]any{"_id": messageID},
-		map[string]any{"$set": set},
-	)
-	if err != nil {
-		return fmt.Errorf("store: modify flags of message %d: %w", messageID, err)
-	}
-	// Wake IMAP sessions IDLE'ing on this mailbox so they can
-	// surface the flag change (cross-connection STORE → FETCH
-	// FLAGS unilateral update).
-	notifier.Default.Notify(msg.MailboxID)
-	if doc == nil {
-		return ErrNotFound
-	}
-	return nil
+	return nil, fmt.Errorf("store: modify flags of message %d: too many concurrent updates", messageID)
 }
 
 // unionStrings returns a + b with duplicates removed (a's order
@@ -339,8 +414,9 @@ func minusStrings(a, b []string) []string {
 // MoveMessage moves a message into another of the same account's
 // mailboxes, allocating a fresh UID in the destination (IMAP UIDs are
 // per-mailbox). The body blob is untouched — only the document's
-// mailbox and UID change. It backs the webmail "move" action and, in
-// time, IMAP MOVE.
+// mailbox and UID change. It backs the webmail "move" action and IMAP
+// MOVE. To the source mailbox a move is an expunge, so it is logged like
+// one for QRESYNC clients that are offline when it happens.
 func (s *Store) MoveMessage(accountID, messageID, destMailboxID uint64) (*Message, error) {
 	msg, err := s.GetMessage(accountID, messageID)
 	if err != nil {
@@ -357,36 +433,46 @@ func (s *Store) MoveMessage(accountID, messageID, destMailboxID uint64) (*Messag
 		return nil, fmt.Errorf("store: move message %d: destination mailbox belongs to another account", messageID)
 	}
 
-	uid, err := s.NextUID(accountID, destMailboxID)
+	srcMailbox, srcUID := msg.MailboxID, msg.UID
+	srcModSeq, err := s.NextModSeq(accountID, srcMailbox)
 	if err != nil {
 		return nil, err
 	}
-	modSeq, err := s.NextModSeq(accountID, destMailboxID)
+	// Log first, as in removeMessage.
+	logged := s.logExpunge(accountID, srcMailbox, srcUID, srcModSeq)
+
+	err = s.assignUID(accountID, destMailboxID, func(uid uint32, modSeq uint64) error {
+		// Matching on the source mailbox makes a concurrent move of the
+		// same message lose cleanly instead of moving it twice.
+		doc, err := s.db.FindAndModify(
+			MessagesColl(accountID),
+			map[string]any{"_id": messageID, "mailbox_id": srcMailbox},
+			map[string]any{"$set": map[string]any{
+				"mailbox_id": destMailboxID,
+				"uid":        uid,
+				"modseq":     modSeq,
+			}},
+		)
+		if err != nil {
+			return fmt.Errorf("store: move message %d: %w", messageID, err)
+		}
+		if len(doc) == 0 {
+			return ErrNotFound
+		}
+		msg.UID, msg.ModSeq = uid, modSeq
+		return nil
+	})
 	if err != nil {
+		if logged {
+			s.unrecordExpunge(accountID, srcMailbox, srcUID, srcModSeq)
+		}
 		return nil, err
 	}
-	doc, err := s.db.FindAndModify(
-		MessagesColl(accountID),
-		map[string]any{"_id": messageID},
-		map[string]any{"$set": map[string]any{
-			"mailbox_id": destMailboxID,
-			"uid":        uid,
-			"modseq":     modSeq,
-		}},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("store: move message %d: %w", messageID, err)
-	}
-	if doc == nil {
-		return nil, ErrNotFound
-	}
+	msg.MailboxID = destMailboxID
 	// Notify both ends: the destination gained a message, the source
 	// lost one.
 	notifier.Default.Notify(destMailboxID)
-	notifier.Default.Notify(msg.MailboxID)
-	msg.MailboxID = destMailboxID
-	msg.UID = uid
-	msg.ModSeq = modSeq
+	notifier.Default.Notify(srcMailbox)
 	return msg, nil
 }
 
@@ -396,8 +482,12 @@ func (s *Store) MoveMessage(accountID, messageID, destMailboxID uint64) (*Messag
 // via blobBumpRef. IMAP flags, internal date, and header metadata
 // carry over; the destination gets a fresh UID and mod-sequence.
 //
+// Quota is per message document, so a copy counts its full size even
+// though the bytes are shared; DeleteMessage gives the same amount back
+// for each document. Returns ErrQuotaExceeded if the copy does not fit.
+//
 // The blob is only physically removed when the LAST referrer is
-// deleted (see DeleteMessage → blobDropRef).
+// deleted (see removeMessage → blobDropRef).
 func (s *Store) CopyMessage(accountID, messageID, destMailboxID uint64) (*Message, error) {
 	src, err := s.GetMessage(accountID, messageID)
 	if err != nil {
@@ -410,27 +500,19 @@ func (s *Store) CopyMessage(accountID, messageID, destMailboxID uint64) (*Messag
 	if dest.AccountID != src.AccountID {
 		return nil, fmt.Errorf("store: copy message %d: destination mailbox belongs to another account", messageID)
 	}
+	if err := s.CheckQuota(src.AccountID, src.SizeBytes); err != nil {
+		return nil, fmt.Errorf("store: copy message %d: %w", messageID, err)
+	}
 
 	// Bump the source blob's refcount before we insert the new
 	// metadata doc. On any later failure we drop it back down.
 	if _, err := s.blobBumpRef(src.BodyBlob); err != nil {
 		return nil, fmt.Errorf("store: copy message %d: %w", messageID, err)
 	}
-	uid, err := s.NextUID(accountID, destMailboxID)
-	if err != nil {
-		_, _ = s.blobDropRef(src.BodyBlob)
-		return nil, err
-	}
-	modSeq, err := s.NextModSeq(accountID, destMailboxID)
-	if err != nil {
-		_, _ = s.blobDropRef(src.BodyBlob)
-		return nil, err
-	}
 
 	dst := &Message{
 		MailboxID:    destMailboxID,
 		AccountID:    src.AccountID,
-		UID:          uid,
 		BodyBlob:     src.BodyBlob,
 		SizeBytes:    src.SizeBytes,
 		Flags:        append([]string(nil), src.Flags...),
@@ -439,25 +521,19 @@ func (s *Store) CopyMessage(accountID, messageID, destMailboxID uint64) (*Messag
 		Subject:      src.Subject,
 		FromAddr:     src.FromAddr,
 		ReceivedAt:   nowRFC3339(),
-		ModSeq:       modSeq,
 	}
 	if dst.Flags == nil {
 		dst.Flags = []string{}
 	}
-	doc, err := encodeDoc(dst)
+	err = s.assignUID(accountID, destMailboxID, func(uid uint32, modSeq uint64) error {
+		dst.UID, dst.ModSeq = uid, modSeq
+		return s.insertMessage(dst)
+	})
 	if err != nil {
 		_, _ = s.blobDropRef(src.BodyBlob)
-		return nil, err
+		return nil, fmt.Errorf("store: copy message %d: %w", messageID, err)
 	}
-	resp, err := s.db.Insert(MessagesColl(src.AccountID), doc)
-	if err != nil {
-		_, _ = s.blobDropRef(src.BodyBlob)
-		return nil, fmt.Errorf("store: copy message %d: insert: %w", messageID, err)
-	}
-	if dst.ID, err = insertedID(resp); err != nil {
-		_, _ = s.blobDropRef(src.BodyBlob)
-		return nil, err
-	}
+	s.addUsedBytes(src.AccountID, dst.SizeBytes)
 	notifier.Default.Notify(destMailboxID)
 	return dst, nil
 }
@@ -471,7 +547,7 @@ func (s *Store) CopyMessage(accountID, messageID, destMailboxID uint64) (*Messag
 //
 // The _id field on msg is ignored; OxiDB assigns a fresh one. The
 // account's used_bytes counter is NOT updated — callers should run
-// a fresh quota accounting pass after a restore.
+// RecountUsedBytes after a restore.
 func (s *Store) RestoreMessage(msg *Message, body []byte, newBlob bool) (*Message, error) {
 	clone := *msg
 	clone.ID = 0
@@ -486,7 +562,7 @@ func (s *Store) RestoreMessage(msg *Message, body []byte, newBlob bool) (*Messag
 			return nil, fmt.Errorf("store: restore message: write blob %q: %w", clone.BodyBlob, err)
 		}
 		if err := s.blobAddRef(clone.BodyBlob); err != nil {
-			_ = s.db.DeleteObject(BlobBucket, clone.BodyBlob)
+			s.discardBlob(clone.BodyBlob)
 			return nil, err
 		}
 	} else {
@@ -514,11 +590,8 @@ func (s *Store) RestoreMessage(msg *Message, body []byte, newBlob bool) (*Messag
 	return &clone, nil
 }
 
-// DeleteMessage removes a message: the metadata document first, then its
-// body blob (an orphaned blob is just wasted disk; a document pointing
-// at a missing blob would be a broken read). The account's used-bytes
-// counter is decremented best-effort, and the (UID, mod-seq) pair is
-// appended to the expunge log so QRESYNC clients can later resync.
+// DeleteMessage removes a message: see removeMessage for the order. The
+// account's used-bytes counter is decremented best-effort.
 func (s *Store) DeleteMessage(accountID, id uint64) error {
 	msg, err := s.GetMessage(accountID, id)
 	if err != nil {
@@ -531,27 +604,61 @@ func (s *Store) DeleteMessage(accountID, id uint64) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.db.Delete(MessagesColl(accountID), map[string]any{"_id": id}); err != nil {
-		return fmt.Errorf("store: delete message %d: %w", id, err)
+	removed, err := s.removeMessage(accountID, msg, modSeq)
+	if err != nil {
+		return err
+	}
+	if removed {
+		s.addUsedBytes(msg.AccountID, -msg.SizeBytes)
+	}
+	notifier.Default.Notify(msg.MailboxID)
+	return nil
+}
+
+// removeMessage is the one way a message document goes away: expunge
+// log row, then the document, then the body reference.
+//
+// The log row comes first so a crash cannot lose it; a crash right after
+// it reports a UID as vanished while the message survives, which costs a
+// client one re-sync of a message that was on its way out anyway. An
+// orderly failure to remove the document withdraws the row. The document
+// goes before the blob because an orphaned blob is just wasted disk,
+// while a document pointing at a missing blob is a broken read.
+//
+// The bool reports whether this call removed the document. When a
+// concurrent delete got there first it is false and the reference is
+// left alone: dropping it again would take the count below the number
+// of surviving documents and destroy a body a copy still needs.
+func (s *Store) removeMessage(accountID uint64, msg *Message, modSeq uint64) (bool, error) {
+	logged := s.logExpunge(accountID, msg.MailboxID, msg.UID, modSeq)
+	resp, err := s.db.Delete(MessagesColl(accountID), map[string]any{"_id": msg.ID})
+	if err != nil {
+		if logged {
+			s.unrecordExpunge(accountID, msg.MailboxID, msg.UID, modSeq)
+		}
+		return false, fmt.Errorf("store: delete message %d: %w", msg.ID, err)
+	}
+	if n, ok := resp["deleted"].(float64); ok && n == 0 {
+		return false, nil
 	}
 	// Drop our refcount on the body; the blob is physically removed
 	// only when this was the last referrer (the common case — copies
 	// are rare). A failure here is logged but not fatal: the metadata
 	// doc is already gone and the blob is, at worst, leaked disk.
 	if _, err := s.blobDropRef(msg.BodyBlob); err != nil {
-		return fmt.Errorf("store: delete message %d: %w", id, err)
+		log.Printf("store: delete message %d: %v", msg.ID, err)
 	}
-	if err := s.recordExpunge(accountID, msg.MailboxID, msg.UID, modSeq); err != nil {
-		// A log gap means QRESYNC clients won't be told this UID
-		// went away — they'll discover it on their own. Log and
-		// move on; do not fail the delete.
-		_ = err
+	return true, nil
+}
+
+// logExpunge writes an expunge-log row and reports whether it landed.
+// A log gap means QRESYNC clients won't be told this UID went away —
+// they'll discover it on their own — so a failure is logged and does
+// not stop the removal.
+func (s *Store) logExpunge(accountID, mailboxID uint64, uid uint32, modSeq uint64) bool {
+	if err := s.recordExpunge(accountID, mailboxID, uid, modSeq); err != nil {
+		log.Printf("%v", err)
+		return false
 	}
-	_, _ = s.db.FindAndModify(
-		CollAccounts,
-		map[string]any{"_id": msg.AccountID},
-		map[string]any{"$inc": map[string]any{"used_bytes": -msg.SizeBytes}},
-	)
-	notifier.Default.Notify(msg.MailboxID)
-	return nil
+	return true
 }

@@ -267,24 +267,72 @@ func TestPipelineCheck(t *testing.T) {
 	p.rateLimit.now = clk.now
 	p.greylist.now = clk.now
 	p.dnsbl.lookup = notListed
+	dns := &fakeDNS{}
+	p.envelope = &envelopeChecker{resolver: dns, lookupTXT: dns.lookupTXT}
+	msg := envMsg("a@b.test")
 
 	// No connection info — the connection stage is skipped.
-	if v, _ := p.Check("", "a@b.test", []string{"x@local"}, nil); v != Accept {
+	if v, _ := p.Check("", "a@b.test", []string{"x@local"}, msg); v != Accept {
 		t.Fatalf("empty remoteIP = %v, want Accept", v)
 	}
 
 	// A fresh sender is greylisted, then accepted on a retry past the delay.
-	if v, _ := p.Check("9.9.9.9", "a@b.test", nil, nil); v != Greylist {
+	if v, _ := p.Check("9.9.9.9", "a@b.test", nil, msg); v != Greylist {
 		t.Fatalf("first contact = %v, want Greylist", v)
 	}
 	clk.advance(2 * time.Minute) // past defaultGreylistDelay
-	if v, _ := p.Check("9.9.9.9", "a@b.test", nil, nil); v != Accept {
+	if v, _ := p.Check("9.9.9.9", "a@b.test", nil, msg); v != Accept {
 		t.Fatalf("retry past the delay = %v, want Accept", v)
 	}
 
 	// A DNSBL-listed IP is rejected outright, before greylisting.
 	p.dnsbl.lookup = func(string) ([]string, error) { return []string{"127.0.0.2"}, nil }
-	if v, _ := p.Check("6.6.6.6", "a@b.test", nil, nil); v != Reject {
+	if v, _ := p.Check("6.6.6.6", "a@b.test", nil, msg); v != Reject {
 		t.Fatalf("DNSBL-listed IP = %v, want Reject", v)
+	}
+}
+
+// A client over the rate limit may simply come back later, so it must
+// get a temporary failure, not a permanent rejection.
+func TestRateLimitIsTemporary(t *testing.T) {
+	p := New([]string{}, 0)
+	p.rateLimit = newRateLimiter(1, time.Minute)
+
+	if v := p.CheckIP("9.9.9.9"); v != Accept {
+		t.Fatalf("first message = %v, want Accept", v)
+	}
+	if v := p.CheckIP("9.9.9.9"); v != RateLimited {
+		t.Fatalf("over the limit = %v, want RateLimited", v)
+	}
+}
+
+// The IP checks moved ahead of the body must not run again on the
+// message, or every message would count double.
+func TestCheckMessageDoesNotCountAgainstRateLimit(t *testing.T) {
+	p := New([]string{}, 0)
+	p.rateLimit = newRateLimiter(1, time.Minute)
+	dns := &fakeDNS{}
+	p.envelope = &envelopeChecker{resolver: dns, lookupTXT: dns.lookupTXT}
+
+	if v := p.CheckIP("9.9.9.9"); v != Accept {
+		t.Fatalf("CheckIP = %v, want Accept", v)
+	}
+	for i := 0; i < 3; i++ {
+		if v, _, _ := p.CheckMessage("9.9.9.9", "a@b.test", nil, envMsg("a@b.test")); v != Accept {
+			t.Fatalf("CheckMessage #%d = %v, want Accept", i, v)
+		}
+	}
+}
+
+// The check order is kept: a blocklisted client is turned away before
+// greylisting ever sees it.
+func TestCheckOrder(t *testing.T) {
+	p := New([]string{"bl.example"}, time.Minute)
+	p.dnsbl.lookup = func(string) ([]string, error) { return []string{"127.0.0.2"}, nil }
+	if v, _ := p.Check("6.6.6.6", "a@b.test", nil, envMsg("a@b.test")); v != Reject {
+		t.Fatalf("listed IP = %v, want Reject", v)
+	}
+	if len(p.greylist.tuples) != 0 {
+		t.Fatal("greylist ran for a client the blocklist had already refused")
 	}
 }

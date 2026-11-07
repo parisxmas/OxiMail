@@ -19,26 +19,26 @@ const bounceSubject = "Undelivered Mail Returned to Sender"
 // listing the recipients that could not be reached.
 //
 // It is a no-op for a message with a null envelope sender: never bounce
-// a bounce, or delivery-failure notices loop forever.
-func (q *Queue) bounce(m *store.OutboundMessage, original []byte, failures []rcptFailure) {
+// a bounce, or delivery-failure notices loop forever. A nil `original`
+// means the body is gone, and the report goes out without it.
+func (q *Queue) bounce(m *store.OutboundMessage, original []byte, failures []rcptFailure) error {
 	for _, f := range failures {
 		log.Printf("queue: message %d: %q permanently failed: %s", m.ID, f.recipient, f.reason)
 	}
 	if m.From == "" {
-		return
+		return nil
 	}
 
 	report := buildBounce(q.hostname, m.From, failures, original)
 	// Route the bounce with a null sender: a local original sender finds
 	// it in their INBOX, a remote one is enqueued — and if that enqueued
 	// bounce later fails, the null sender stops the loop here.
-	if _, err := q.store.Route("", []string{m.From}, store.IncomingMessage{
+	_, err := q.store.Route("", []string{m.From}, store.IncomingMessage{
 		Raw:      report,
 		Subject:  bounceSubject,
 		FromAddr: "MAILER-DAEMON@" + q.hostname,
-	}); err != nil {
-		log.Printf("queue: message %d: could not return a bounce to %s: %v", m.ID, m.From, err)
-	}
+	})
+	return err
 }
 
 // buildBounce assembles an RFC 3464 multipart/report delivery-status
@@ -66,15 +66,17 @@ func buildBounce(hostname, sender string, failures []rcptFailure, original []byt
 	for _, f := range failures {
 		fmt.Fprintf(status, "\r\nFinal-Recipient: rfc822; %s\r\n", f.recipient)
 		status.Write([]byte("Action: failed\r\n"))
-		status.Write([]byte("Status: 5.0.0\r\n"))
+		fmt.Fprintf(status, "Status: %s\r\n", dsnStatus(f.status))
 		fmt.Fprintf(status, "Diagnostic-Code: smtp; %s\r\n", oneLine(f.reason))
 	}
 
 	// The original message, so the sender can see and resend it.
-	orig, _ := mw.CreatePart(textproto.MIMEHeader{
-		"Content-Type": {"message/rfc822"},
-	})
-	orig.Write(original)
+	if original != nil {
+		orig, _ := mw.CreatePart(textproto.MIMEHeader{
+			"Content-Type": {"message/rfc822"},
+		})
+		orig.Write(original)
+	}
 
 	mw.Close()
 
@@ -90,6 +92,15 @@ func buildBounce(hostname, sender string, failures []rcptFailure, original []byt
 	msg.WriteString("\r\n")
 	msg.Write(parts.Bytes())
 	return msg.Bytes()
+}
+
+// dsnStatus is the Status field for a failed recipient. Action: failed
+// calls for a permanent class, whatever class the remote's code had.
+func dsnStatus(status string) string {
+	if status == "" {
+		return "5.0.0"
+	}
+	return "5" + status[1:]
 }
 
 // oneLine flattens a string to a single line, for use in a header value.

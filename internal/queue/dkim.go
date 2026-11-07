@@ -7,11 +7,11 @@ import (
 	"encoding/pem"
 	"errors"
 	"log"
-	"net/mail"
 	"strings"
 
 	"github.com/emersion/go-msgauth/dkim"
 
+	"github.com/parisxmas/OxiMail/internal/spam"
 	"github.com/parisxmas/OxiMail/internal/store"
 )
 
@@ -60,20 +60,18 @@ func parsePrivateKey(pemKey string) (*rsa.PrivateKey, error) {
 	return x509.ParsePKCS1PrivateKey(block.Bytes)
 }
 
-// fromHeaderDomain extracts the lower-cased domain of the message's From
-// header, or "" if it cannot be parsed.
+// fromHeaderDomain extracts the lower-cased domain of the message's
+// first From address, or "" if there is none. With several addresses
+// the first stands for the author: submission has checked them all.
 func fromHeaderDomain(raw []byte) string {
-	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	addrs, err := spam.FromAddresses(raw)
 	if err != nil {
 		return ""
 	}
-	addr, err := mail.ParseAddress(msg.Header.Get("From"))
-	if err != nil {
+	addr := addrs[0]
+	at := strings.LastIndexByte(addr, '@')
+	if at < 0 || at == len(addr)-1 {
 		return ""
 	}
-	at := strings.LastIndexByte(addr.Address, '@')
-	if at < 0 || at == len(addr.Address)-1 {
-		return ""
-	}
-	return strings.ToLower(addr.Address[at+1:])
+	return strings.ToLower(addr[at+1:])
 }

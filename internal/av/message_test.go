@@ -217,3 +217,73 @@ func mimePart(contentType, transferEncoding, body string) string {
 	}
 	return hdr + "\r\n" + body
 }
+
+// A message whose multipart frame breaks mid-walk follows the documented
+// fallback: scanned as raw bytes, not refused with a temporary error.
+func TestScanMessageFallsBackOnBrokenMultipart(t *testing.T) {
+	c := newClientWithBuiltin(t)
+	for name, raw := range map[string]string{
+		"no closing boundary": "From: a@b.test\r\nContent-Type: multipart/mixed; boundary=BB\r\n\r\n" +
+			"--BB\r\nContent-Type: text/plain\r\n\r\nclean, and the frame never closes",
+		"no boundary at all": "From: a@b.test\r\nContent-Type: multipart/mixed; boundary=BB\r\n\r\njust text\r\n",
+		"broken part header": "From: a@b.test\r\nContent-Type: multipart/mixed; boundary=BB\r\n\r\n" +
+			"--BB\r\nthis is not a header\r\n\r\nbody\r\n--BB--\r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			v, err := ScanMessage(context.Background(), c, []byte(raw))
+			if err != nil {
+				t.Fatalf("ScanMessage: %v, want the raw-scan fallback", err)
+			}
+			if !v.OK {
+				t.Errorf("verdict = %+v, want clean", v)
+			}
+		})
+	}
+}
+
+// The fallback must not be a way past the scanner: a whole payload in
+// a part whose frame is never closed is still seen.
+func TestScanMessageDetectsEicarInUnterminatedPart(t *testing.T) {
+	c := newClientWithBuiltin(t)
+	raw := "From: a@b.test\r\nContent-Type: multipart/mixed; boundary=BB\r\n\r\n" +
+		"--BB\r\nContent-Type: application/octet-stream\r\n\r\n" + eicarStr
+	v, err := ScanMessage(context.Background(), c, []byte(raw))
+	if err != nil {
+		t.Fatalf("ScanMessage: %v", err)
+	}
+	if v.OK {
+		t.Error("EICAR in an unterminated part should still hit")
+	}
+}
+
+// The fallback really hashes the raw bytes, even for a frame with no
+// parts at all, which the walk used to call clean without scanning.
+func TestScanMessageFallbackHashesRawBytes(t *testing.T) {
+	raw := "From: a@b.test\r\nContent-Type: multipart/mixed; boundary=BB\r\n\r\njust text\r\n"
+	sum := sha256.Sum256([]byte(raw))
+	sigdb := filepath.Join(t.TempDir(), "extra.sigdb")
+	if err := os.WriteFile(sigdb, []byte(hex.EncodeToString(sum[:])+":RawBlob\n"), 0o644); err != nil {
+		t.Fatalf("write sigdb: %v", err)
+	}
+	c, err := New(sigdb)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	v, err := ScanMessage(context.Background(), c, []byte(raw))
+	if err != nil {
+		t.Fatalf("ScanMessage: %v", err)
+	}
+	if v.OK || v.Threat != "RawBlob" {
+		t.Errorf("verdict = %+v, want a hit on RawBlob", v)
+	}
+}
+
+func TestScanMessageReportsCancellation(t *testing.T) {
+	c := newClientWithBuiltin(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	raw := buildMultipart("BB", mimePart("text/plain", "", "clean"))
+	if _, err := ScanMessage(ctx, c, []byte(raw)); err == nil {
+		t.Error("a cancelled scan must stay an error, not fall back")
+	}
+}

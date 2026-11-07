@@ -34,6 +34,16 @@ func (s *Store) recordExpunge(accountID, mailboxID uint64, uid uint32, modSeq ui
 	return nil
 }
 
+// unrecordExpunge withdraws a row whose removal then failed, so QRESYNC
+// clients are not told a surviving UID vanished. Best-effort.
+func (s *Store) unrecordExpunge(accountID, mailboxID uint64, uid uint32, modSeq uint64) {
+	_, _ = s.db.Delete(ExpungeLogColl(accountID), map[string]any{
+		"mailbox_id": mailboxID,
+		"uid":        uid,
+		"modseq":     modSeq,
+	})
+}
+
 // ExpungedSince returns the UIDs that have been expunged from a
 // mailbox with mod-sequence greater than sinceModSeq, ordered by UID.
 // Used by QRESYNC SELECT to populate VANISHED (EARLIER).

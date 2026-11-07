@@ -46,7 +46,7 @@ func (s *Server) handleGetVacation(w http.ResponseWriter, _ *http.Request, acc *
 func (s *Server) handlePutVacation(w http.ResponseWriter, r *http.Request, acc *store.Account) {
 	var req vacationRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err)
 		return
 	}
 	if req.Enabled && req.Body == "" {

@@ -50,8 +50,17 @@ func ScanMessage(ctx context.Context, c *Client, raw []byte) (Verdict, error) {
 		// behaviour rather than a silent skip.
 		return c.Scan(ctx, raw)
 	}
-	return scanMIMEPart(ctx, c, msg.Header.Get("Content-Type"), msg.Header.Get("Content-Transfer-Encoding"), msg.Body)
+	v, err := scanMIMEPart(ctx, c, msg.Header.Get("Content-Type"), msg.Header.Get("Content-Transfer-Encoding"), msg.Body)
+	if errors.Is(err, errMalformedMIME) {
+		return c.Scan(ctx, raw)
+	}
+	return v, err
 }
+
+// errMalformedMIME marks a MIME tree the walk could not finish. Parts
+// reached before the damage have been scanned; ScanMessage answers it
+// with the raw-bytes fallback, not a failure.
+var errMalformedMIME = errors.New("av: malformed MIME structure")
 
 // scanMIMEPart scans one part of a MIME tree. It dispatches on the
 // part's Content-Type: multipart/* drives recursion, anything else
@@ -77,11 +86,13 @@ func scanMIMEPart(ctx context.Context, c *Client, contentType, transferEncoding 
 		mr := multipart.NewReader(body, boundary)
 		for {
 			p, err := mr.NextPart()
-			if errors.Is(err, io.EOF) {
+			// Only a bare io.EOF is the closing boundary; a frame cut
+			// short comes back with the EOF wrapped.
+			if err == io.EOF {
 				return Verdict{OK: true}, nil
 			}
 			if err != nil {
-				return Verdict{}, fmt.Errorf("multipart walk: %w", err)
+				return Verdict{}, fmt.Errorf("%w: multipart walk: %v", errMalformedMIME, err)
 			}
 			v, err := scanMIMEPart(ctx, c,
 				p.Header.Get("Content-Type"),
@@ -98,10 +109,7 @@ func scanMIMEPart(ctx context.Context, c *Client, contentType, transferEncoding 
 	}
 
 	// Leaf part — read and decode.
-	data, err := io.ReadAll(io.LimitReader(body, maxScanPartBytes))
-	if err != nil {
-		return Verdict{}, fmt.Errorf("read part: %w", err)
-	}
+	data, readErr := io.ReadAll(io.LimitReader(body, maxScanPartBytes))
 	decoded, err := decodeBody(data, transferEncoding)
 	if err != nil {
 		// Bad encoding — hash what we got. A real attacker can't
@@ -109,7 +117,16 @@ func scanMIMEPart(ctx context.Context, c *Client, contentType, transferEncoding 
 		// underlying bytes still flow through.
 		decoded = data
 	}
-	return c.Scan(ctx, decoded)
+	v, err := c.Scan(ctx, decoded)
+	if err != nil || !v.OK {
+		return v, err
+	}
+	if readErr != nil {
+		// A part cut off by a missing boundary still gets hashed above;
+		// the file it carries may be whole.
+		return Verdict{}, fmt.Errorf("%w: read part: %v", errMalformedMIME, readErr)
+	}
+	return v, nil
 }
 
 // maxScanPartBytes is the per-part cap on bytes we read into memory

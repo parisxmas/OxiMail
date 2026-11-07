@@ -2,6 +2,7 @@ package imap
 
 import (
 	"bytes"
+	"errors"
 	"log"
 	"sort"
 	"sync"
@@ -33,12 +34,17 @@ type selectedMailbox struct {
 	tracker *imapserver.MailboxTracker
 	session *imapserver.SessionTracker
 
+	// highestModSeq is what SELECT reports, fixed when the snapshot is
+	// taken.
+	highestModSeq uint64
+
 	// mu guards msgs and uidNext. The session's own command goroutine
 	// and the background refresh goroutine both touch them.
 	mu      sync.Mutex
 	uidNext uint32
-	// msgs is the snapshot, ordered by ascending UID — so the slice
-	// index + 1 is the IMAP sequence number.
+	// msgs is the snapshot; the slice index + 1 is the IMAP sequence
+	// number. It is ordered by ascending UID, except for the rare late
+	// arrival refresh appends (see there).
 	msgs []store.Message
 
 	sub  *notifier.Subscription
@@ -52,17 +58,18 @@ func newSelectedMailbox(st *store.Store, mb *store.Mailbox) (*selectedMailbox, e
 	}
 	tracker := imapserver.NewMailboxTracker(uint32(len(msgs)))
 	m := &selectedMailbox{
-		store:       st,
-		accountID:   mb.AccountID,
-		dbID:        mb.ID,
-		name:        mb.Name,
-		uidNext:     mb.UIDNext,
-		uidValidity: mb.UIDValidity,
-		tracker:     tracker,
-		session:     tracker.NewSession(),
-		msgs:        msgs,
-		sub:         notifier.Default.Subscribe(mb.ID),
-		done:        make(chan struct{}),
+		store:         st,
+		accountID:     mb.AccountID,
+		dbID:          mb.ID,
+		name:          mb.Name,
+		uidNext:       mb.UIDNext,
+		uidValidity:   mb.UIDValidity,
+		highestModSeq: highestModSeq(mb, msgs),
+		tracker:       tracker,
+		session:       tracker.NewSession(),
+		msgs:          msgs,
+		sub:           notifier.Default.Subscribe(mb.ID),
+		done:          make(chan struct{}),
 	}
 	go m.watch()
 	return m, nil
@@ -79,8 +86,8 @@ func (m *selectedMailbox) Close() {
 // mailbox, and reconciles the snapshot — handling three deltas so an
 // IDLE'ing client sees the full picture:
 //
-//  1. New arrivals (UID >= uidNext, not yet in the snapshot) are
-//     appended and an EXISTS is queued.
+//  1. New arrivals (any UID not yet in the snapshot) are appended and
+//     an EXISTS is queued.
 //  2. Snapshot UIDs missing from the latest list — i.e. expunged by
 //     another connection — are removed and EXPUNGE is queued.
 //  3. Snapshot messages whose mod-sequence has advanced past our
@@ -104,8 +111,13 @@ func (m *selectedMailbox) watch() {
 
 // refresh re-lists the mailbox and applies the three deltas described
 // on watch(). Held under m.mu so any session command runs against a
-// consistent snapshot.
+// consistent snapshot. The list itself happens under the lock too: a
+// list taken before one of this session's own EXPUNGE or MOVE commands
+// would otherwise bring the removed message back as a new arrival.
 func (m *selectedMailbox) refresh() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	latest, err := m.store.ListMessages(m.accountID, m.dbID)
 	if err != nil {
 		log.Printf("imap: refresh mailbox %d: %v", m.dbID, err)
@@ -115,9 +127,6 @@ func (m *selectedMailbox) refresh() {
 	for i := range latest {
 		latestByUID[latest[i].UID] = &latest[i]
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	// (2) Cross-connection EXPUNGE: snapshot UIDs that no longer
 	// exist. Walk back-to-front so the lower indices stay valid as
@@ -148,13 +157,20 @@ func (m *selectedMailbox) refresh() {
 		m.tracker.QueueMessageFlags(seqNum, imap.UID(local.UID), toIMAPFlags(local.Flags), nil)
 	}
 
-	// (1) New arrivals.
+	// (1) New arrivals. A UID below uidNext can still be new: the store
+	// orders its own writers (see store.assignUID) but not another
+	// process, whose lower UID can land after a higher one was seen.
+	// It goes on the end, out of UID order for the rest of this session,
+	// because a slot in the middle would silently renumber every later
+	// message under a client that has already seen their sequence
+	// numbers. The next SELECT sorts it back into place.
+	known := make(map[uint32]bool, len(m.msgs))
+	for i := range m.msgs {
+		known[m.msgs[i].UID] = true
+	}
 	added := false
 	for i := range latest {
-		if latest[i].UID < m.uidNext {
-			continue
-		}
-		if containsUID(m.msgs, latest[i].UID) {
+		if known[latest[i].UID] {
 			continue
 		}
 		m.msgs = append(m.msgs, latest[i])
@@ -197,20 +213,20 @@ func (m *selectedMailbox) selectData() *imap.SelectData {
 		UIDNext:           imap.UID(m.uidNext),
 		UIDValidity:       m.uidValidity,
 		FirstUnseenSeqNum: m.firstUnseenSeqNumLocked(),
-		HighestModSeq:     m.highestModSeqLocked(),
+		HighestModSeq:     m.highestModSeq,
 	}
 }
 
-// highestModSeqLocked returns the highest mod-sequence across the
-// snapshot. The mailbox-level counter is the authoritative number,
-// but for the SELECT reply we use the snapshot's max so it matches
-// what subsequent FETCH responses will report. The caller must hold
-// m.mu.
-func (m *selectedMailbox) highestModSeqLocked() uint64 {
-	var max uint64
-	for i := range m.msgs {
-		if m.msgs[i].ModSeq > max {
-			max = m.msgs[i].ModSeq
+// highestModSeq returns the mailbox's HIGHESTMODSEQ. The mailbox-level
+// counter is the authoritative number: unlike the snapshot's max it
+// counts expunges, so it cannot go down between SELECTs (RFC 7162
+// §3.1.2.1). The snapshot is listed after the counter is read and may
+// be slightly ahead of it, hence the max.
+func highestModSeq(mb *store.Mailbox, msgs []store.Message) uint64 {
+	max := mb.HighestModSeq
+	for i := range msgs {
+		if msgs[i].ModSeq > max {
+			max = msgs[i].ModSeq
 		}
 	}
 	return max
@@ -358,7 +374,13 @@ func (m *selectedMailbox) fetch(w *imapserver.FetchWriter, numSet imap.NumSet, o
 		}
 	}
 
-	var ferr error
+	needBody := options.Envelope ||
+		options.BodyStructure != nil ||
+		len(options.BodySection) > 0 ||
+		len(options.BinarySection) > 0 ||
+		len(options.BinarySectionSize) > 0
+
+	var ferr, bodyErr error
 	m.forEach(numSet, func(seqNum uint32, msg *store.Message) {
 		if ferr != nil {
 			return
@@ -370,24 +392,43 @@ func (m *selectedMailbox) fetch(w *imapserver.FetchWriter, numSet imap.NumSet, o
 		if options.ChangedSince != 0 && msg.ModSeq <= options.ChangedSince {
 			return
 		}
+		// The body must be in hand before CreateMessage: from that call
+		// until FetchResponseWriter.Close the connection's encoder mutex
+		// is held, and the tagged reply needs it. It also keeps \Seen
+		// off a message the client never got to read. An unreadable body
+		// fails this message only; the rest of the set is still served
+		// and the command ends NO.
+		var raw []byte
+		if needBody {
+			var err error
+			if raw, err = m.store.FetchBody(msg); err != nil {
+				log.Printf("imap: fetch mailbox %d UID %d: %v", m.dbID, msg.UID, err)
+				bodyErr = &imap.Error{
+					Type: imap.StatusResponseTypeNo,
+					Code: imap.ResponseCodeUnavailable,
+					Text: "Some message bodies could not be read",
+				}
+				return
+			}
+		}
 		if markSeen && !hasFlag(msg.Flags, string(imap.FlagSeen)) {
-			if err := m.store.AddFlags(m.accountID, msg.ID, string(imap.FlagSeen)); err != nil {
+			updated, err := m.store.UpdateFlags(m.accountID, msg.ID, 0, func(cur []string) []string {
+				return unionFlags(cur, []string{string(imap.FlagSeen)})
+			})
+			if err != nil {
 				ferr = err
 				return
 			}
-			msg.Flags = append(msg.Flags, string(imap.FlagSeen))
-			// AddFlags bumped the message's mod-seq; the local copy
-			// has the previous value. Refresh by re-reading from the
-			// store so subsequent WriteModSeq emits the new value.
-			if fresh, err := m.store.GetMessage(m.accountID, msg.ID); err == nil {
-				msg.ModSeq = fresh.ModSeq
-			}
+			msg.Flags, msg.ModSeq = updated.Flags, updated.ModSeq
 			m.tracker.QueueMessageFlags(seqNum, imap.UID(msg.UID), toIMAPFlags(msg.Flags), nil)
 		}
 		rw := w.CreateMessage(m.session.EncodeSeqNum(seqNum))
-		ferr = m.writeMessage(rw, msg, options)
+		ferr = m.writeMessage(rw, msg, raw, options)
 	})
-	return ferr
+	if ferr != nil {
+		return ferr
+	}
+	return bodyErr
 }
 
 // emitVanishedSince writes "* VANISHED (EARLIER) <uids>" for every UID
@@ -422,9 +463,19 @@ func (m *selectedMailbox) emitVanishedSince(w *imapserver.FetchWriter, want imap
 	return w.WriteVanished(matched)
 }
 
-// writeMessage writes one message's requested FETCH items. The raw body
-// is read from the blob store only if some requested item needs it.
-func (m *selectedMailbox) writeMessage(w *imapserver.FetchResponseWriter, msg *store.Message, options *imap.FetchOptions) error {
+// writeMessage writes one message's requested FETCH items and closes w.
+// It closes w on every path: an unclosed FetchResponseWriter keeps the
+// connection's encoder mutex locked, and the session then hangs waiting
+// to send the tagged reply. raw is the body, nil if no item needs it.
+func (m *selectedMailbox) writeMessage(w *imapserver.FetchResponseWriter, msg *store.Message, raw []byte, options *imap.FetchOptions) error {
+	err := m.writeItems(w, msg, raw, options)
+	if cerr := w.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+func (m *selectedMailbox) writeItems(w *imapserver.FetchResponseWriter, msg *store.Message, raw []byte, options *imap.FetchOptions) error {
 	w.WriteUID(imap.UID(msg.UID))
 	if options.Flags {
 		w.WriteFlags(toIMAPFlags(msg.Flags))
@@ -437,20 +488,6 @@ func (m *selectedMailbox) writeMessage(w *imapserver.FetchResponseWriter, msg *s
 	}
 	if options.RFC822Size {
 		w.WriteRFC822Size(msg.SizeBytes)
-	}
-
-	needBody := options.Envelope ||
-		options.BodyStructure != nil ||
-		len(options.BodySection) > 0 ||
-		len(options.BinarySection) > 0 ||
-		len(options.BinarySectionSize) > 0
-	if !needBody {
-		return w.Close()
-	}
-
-	raw, err := m.store.FetchBody(msg)
-	if err != nil {
-		return err
 	}
 
 	if options.Envelope {
@@ -489,42 +526,45 @@ func (m *selectedMailbox) writeMessage(w *imapserver.FetchResponseWriter, msg *s
 		n := imapserver.ExtractBinarySectionSize(bytes.NewReader(raw), bss)
 		w.WriteBinarySectionSize(bss, n)
 	}
-	return w.Close()
+	return nil
 }
 
 // storeFlags applies a STORE flag update to every message in numSet,
 // persisting it and queueing the change for the session's next poll.
-// When opts.UnchangedSince is non-zero, messages whose mod-sequence
-// has advanced past the floor are NOT updated and are returned to the
-// client via a MODIFIED response code (RFC 7162 §3.1.3).
+// When opts.UnchangedSince is non-zero, messages whose stored
+// mod-sequence has advanced past the floor are NOT updated and are
+// returned to the client via a MODIFIED response code (RFC 7162
+// §3.1.3). The comparison is the store's, not the snapshot's, which can
+// lag behind another connection's STORE.
 func (m *selectedMailbox) storeFlags(w *imapserver.FetchWriter, numSet imap.NumSet, sf *imap.StoreFlags, opts *imap.StoreOptions) error {
 	var (
 		serr     error
 		applied  []uint32 // sequence numbers that did get updated
 		modified imap.UIDSet
 	)
+	var unchangedSince uint64
+	if opts != nil {
+		unchangedSince = opts.UnchangedSince
+	}
 	m.forEach(numSet, func(seqNum uint32, msg *store.Message) {
 		if serr != nil {
 			return
 		}
-		if opts != nil && opts.UnchangedSince != 0 && msg.ModSeq > opts.UnchangedSince {
-			// The message has moved on since the client looked; do
-			// not apply the change. Report its UID under MODIFIED.
+		updated, err := m.applyFlags(msg, sf, unchangedSince)
+		if errors.Is(err, store.ErrModified) {
+			// The message has moved on since the client looked; the
+			// change was not applied. Report its UID under MODIFIED.
 			modified.AddNum(imap.UID(msg.UID))
 			return
 		}
-		newFlags, err := m.applyFlags(msg, sf)
 		if err != nil {
 			serr = err
 			return
 		}
-		msg.Flags = newFlags
-		// applyFlags bumped the message's modseq; refresh the local
-		// copy so the post-store FETCH echoes the new value.
-		if fresh, err := m.store.GetMessage(m.accountID, msg.ID); err == nil {
-			msg.ModSeq = fresh.ModSeq
-		}
-		m.tracker.QueueMessageFlags(seqNum, imap.UID(msg.UID), toIMAPFlags(newFlags), m.session)
+		// Take flags and modseq as stored, so the post-store FETCH
+		// echoes them and a concurrent change is not masked.
+		msg.Flags, msg.ModSeq = updated.Flags, updated.ModSeq
+		m.tracker.QueueMessageFlags(seqNum, imap.UID(msg.UID), toIMAPFlags(msg.Flags), m.session)
 		applied = append(applied, seqNum)
 	})
 	if serr != nil {
@@ -561,34 +601,37 @@ func appliedToNumSet(seqs []uint32) imap.NumSet {
 	return ss
 }
 
-// applyFlags persists one message's flag change and returns the
-// resulting flag set.
-func (m *selectedMailbox) applyFlags(msg *store.Message, sf *imap.StoreFlags) ([]string, error) {
+// applyFlags persists one message's flag change and returns the message
+// as stored.
+func (m *selectedMailbox) applyFlags(msg *store.Message, sf *imap.StoreFlags, unchangedSince uint64) (*store.Message, error) {
 	flags := flagsToStrings(sf.Flags)
+	var mutate func(cur []string) []string
 	switch sf.Op {
 	case imap.StoreFlagsSet:
-		if err := m.store.SetFlags(m.accountID, msg.ID, flags); err != nil {
-			return nil, err
-		}
-		return flags, nil
+		mutate = func([]string) []string { return flags }
 	case imap.StoreFlagsAdd:
-		if err := m.store.AddFlags(m.accountID, msg.ID, flags...); err != nil {
-			return nil, err
-		}
-		return unionFlags(msg.Flags, flags), nil
+		mutate = func(cur []string) []string { return unionFlags(cur, flags) }
 	case imap.StoreFlagsDel:
-		if err := m.store.RemoveFlags(m.accountID, msg.ID, flags...); err != nil {
-			return nil, err
-		}
-		return minusFlags(msg.Flags, flags), nil
+		mutate = func(cur []string) []string { return minusFlags(cur, flags) }
 	default:
 		return nil, &imap.Error{Type: imap.StatusResponseTypeBad, Text: "Unknown STORE operation"}
 	}
+	return m.store.UpdateFlags(m.accountID, msg.ID, unchangedSince, mutate)
 }
 
 // copy duplicates every message in numSet into dest. Each copy gets a
 // fresh UID (via store.NextUID inside CopyMessage); flags carry over.
+// The quota is checked for the whole set first, because a COPY that
+// fails must not leave part of the set in the destination.
 func (m *selectedMailbox) copy(numSet imap.NumSet, dest *store.Mailbox) (*imap.CopyData, error) {
+	var total int64
+	m.forEach(numSet, func(_ uint32, msg *store.Message) {
+		total += msg.SizeBytes
+	})
+	if err := m.store.CheckQuota(m.accountID, total); err != nil {
+		return nil, storeError(err)
+	}
+
 	var (
 		sourceUIDs, destUIDs imap.UIDSet
 		copyErr              error
@@ -606,7 +649,7 @@ func (m *selectedMailbox) copy(numSet imap.NumSet, dest *store.Mailbox) (*imap.C
 		destUIDs.AddNum(imap.UID(copied.UID))
 	})
 	if copyErr != nil {
-		return nil, copyErr
+		return nil, storeError(copyErr)
 	}
 	return &imap.CopyData{
 		UIDValidity: dest.UIDValidity,
@@ -627,11 +670,17 @@ func (m *selectedMailbox) move(w *imapserver.MoveWriter, numSet imap.NumSet, des
 		destUID uint32
 	}
 
+	// m.mu is held from the first store move to the last snapshot
+	// removal: a refresh in between would drop the moved messages itself
+	// and shift the indices recorded below.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	var (
 		movedMsgs []moved
 		moveErr   error
 	)
-	m.forEachWithIndex(numSet, func(idx int, msg *store.Message) {
+	m.forEachWithIndexLocked(numSet, func(idx int, msg *store.Message) {
 		if moveErr != nil {
 			return
 		}
@@ -662,8 +711,6 @@ func (m *selectedMailbox) move(w *imapserver.MoveWriter, numSet imap.NumSet, des
 	// Remove the moved messages from the snapshot, back-to-front so
 	// the higher sequence numbers stay valid as we drop the lower
 	// ones. Then emit one EXPUNGE per removed message.
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	for i := len(movedMsgs) - 1; i >= 0; i-- {
 		idx := movedMsgs[i].index
 		if idx < 0 || idx >= len(m.msgs) {
@@ -679,11 +726,10 @@ func (m *selectedMailbox) move(w *imapserver.MoveWriter, numSet imap.NumSet, des
 	return nil
 }
 
-// forEachWithIndex is forEach plus the slice index — move needs it so
-// it can drop the right entries from the snapshot.
-func (m *selectedMailbox) forEachWithIndex(numSet imap.NumSet, fn func(idx int, msg *store.Message)) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// forEachWithIndexLocked is forEach plus the slice index — move needs
+// it so it can drop the right entries from the snapshot. The caller
+// must hold m.mu.
+func (m *selectedMailbox) forEachWithIndexLocked(numSet imap.NumSet, fn func(idx int, msg *store.Message)) {
 	numSet = m.staticNumSetLocked(numSet)
 	for i := range m.msgs {
 		seqNum := uint32(i) + 1

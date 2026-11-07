@@ -174,7 +174,14 @@ func addressedToSelf(hdr mail.Header, selfs []string) bool {
 type Suppressor struct {
 	window time.Duration
 	mu     sync.Mutex
-	seen   map[suppressKey]time.Time
+	seen   map[suppressKey]suppressEntry
+}
+
+// suppressEntry is the last reply to one sender. Rules can have
+// different windows, so each entry remembers when it stops mattering.
+type suppressEntry struct {
+	at      time.Time
+	expires time.Time
 }
 
 type suppressKey struct {
@@ -185,27 +192,53 @@ type suppressKey struct {
 // NewSuppressor returns a suppressor that allows at most one auto-
 // reply per sender per window.
 func NewSuppressor(window time.Duration) *Suppressor {
-	return &Suppressor{window: window, seen: map[suppressKey]time.Time{}}
+	return &Suppressor{window: window, seen: map[suppressKey]suppressEntry{}}
+}
+
+// maxSuppressDays bounds a rule's window. A year is plenty, and it
+// keeps a silly value from overflowing time.Duration.
+const maxSuppressDays = 365
+
+// WindowOf converts a rule's SuppressDays to a window. Zero or less
+// means the rule has no opinion, and yields this suppressor's default.
+func (s *Suppressor) WindowOf(suppressDays int) time.Duration {
+	if s == nil || suppressDays <= 0 {
+		return s.defaultWindow()
+	}
+	return time.Duration(min(suppressDays, maxSuppressDays)) * 24 * time.Hour
+}
+
+func (s *Suppressor) defaultWindow() time.Duration {
+	if s == nil {
+		return 0
+	}
+	return s.window
 }
 
 // Allow reports whether we should send a reply to sender from account
-// right now; it also records the attempt, so a follow-up call within
-// the window returns false.
+// right now, using the suppressor's default window; it also records
+// the attempt, so a follow-up call within the window returns false.
 func (s *Suppressor) Allow(accountID uint64, sender string, now time.Time) bool {
+	return s.AllowWithin(accountID, sender, now, s.defaultWindow())
+}
+
+// AllowWithin is Allow with a window of the caller's choosing — a
+// rule's own SuppressDays, via WindowOf.
+func (s *Suppressor) AllowWithin(accountID uint64, sender string, now time.Time, window time.Duration) bool {
 	if s == nil {
 		return true
 	}
 	k := suppressKey{accountID: accountID, sender: strings.ToLower(strings.TrimSpace(sender))}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if prev, ok := s.seen[k]; ok && now.Sub(prev) < s.window {
+	if prev, ok := s.seen[k]; ok && now.Sub(prev.at) < window {
 		return false
 	}
-	s.seen[k] = now
+	s.seen[k] = suppressEntry{at: now, expires: now.Add(window)}
 	return true
 }
 
-// Sweep drops entries older than the window so the map does not grow
+// Sweep drops entries whose window has passed so the map does not grow
 // unboundedly. Safe to call from a background goroutine.
 func (s *Suppressor) Sweep(now time.Time) {
 	if s == nil {
@@ -213,8 +246,8 @@ func (s *Suppressor) Sweep(now time.Time) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for k, t := range s.seen {
-		if now.Sub(t) >= s.window {
+	for k, e := range s.seen {
+		if !now.Before(e.expires) {
 			delete(s.seen, k)
 		}
 	}

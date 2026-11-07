@@ -2,9 +2,11 @@ package av
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -36,9 +38,11 @@ type Feed struct {
 // Multiple feeds let one deploy combine breadth (MalwareBazaar's full
 // ~1M-entry dump) with curated IoC lists (ThreatFox SHA-256 IoCs).
 // Each feed is fetched independently; one feed's failure is logged but
-// does not abort the others — the sigdb is rewritten from whichever
-// feeds succeeded this tick. A tick that fetches zero hashes total
-// leaves the previous sigdb untouched (fail-open at the file layer).
+// does not abort the others — the sigdb is rewritten from the feeds
+// that succeeded this tick, plus the previous hashes of those that did
+// not, so an outage does not lift a feed's coverage. A tick that fetches
+// zero hashes total leaves the previous sigdb untouched (fail-open at
+// the file layer).
 //
 // Both plain-text feeds (one hash per line) and ZIP archives are
 // supported; ZIPs are decoded in memory and every entry inside is
@@ -146,17 +150,29 @@ func (u *Updater) Run(ctx context.Context) error {
 // share a host, so a parallel fan-out wouldn't help and would risk
 // being rate-limited); per-feed failures are logged and recorded in
 // the sigdb header but don't abort the run as long as at least one
-// feed contributed hashes.
+// feed contributed hashes. A failed feed keeps its hashes from the
+// previous sigdb until its next success.
 func (u *Updater) refresh(ctx context.Context) error {
 	results := make([]feedResult, 0, len(u.feeds))
 	totalUnique := make(map[[32]byte]string) // first-seen source wins on duplicates
+	fetched := 0
 	for _, f := range u.feeds {
 		hashes, err := u.fetchAndParse(ctx, f.URL)
 		if err != nil {
 			log.Printf("av-updater: feed %q (%s) failed: %v", f.Source, f.URL, err)
-			results = append(results, feedResult{feed: f, err: err})
+			kept, keepErr := previousHashes(u.out, f.Source)
+			if keepErr != nil {
+				log.Printf("av-updater: feed %q: read previous hashes: %v", f.Source, keepErr)
+			}
+			results = append(results, feedResult{feed: f, hashes: kept, err: err})
+			for h := range kept {
+				if _, seen := totalUnique[h]; !seen {
+					totalUnique[h] = f.Source
+				}
+			}
 			continue
 		}
+		fetched += len(hashes)
 		log.Printf("av-updater: feed %q (%s) → %d hashes", f.Source, f.URL, len(hashes))
 		results = append(results, feedResult{feed: f, hashes: hashes})
 		for h := range hashes {
@@ -165,7 +181,7 @@ func (u *Updater) refresh(ctx context.Context) error {
 			}
 		}
 	}
-	if len(totalUnique) == 0 {
+	if fetched == 0 {
 		return fmt.Errorf("no hashes fetched (all %d feeds failed or empty)", len(u.feeds))
 	}
 
@@ -211,7 +227,8 @@ func buildSigdb(totalUnique map[[32]byte]string, results []feedResult) []byte {
 	fmt.Fprintf(&buf, "# fetched %s\n", time.Now().UTC().Format(time.RFC3339))
 	for _, r := range results {
 		if r.err != nil {
-			fmt.Fprintf(&buf, "# feed %q (%s) FAILED: %v\n", r.feed.Source, r.feed.URL, r.err)
+			fmt.Fprintf(&buf, "# feed %q (%s) FAILED, kept %d previous hashes: %v\n",
+				r.feed.Source, r.feed.URL, len(r.hashes), r.err)
 			continue
 		}
 		fmt.Fprintf(&buf, "# feed %q (%s) — %d hashes\n", r.feed.Source, r.feed.URL, len(r.hashes))
@@ -237,11 +254,44 @@ func buildSigdb(totalUnique map[[32]byte]string, results []feedResult) []byte {
 
 // feedResult is the per-feed outcome bundle that drives the sigdb
 // header lines. Hoisted out of refresh() so buildSigdb's signature
-// reads as straightforward data-in, bytes-out.
+// reads as straightforward data-in, bytes-out. On a failed feed, hashes
+// holds what was kept from the previous sigdb.
 type feedResult struct {
 	feed   Feed
 	hashes map[[32]byte]struct{}
 	err    error
+}
+
+// previousHashes reads back the hashes the sigdb at path attributes to
+// source. A sigdb that does not exist yet simply has none. It reads the
+// file rather than holding feeds in memory, which keeps it working
+// across a restart and costs nothing until a feed actually fails.
+func previousHashes(path, source string) (map[[32]byte]struct{}, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	out := make(map[[32]byte]struct{})
+	suffix := []byte(":" + source)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		// `<64 hex>:<source>`; a source may itself contain colons.
+		if len(line) != 64+len(suffix) || !bytes.Equal(line[64:], suffix) {
+			continue
+		}
+		var key [32]byte
+		if _, err := hex.Decode(key[:], line[:64]); err != nil {
+			continue
+		}
+		out[key] = struct{}{}
+	}
+	return out, scanner.Err()
 }
 
 func (u *Updater) fetchAndParse(ctx context.Context, url string) (map[[32]byte]struct{}, error) {

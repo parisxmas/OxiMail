@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -44,7 +45,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	var req loginRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err)
 		return
 	}
 	// Normalise the address before the per-account limiter so case
@@ -58,9 +59,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "too many failed attempts, try again later")
 		return
 	}
-	acc, err := s.store.Authenticate(req.Address, req.Password)
+	acc, err := s.authenticate(req.Address, req.Password)
 	if err != nil {
-		// Authenticate collapses every failure to ErrAuthFailed, so we
+		// authenticate collapses every failure to ErrAuthFailed, so we
 		// cannot — and should not — tell the client which part was wrong.
 		s.limiter.RecordFailure(ip)
 		if acctKey != "" {
@@ -91,6 +92,27 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, loginResponse{Token: token, Address: acc.Address})
 }
 
+// authenticate checks a login. It is store.Authenticate with one
+// difference: exactly one bcrypt comparison runs on every path, so
+// response time does not reveal whether an account exists or is
+// disabled. It looks the account up itself rather than calling
+// Authenticate so that holds whatever Authenticate does on those paths.
+func (s *Server) authenticate(address, password string) (*store.Account, error) {
+	acc, err := s.store.GetAccount(address)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+	known := err == nil && acc.Active
+	hash := s.dummyHash
+	if known {
+		hash = acc.PasswordHash
+	}
+	if !store.VerifyPassword(hash, password) || !known {
+		return nil, store.ErrAuthFailed
+	}
+	return acc, nil
+}
+
 // MinPasswordLength is the minimum length we accept for a webmail
 // password change. 8 is the policy-makers' lowest-common-denominator
 // — short enough not to wall normal users off, long enough to add a
@@ -113,7 +135,7 @@ type changePasswordRequest struct {
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, acc *store.Account) {
 	var req changePasswordRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err)
 		return
 	}
 	acctKey := strings.ToLower(strings.TrimSpace(acc.Address))

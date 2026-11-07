@@ -99,8 +99,10 @@ export class ApiService {
     return this.http.get<MessageSummary[]>(url);
   }
 
-  message(id: number) {
-    return this.http.get<MessageDetail>(`/api/messages/${id}`);
+  // message fetches one message. Its HTML comes without remote images
+  // unless images is set.
+  message(id: number, images = false) {
+    return this.http.get<MessageDetail>(`/api/messages/${id}${images ? '?images=1' : ''}`);
   }
 
   // attachment fetches an attachment as a Blob; the caller turns it

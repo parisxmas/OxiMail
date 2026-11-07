@@ -39,7 +39,7 @@ func (s *Server) handleGetSieve(w http.ResponseWriter, _ *http.Request, acc *sto
 func (s *Server) handlePutSieve(w http.ResponseWriter, r *http.Request, acc *store.Account) {
 	var req sieveRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err)
 		return
 	}
 	if _, err := sieve.Parse(req.Source); err != nil {

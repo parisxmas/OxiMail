@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // Domain is a hosted mail domain.
@@ -141,6 +142,55 @@ func (s *Store) SetAccountDisplayName(accountID uint64, displayName string) erro
 	return nil
 }
 
+// RestoreAccountState puts back the account fields CreateAccount does
+// not take. Used by `oximailctl restore`.
+func (s *Store) RestoreAccountState(accountID uint64, displayName string, active bool) error {
+	doc, err := s.db.FindAndModify(
+		CollAccounts,
+		map[string]any{"_id": accountID},
+		map[string]any{"$set": map[string]any{"display_name": displayName, "active": active}},
+	)
+	if err != nil {
+		return fmt.Errorf("store: restore state of account %d: %w", accountID, err)
+	}
+	if len(doc) == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// RecountUsedBytes sets the account's used_bytes to the total size of
+// its message documents and returns that total. Each document counts in
+// full, matching what AppendMessage and CopyMessage add.
+func (s *Store) RecountUsedBytes(accountID uint64) (int64, error) {
+	boxes, err := s.ListMailboxes(accountID)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for i := range boxes {
+		msgs, err := s.ListMessages(accountID, boxes[i].ID)
+		if err != nil {
+			return 0, err
+		}
+		for j := range msgs {
+			total += msgs[j].SizeBytes
+		}
+	}
+	doc, err := s.db.FindAndModify(
+		CollAccounts,
+		map[string]any{"_id": accountID},
+		map[string]any{"$set": map[string]any{"used_bytes": total}},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("store: recount used bytes of account %d: %w", accountID, err)
+	}
+	if len(doc) == 0 {
+		return 0, ErrNotFound
+	}
+	return total, nil
+}
+
 // ListDomains returns every hosted domain.
 func (s *Store) ListDomains() ([]Domain, error) {
 	rows, err := s.db.Find(CollDomains, map[string]any{}, nil)
@@ -242,16 +292,25 @@ func (s *Store) GetAccount(address string) (*Account, error) {
 func (s *Store) Authenticate(address, password string) (*Account, error) {
 	acc, err := s.GetAccount(address)
 	if errors.Is(err, ErrNotFound) {
+		// The same bcrypt as a real attempt, so the time taken does not
+		// say which addresses exist.
+		VerifyPassword(timingHash(), password)
 		return nil, ErrAuthFailed
 	}
 	if err != nil {
 		return nil, err
 	}
-	if !acc.Active || !VerifyPassword(acc.PasswordHash, password) {
+	if !VerifyPassword(acc.PasswordHash, password) || !acc.Active {
 		return nil, ErrAuthFailed
 	}
 	return acc, nil
 }
+
+// timingHash is a hash nobody's password matches, made once.
+var timingHash = sync.OnceValue(func() string {
+	h, _ := HashPassword("oximail-timing-dummy")
+	return h
+})
 
 // GetAccountByID looks an account up by its OxiDB id.
 func (s *Store) GetAccountByID(id uint64) (*Account, error) {

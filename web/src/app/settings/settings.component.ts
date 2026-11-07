@@ -291,10 +291,13 @@ import { AccountProfile, ApiService, SieveScript, VacationRule } from '../api.se
             Sieve scripts run at delivery time. The supported subset covers
             <code>if</code> / <code>elsif</code> / <code>else</code>, the
             <code>header</code>, <code>address</code>, <code>size</code>,
-            <code>exists</code>, <code>allof</code>, <code>anyof</code>, and
-            <code>not</code> tests, and the <code>keep</code>,
-            <code>fileinto</code>, <code>discard</code>, and
-            <code>stop</code> actions.
+            <code>exists</code>, <code>allof</code>, <code>anyof</code>,
+            <code>not</code>, <code>true</code>, and <code>false</code> tests,
+            and the <code>keep</code>, <code>fileinto</code> (with
+            <code>:create</code>), <code>discard</code>, and
+            <code>stop</code> actions. Anything else, such as
+            <code>redirect</code>, <code>vacation</code>, or
+            <code>fileinto :flags</code>, is refused when you save.
           </p>
           <pre class="example">{{ sieveExample }}</pre>
 
@@ -576,9 +579,10 @@ export class SettingsComponent {
     'require ["fileinto"];\n\n' +
     'if header :contains "Subject" "report" {\n' +
     '    fileinto "Reports";\n' +
-    '}\n\n' +
-    'if header :contains "From" "spam@" {\n' +
+    '} elsif header :contains "From" "spam@" {\n' +
     '    discard;\n' +
+    '} else {\n' +
+    '    keep;\n' +
     '}';
 
   // Local form state.

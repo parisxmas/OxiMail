@@ -13,12 +13,15 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	netsmtp "net/smtp"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	gosmtp "github.com/emersion/go-smtp"
 
 	"github.com/parisxmas/OxiMail/internal/arc"
 	"github.com/parisxmas/OxiMail/internal/itest"
@@ -435,17 +438,12 @@ func TestInboundSMTPAliasForwarding(t *testing.T) {
 		}
 	})
 
-	t.Run("a bounce to the SRS address routes to the original sender", func(t *testing.T) {
-		// Build the SRS address that the previous subtest's forward
-		// would have been signed with. The MX must accept it (decode
-		// alice@partners.test) and queue it back out to the same
-		// remote — we wire that by adding an alias for the original
-		// address to a remote, so the message has somewhere to go.
+	t.Run("a bounce to the SRS address goes back to the remote sender", func(t *testing.T) {
+		// The forward above went out with a sender rewritten from
+		// alice@partners.test. The remote MX now bounces it to that SRS
+		// address: the MX must decode it and relay the bounce back to
+		// alice, keeping the null sender so it cannot bounce again.
 		original := "alice@partners.test"
-		if _, err := st.CreateAlias("alice@oximail.test", []string{"alice@partners.test"}); err != nil {
-			// Not strictly needed, but a no-op if it already exists.
-			_ = err
-		}
 		// Encode the SRS address with the same secret the server uses.
 		// (We can't reach into the server's MX directly, so we go
 		// through the package.)
@@ -458,19 +456,240 @@ func TestInboundSMTPAliasForwarding(t *testing.T) {
 			"Subject: bounce: aliased\r\n" +
 			"\r\n" +
 			"the previous message could not be delivered\r\n"
+		before, err := st.ListDueOutbound(50)
+		if err != nil {
+			t.Fatalf("list outbound: %v", err)
+		}
 		// A bounce uses a null envelope sender ("<>").
 		if err := netsmtp.SendMail(addr, nil, "", []string{srsAddr}, []byte(msg)); err != nil {
-			// alice@partners.test is not local and not aliased here,
-			// so the MX should reject this — proving SRS decode at
-			// least worked. The decoded address routed through the
-			// usual "no such user" path.
-			if !strings.Contains(err.Error(), "550") {
-				t.Errorf("bounce to unaliased SRS address: error = %v, want 550", err)
-			}
-		} else {
-			t.Error("bounce to unaliased SRS address succeeded; want 550")
+			t.Fatalf("bounce to the SRS address: %v", err)
+		}
+		after, err := st.ListDueOutbound(50)
+		if err != nil {
+			t.Fatalf("list outbound: %v", err)
+		}
+		if len(after) != len(before)+1 {
+			t.Fatalf("queue went from %d to %d, want one more", len(before), len(after))
+		}
+		q := after[len(after)-1]
+		if q.From != "" {
+			t.Errorf("relayed bounce sender = %q, want null", q.From)
+		}
+		if len(q.Recipients) != 1 || q.Recipients[0] != original {
+			t.Errorf("relayed bounce recipients = %v, want [%s]", q.Recipients, original)
 		}
 	})
+
+	t.Run("a non-null sender to the SRS address is rewritten again", func(t *testing.T) {
+		srsAddr, err := srs.Encode(secret, "alice@partners.test", "oximail.test")
+		if err != nil {
+			t.Fatalf("srs.Encode: %v", err)
+		}
+		msg := "From: bob@elsewhere.test\r\nTo: " + srsAddr + "\r\nSubject: auto\r\n\r\naway\r\n"
+		if err := netsmtp.SendMail(addr, nil, "bob@elsewhere.test", []string{srsAddr}, []byte(msg)); err != nil {
+			t.Fatalf("SendMail: %v", err)
+		}
+		queued, err := st.ListDueOutbound(50)
+		if err != nil {
+			t.Fatalf("list outbound: %v", err)
+		}
+		q := queued[len(queued)-1]
+		if !strings.HasPrefix(q.From, "SRS0=") {
+			t.Errorf("sender = %q, want an SRS rewrite", q.From)
+		}
+	})
+
+	t.Run("a tampered SRS address does not relay", func(t *testing.T) {
+		srsAddr, err := srs.Encode(secret, "alice@partners.test", "oximail.test")
+		if err != nil {
+			t.Fatalf("srs.Encode: %v", err)
+		}
+		forged := strings.Replace(srsAddr, "partners.test", "victim.test", 1)
+		before, _ := st.ListDueOutbound(50)
+		err = netsmtp.SendMail(addr, nil, "", []string{forged}, []byte("From: x@y.test\r\n\r\nhi\r\n"))
+		if err == nil || !strings.Contains(err.Error(), "550") {
+			t.Errorf("tampered SRS address: error = %v, want 550", err)
+		}
+		after, _ := st.ListDueOutbound(50)
+		if len(after) != len(before) {
+			t.Errorf("tampered SRS address reached the queue: %d to %d", len(before), len(after))
+		}
+	})
+
+	t.Run("an SRS address decoding to a missing local user is refused", func(t *testing.T) {
+		for _, domain := range []string{"hosted.test", "oximail.test"} {
+			if domain == "hosted.test" {
+				if _, err := st.CreateDomain(domain); err != nil {
+					t.Fatalf("create domain: %v", err)
+				}
+			}
+			srsAddr, err := srs.Encode(secret, "gone@"+domain, "oximail.test")
+			if err != nil {
+				t.Fatalf("srs.Encode: %v", err)
+			}
+			err = netsmtp.SendMail(addr, nil, "", []string{srsAddr}, []byte("From: x@y.test\r\n\r\nhi\r\n"))
+			if err == nil || !strings.Contains(err.Error(), "550") {
+				t.Errorf("%s: error = %v, want 550", domain, err)
+			}
+		}
+	})
+}
+
+// TestInboundSMTPStamps covers the headers added on the way in: every
+// delivered copy gains Received and Authentication-Results, and a
+// sender cannot plant an Authentication-Results in this server's name.
+func TestInboundSMTPStamps(t *testing.T) {
+	st := openStore(t)
+	acc, err := st.CreateAccount("rcpt@oximail.test", "x", 0)
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	addr := startSMTP(t, st)
+
+	msg := "Authentication-Results: oximail.test; dmarc=pass header.from=bank.test\r\n" +
+		"Authentication-Results:\r\n oximail.test; dkim=pass\r\n" +
+		"Authentication-Results: other.test; spf=pass\r\n" +
+		"From: a@elsewhere.test\r\nSubject: stamped\r\n\r\nbody\r\n"
+	if err := netsmtp.SendMail(addr, nil, "a@elsewhere.test", []string{"rcpt@oximail.test"}, []byte(msg)); err != nil {
+		t.Fatalf("SendMail: %v", err)
+	}
+	inbox, err := st.GetMailboxByName(acc.ID, "INBOX")
+	if err != nil {
+		t.Fatalf("get INBOX: %v", err)
+	}
+	msgs, err := st.ListMessages(acc.ID, inbox.ID)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("list INBOX: %d messages, %v", len(msgs), err)
+	}
+	body, err := st.FetchBody(&msgs[0])
+	if err != nil {
+		t.Fatalf("fetch body: %v", err)
+	}
+	got := string(body)
+	if !strings.HasPrefix(got, "Received: from localhost ([127.0.0.1])\r\n\tby oximail.test with ESMTP;\r\n\t") {
+		t.Errorf("no Received header on top:\n%s", got)
+	}
+	if !strings.Contains(got, "Authentication-Results: oximail.test;\r\n\tnone\r\n") {
+		t.Errorf("no Authentication-Results of ours:\n%s", got)
+	}
+	if strings.Contains(got, "bank.test") || strings.Contains(got, "dkim=pass") {
+		t.Errorf("forged Authentication-Results survived:\n%s", got)
+	}
+	if !strings.Contains(got, "Authentication-Results: other.test; spf=pass") {
+		t.Errorf("another server's Authentication-Results was removed:\n%s", got)
+	}
+	if !strings.HasSuffix(got, "Subject: stamped\r\n\r\nbody\r\n") {
+		t.Errorf("message damaged:\n%s", got)
+	}
+}
+
+// TestInboundSMTPQuarantineBeatsSieve: a quarantined message stays in
+// Junk whatever a fileinto says. The null sender and unparseable From
+// reach the quarantine verdict with no DNS involved.
+func TestInboundSMTPQuarantineBeatsSieve(t *testing.T) {
+	st := openStore(t)
+	acc, err := st.CreateAccount("rules@oximail.test", "h", 0)
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if err := st.EnsureDefaultMailboxes(acc.ID); err != nil {
+		t.Fatalf("ensure mailboxes: %v", err)
+	}
+	if _, err := st.CreateMailbox(acc.ID, "Reports"); err != nil {
+		t.Fatalf("create Reports: %v", err)
+	}
+	if _, err := st.SetSieveScript(acc.ID, `require ["fileinto"]; fileinto "Reports";`); err != nil {
+		t.Fatalf("set sieve: %v", err)
+	}
+	addr := startSMTPWithPipeline(t, st, spam.New([]string{}, 0))
+
+	msg := "From: <<not an address\r\nTo: rules@oximail.test\r\nSubject: q\r\n\r\nbody\r\n"
+	if err := netsmtp.SendMail(addr, nil, "", []string{"rules@oximail.test"}, []byte(msg)); err != nil {
+		t.Fatalf("SendMail: %v", err)
+	}
+	reports, _ := st.GetMailboxByName(acc.ID, "Reports")
+	junk, _ := st.GetMailboxByName(acc.ID, "Junk")
+	if msgs, _ := st.ListMessages(acc.ID, reports.ID); len(msgs) != 0 {
+		t.Errorf("fileinto pulled a quarantined message into Reports")
+	}
+	if msgs, _ := st.ListMessages(acc.ID, junk.ID); len(msgs) != 1 {
+		t.Errorf("Junk has %d messages, want the quarantined one", len(msgs))
+	}
+}
+
+func TestInboundSMTPDiscardStaysSilent(t *testing.T) {
+	st := openStore(t)
+	acc, err := st.CreateAccount("ooo@oximail.test", "h", 0)
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if _, err := st.SetVacation(acc.ID, true, "Away", "Back on Friday.", 7); err != nil {
+		t.Fatalf("set vacation: %v", err)
+	}
+	if _, err := st.SetSieveScript(acc.ID, `discard;`); err != nil {
+		t.Fatalf("set sieve: %v", err)
+	}
+	addr := startSMTP(t, st)
+
+	msg := "From: alice@partners.test\r\nTo: ooo@oximail.test\r\nSubject: hi\r\n\r\nbody\r\n"
+	if err := netsmtp.SendMail(addr, nil, "alice@partners.test", []string{"ooo@oximail.test"}, []byte(msg)); err != nil {
+		t.Fatalf("SendMail: %v", err)
+	}
+	queued, err := st.ListDueOutbound(10)
+	if err != nil {
+		t.Fatalf("list outbound: %v", err)
+	}
+	if len(queued) != 0 {
+		t.Errorf("vacation answered a message Sieve discarded: %+v", queued)
+	}
+}
+
+// The IP checks run at MAIL FROM: a client over the rate limit is told
+// to come back with a 451 before it can send a body. No store is
+// needed, which is the point: nothing past MAIL is reached.
+func TestRateLimitAtMailFrom(t *testing.T) {
+	addr := startSMTPWithPipeline(t, nil, spam.New([]string{}, 0))
+
+	c, err := gosmtp.Dial(addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	for i := 0; ; i++ {
+		err := c.Mail("a@elsewhere.test", nil)
+		if err == nil {
+			if i > 1000 {
+				t.Fatal("no rate limit after 1000 transactions")
+			}
+			if err := c.Reset(); err != nil {
+				t.Fatalf("reset: %v", err)
+			}
+			continue
+		}
+		var smtpErr *gosmtp.SMTPError
+		if !errors.As(err, &smtpErr) {
+			t.Fatalf("MAIL #%d: %v", i, err)
+		}
+		if smtpErr.Code != 451 || smtpErr.EnhancedCode != (gosmtp.EnhancedCode{4, 7, 1}) {
+			t.Fatalf("over the limit: %d %v, want 451 4.7.1", smtpErr.Code, smtpErr.EnhancedCode)
+		}
+		return
+	}
+}
+
+// openStore boots a private OxiDB for one test.
+func openStore(t *testing.T) *store.Store {
+	t.Helper()
+	host, port := itest.StartOxiDB(t, itest.LazySync())
+	st, err := store.Open(host, port)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := store.EnsureSchema(st); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	return st
 }
 
 // startSMTP launches the inbound SMTP server on a free port, wired to st
@@ -485,8 +704,20 @@ func startSMTP(t *testing.T, st *store.Store) string {
 // test, which configures SRS-based remote relay.
 func startSMTPWithForwarder(t *testing.T, st *store.Store, fwd smtp.ForwarderConfig) string {
 	t.Helper()
+	return startSMTPServer(t, st, spam.Permissive(), fwd)
+}
+
+// startSMTPWithPipeline is the variant for tests that need a real spam
+// pipeline.
+func startSMTPWithPipeline(t *testing.T, st *store.Store, sp *spam.Pipeline) string {
+	t.Helper()
+	return startSMTPServer(t, st, sp, smtp.ForwarderConfig{})
+}
+
+func startSMTPServer(t *testing.T, st *store.Store, sp *spam.Pipeline, fwd smtp.ForwarderConfig) string {
+	t.Helper()
 	addr := fmt.Sprintf("127.0.0.1:%d", itest.FreePort(t))
-	srv := smtp.New(addr, "oximail.test", st, spam.Permissive(), nil, nil, fwd)
+	srv := smtp.New(addr, "oximail.test", st, sp, nil, nil, fwd)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)

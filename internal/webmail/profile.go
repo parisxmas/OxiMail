@@ -44,7 +44,7 @@ func (s *Server) handleGetProfile(w http.ResponseWriter, _ *http.Request, acc *s
 func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request, acc *store.Account) {
 	var req profileRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeBodyError(w, err)
 		return
 	}
 	name, err := normaliseDisplayName(req.DisplayName)

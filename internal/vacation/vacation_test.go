@@ -96,3 +96,61 @@ func TestSuppressorRateLimitsPerSender(t *testing.T) {
 		t.Error("after window elapsed, reply blocked")
 	}
 }
+
+func TestSuppressorHonoursPerRuleWindow(t *testing.T) {
+	s := NewSuppressor(7 * 24 * time.Hour)
+	now := time.Unix(1700000000, 0)
+	oneDay := s.WindowOf(1)
+	if !s.AllowWithin(1, "alice@partners.test", now, oneDay) {
+		t.Fatal("first reply blocked")
+	}
+	if s.AllowWithin(1, "alice@partners.test", now.Add(23*time.Hour), oneDay) {
+		t.Error("reply inside a one-day window allowed")
+	}
+	if !s.AllowWithin(1, "alice@partners.test", now.Add(25*time.Hour), oneDay) {
+		t.Error("reply after a one-day window blocked")
+	}
+
+	month := s.WindowOf(30)
+	if !s.AllowWithin(2, "alice@partners.test", now, month) {
+		t.Fatal("first reply blocked")
+	}
+	if s.AllowWithin(2, "alice@partners.test", now.Add(20*24*time.Hour), month) {
+		t.Error("reply inside a thirty-day window allowed")
+	}
+}
+
+func TestWindowOf(t *testing.T) {
+	s := NewSuppressor(7 * 24 * time.Hour)
+	for days, want := range map[int]time.Duration{
+		0:       7 * 24 * time.Hour,
+		-3:      7 * 24 * time.Hour,
+		2:       2 * 24 * time.Hour,
+		1 << 40: 365 * 24 * time.Hour,
+	} {
+		if got := s.WindowOf(days); got != want {
+			t.Errorf("WindowOf(%d) = %v, want %v", days, got, want)
+		}
+	}
+}
+
+// Sweep must go by each entry's own window: one longer than the default
+// has to survive past the default, or the reply limit silently resets.
+func TestSweepKeepsLongWindows(t *testing.T) {
+	s := NewSuppressor(7 * 24 * time.Hour)
+	now := time.Unix(1700000000, 0)
+	s.AllowWithin(1, "long@partners.test", now, s.WindowOf(30))
+	s.AllowWithin(1, "short@partners.test", now, s.WindowOf(1))
+
+	s.Sweep(now.Add(10 * 24 * time.Hour))
+	if len(s.seen) != 1 {
+		t.Fatalf("after sweep: %d entries, want 1", len(s.seen))
+	}
+	if s.AllowWithin(1, "long@partners.test", now.Add(10*24*time.Hour), s.WindowOf(30)) {
+		t.Error("sweep forgot an entry still inside its window")
+	}
+	s.Sweep(now.Add(31 * 24 * time.Hour))
+	if len(s.seen) != 0 {
+		t.Errorf("expired entry survived the sweep: %d left", len(s.seen))
+	}
+}

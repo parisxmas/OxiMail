@@ -12,7 +12,7 @@ var (
 	SMTPMessages = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "oximail_smtp_messages_total",
-			Help: "Inbound SMTP messages by verdict (accept | greylist | reject).",
+			Help: "Inbound SMTP messages by verdict (accept | greylist | ratelimit | quarantine | reject).",
 		},
 		[]string{"verdict"},
 	)
@@ -29,8 +29,9 @@ var (
 		[]string{"result"},
 	)
 
-	// QueueDue is the number of outbound queue messages that were due at
-	// the last scan — i.e. ready for a delivery attempt.
+	// QueueDue is the number of outbound queue messages ready for a
+	// delivery attempt, counted at the start and end of each queue run
+	// and periodically during a long one.
 	QueueDue = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "oximail_queue_due_messages",
@@ -54,7 +55,7 @@ func init() {
 	// up in /metrics at 0 from the start. Prometheus client_golang
 	// omits a CounterVec series until it has been touched, which makes
 	// rate() return NaN until the first event — dashboards prefer 0.
-	for _, v := range []string{"accept", "greylist", "reject"} {
+	for _, v := range []string{"accept", "greylist", "ratelimit", "quarantine", "reject"} {
 		SMTPMessages.WithLabelValues(v).Add(0)
 	}
 	for _, r := range []string{"delivered", "deferred", "bounced"} {

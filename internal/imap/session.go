@@ -65,6 +65,19 @@ func noSuchMailbox() error {
 	}
 }
 
+// storeError turns a store sentinel the client should see into its IMAP
+// response; anything else passes through unchanged.
+func storeError(err error) error {
+	if errors.Is(err, store.ErrQuotaExceeded) {
+		return &imap.Error{
+			Type: imap.StatusResponseTypeNo,
+			Code: imap.ResponseCodeOverQuota,
+			Text: "Mailbox quota exceeded",
+		}
+	}
+	return err
+}
+
 func notSelected() error {
 	return &imap.Error{Type: imap.StatusResponseTypeBad, Text: "No mailbox selected"}
 }
@@ -429,7 +442,7 @@ func (s *session) Append(name string, r imap.LiteralReader, options *imap.Append
 
 	msg, err := s.store.AppendMessage(s.account.ID, mb.ID, in)
 	if err != nil {
-		return nil, err
+		return nil, storeError(err)
 	}
 
 	// If the client has this very mailbox selected, fold the new message

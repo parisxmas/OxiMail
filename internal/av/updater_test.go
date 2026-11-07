@@ -441,3 +441,103 @@ func bytesSplit(s, sep string) []string {
 		s = s[i+len(sep):]
 	}
 }
+
+// A feed that fails keeps the hashes it had: an outage on one feed must
+// not lift its coverage until the next success. It holds across any
+// number of failed ticks, and a success replaces them.
+func TestUpdaterKeepsFailedFeedHashes(t *testing.T) {
+	hashA := hashOf("payload-from-a")
+	hashB := hashOf("payload-from-b")
+	hashB2 := hashOf("newer-payload-from-b")
+
+	var failB atomic.Bool
+	bodyB := atomic.Value{}
+	bodyB.Store(hashB + "\n")
+	srvB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if failB.Load() {
+			http.Error(w, "boom", http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(bodyB.Load().(string)))
+	}))
+	defer srvB.Close()
+	feedA := newFakeFeed(t, hashA+"\n")
+
+	out := filepath.Join(t.TempDir(), "auto.sigdb")
+	c, _ := New(out)
+	u := NewUpdater(c, []Feed{
+		{URL: feedA.server.URL, Source: "FeedA"},
+		{URL: srvB.URL, Source: "https://feed-b.test:8443/list"}, // a URL-shaped source, colons included
+	}, out, time.Hour)
+	ctx := context.Background()
+	if err := u.refresh(ctx); err != nil {
+		t.Fatalf("first refresh: %v", err)
+	}
+
+	failB.Store(true)
+	for i := 0; i < 2; i++ {
+		if err := u.refresh(ctx); err != nil {
+			t.Fatalf("refresh with B down: %v", err)
+		}
+		if v, _ := c.Scan(ctx, []byte("payload-from-b")); v.OK {
+			t.Fatalf("tick %d: failed feed's hash was dropped", i)
+		}
+	}
+	written, _ := os.ReadFile(out)
+	if !contains(string(written), "kept 1 previous hashes") {
+		t.Errorf("sigdb header should record what was kept:\n%s", written)
+	}
+
+	// A fresh Updater (a restart) keeps them too: the state is the file.
+	u2 := NewUpdater(c, u.feeds, out, time.Hour)
+	if err := u2.refresh(ctx); err != nil {
+		t.Fatalf("refresh after restart: %v", err)
+	}
+	if v, _ := c.Scan(ctx, []byte("payload-from-b")); v.OK {
+		t.Fatal("kept hash did not survive a restart")
+	}
+
+	// The feed's next success is the new truth for that feed.
+	failB.Store(false)
+	bodyB.Store(hashB2 + "\n")
+	if err := u.refresh(ctx); err != nil {
+		t.Fatalf("recovery refresh: %v", err)
+	}
+	if v, _ := c.Scan(ctx, []byte("payload-from-b")); !v.OK {
+		t.Error("hash the feed withdrew is still active after its recovery")
+	}
+	if v, _ := c.Scan(ctx, []byte("newer-payload-from-b")); v.OK {
+		t.Error("new hash from the recovered feed not active")
+	}
+}
+
+// Kept hashes must not make an all-failed tick look like a success.
+func TestUpdaterAllFailedStillFailsWithKeptHashes(t *testing.T) {
+	var fail atomic.Bool
+	hash := hashOf("payload")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if fail.Load() {
+			http.Error(w, "boom", http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(hash + "\n"))
+	}))
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "auto.sigdb")
+	c, _ := New(out)
+	u := NewUpdater(c, []Feed{{URL: srv.URL, Source: "Only"}}, out, time.Hour)
+	if err := u.refresh(context.Background()); err != nil {
+		t.Fatalf("first refresh: %v", err)
+	}
+	before, _ := os.ReadFile(out)
+
+	fail.Store(true)
+	if err := u.refresh(context.Background()); err == nil {
+		t.Fatal("refresh with every feed down succeeded")
+	}
+	after, _ := os.ReadFile(out)
+	if !bytes.Equal(before, after) {
+		t.Error("an all-failed tick rewrote the sigdb")
+	}
+}

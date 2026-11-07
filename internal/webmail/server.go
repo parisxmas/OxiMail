@@ -74,8 +74,11 @@ type Server struct {
 	// av is the outbound-attachment scanner. nil = AV disabled
 	// (the package's null-object shape); the handler skips the
 	// scan and lets the message through.
-	av   *av.Client
-	stop sync.Once
+	av *av.Client
+	// dummyHash is verified against when the account is unknown or
+	// disabled, so that a login costs one bcrypt either way.
+	dummyHash string
+	stop      sync.Once
 }
 
 // SetAV plumbs an antivirus client into the server. Called once
@@ -108,6 +111,11 @@ func New(addr, staticDir string, st *store.Store, tlsConfig *tls.Config, mtasts 
 		secure:         tlsConfig != nil,
 		mtasts:         mtasts,
 	}
+	dummyHash, err := store.HashPassword("oximail-login-timing-dummy")
+	if err != nil {
+		log.Printf("webmail: hash dummy password: %v", err)
+	}
+	s.dummyHash = dummyHash
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/logout", s.auth(s.handleLogout))
@@ -157,7 +165,7 @@ func New(addr, staticDir string, st *store.Store, tlsConfig *tls.Config, mtasts 
 
 	s.srv = &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           securityHeaders(limitBody(mux)),
 		ReadHeaderTimeout: readHeaderTimeout,
 		TLSConfig:         tlsConfig,
 	}
@@ -166,9 +174,11 @@ func New(addr, staticDir string, st *store.Store, tlsConfig *tls.Config, mtasts 
 
 // Start serves until `ctx` is cancelled, then shuts the server down.
 func (s *Server) Start(ctx context.Context) error {
+	// Read here: the server changes its own TLSConfig once it is serving.
+	useTLS := s.srv.TLSConfig != nil
 	errc := make(chan error, 1)
 	go func() {
-		if s.srv.TLSConfig != nil {
+		if useTLS {
 			// The certificate comes from TLSConfig, so the file
 			// arguments are empty.
 			errc <- s.srv.ListenAndServeTLS("", "")
@@ -180,7 +190,7 @@ func (s *Server) Start(ctx context.Context) error {
 	go s.limiterSweepLoop(ctx)
 
 	scheme := "http"
-	if s.srv.TLSConfig != nil {
+	if useTLS {
 		scheme = "https"
 	}
 	log.Printf("webmail: listening on %s (%s)", s.addr, scheme)
